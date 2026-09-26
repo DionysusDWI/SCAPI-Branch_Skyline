@@ -71,27 +71,27 @@ namespace Game {
 
         public const int DataShift = 14;
 
-        // [高度实验] shaft（每列元数据）由 int 扩成 long：三个高度字段各要 10 位，
-        // 加上温度/湿度各 4 位 = 38 位，塞不进 32 位。旧布局（8/4/4/8/8）放不下 1024。
-        public const long TopHeightMask = 1023L;              // bits 0..9
+        // [负高度实验] shaft（每列元数据）在 long 里重新排：三个高度字段各 11 位（存 height - MinHeight，
+        // 于是 -128 也能表示），温度/湿度各 4 位 → 11+4+4+11+11 = 41 位，仍放得进 64 位。
+        public const long TopHeightMask = 0x7FFL;             // bits 0..10
 
         public const int TopHeightShift = 0;
 
-        public const long TemperatureMask = 15360L;           // bits 10..13
+        public const long TemperatureMask = 0xFL << 11;       // bits 11..14
 
-        public const int TemperatureShift = 10;
+        public const int TemperatureShift = 11;
 
-        public const long HumidityMask = 245760L;             // bits 14..17
+        public const long HumidityMask = 0xFL << 15;          // bits 15..18
 
-        public const int HumidityShift = 14;
+        public const int HumidityShift = 15;
 
-        public const long BottomHeightMask = 268173312L;      // bits 18..27
+        public const long BottomHeightMask = 0x7FFL << 19;    // bits 19..29
 
-        public const int BottomHeightShift = 18;
+        public const int BottomHeightShift = 19;
 
-        public const long SunlightHeightMask = 274877906944L; // bits 28..37
+        public const long SunlightHeightMask = 0x7FFL << 30;  // bits 30..40
 
-        public const int SunlightHeightShift = 28;
+        public const int SunlightHeightShift = 30;
 
         public ChunksStorage m_allChunks;
 
@@ -167,11 +167,11 @@ namespace Game {
 
         public virtual TerrainChunk GetChunkAtCell(Point2 p) => GetChunkAtCoords(p.X >> TerrainChunk.SizeBits, p.Y >> TerrainChunk.SizeBits);
 
-        public virtual TerrainChunk GetChunkAtCell(int x, int y, int z) => y is >= 0 and < TerrainChunk.Height
+        public virtual TerrainChunk GetChunkAtCell(int x, int y, int z) => y is >= TerrainChunk.MinHeight and <= TerrainChunk.HeightMinusOne
             ? m_allChunks.Get(x >> TerrainChunk.SizeBits, z >> TerrainChunk.SizeBits)
             : null;
 
-        public virtual TerrainChunk GetChunkAtCell(Point3 p) => p.Y is >= 0 and < TerrainChunk.Height
+        public virtual TerrainChunk GetChunkAtCell(Point3 p) => p.Y is >= TerrainChunk.MinHeight and <= TerrainChunk.HeightMinusOne
             ? m_allChunks.Get(p.X >> TerrainChunk.SizeBits, p.Z >> TerrainChunk.SizeBits)
             : null;
 
@@ -219,9 +219,9 @@ namespace Game {
 
         public static Point3 ToCell(Vector3 p) => new((int)MathF.Floor(p.X), (int)MathF.Floor(p.Y), (int)MathF.Floor(p.Z));
 
-        public virtual bool IsCellValid(int x, int y, int z) => y is >= 0 and < TerrainChunk.Height;
+        public virtual bool IsCellValid(int x, int y, int z) => y is >= TerrainChunk.MinHeight and <= TerrainChunk.HeightMinusOne;
 
-        public virtual bool IsCellValid(Point3 p) => p.Y is >= 0 and < TerrainChunk.Height;
+        public virtual bool IsCellValid(Point3 p) => p.Y is >= TerrainChunk.MinHeight and <= TerrainChunk.HeightMinusOne;
 
         public virtual int GetCellValue(int x, int y, int z) => !IsCellValid(x, y, z) ? 0 : GetCellValueFast(x, y, z);
 
@@ -308,11 +308,12 @@ namespace Game {
 
         public static int ExtractData(int value) => (value & DataMask) >> DataShift;
 
-        public static int ExtractTopHeight(long value) => (int)(value & TopHeightMask);
+        // [负高度实验] 三个高度字段都存 (height - MinHeight)，取出时加回来
+        public static int ExtractTopHeight(long value) => (int)(value & TopHeightMask) + TerrainChunk.MinHeight;
 
-        public static int ExtractBottomHeight(long value) => (int)((value & BottomHeightMask) >> BottomHeightShift);
+        public static int ExtractBottomHeight(long value) => (int)((value & BottomHeightMask) >> BottomHeightShift) + TerrainChunk.MinHeight;
 
-        public static int ExtractSunlightHeight(long value) => (int)((ulong)value >> SunlightHeightShift) & 1023;
+        public static int ExtractSunlightHeight(long value) => (int)(((ulong)value >> SunlightHeightShift) & 0x7FF) + TerrainChunk.MinHeight;
 
         public static int ExtractHumidity(long value) => (int)((value & HumidityMask) >> HumidityShift);
 
@@ -332,13 +333,14 @@ namespace Game {
 
         public static int ReplaceData(int value, int data) => value ^ ((value ^ (data << DataShift)) & DataMask);
 
-        public static long ReplaceTopHeight(long value, int topHeight) => value ^ ((value ^ topHeight) & TopHeightMask);
+        public static long ReplaceTopHeight(long value, int topHeight) =>
+            (value & ~TopHeightMask) | ((long)(topHeight - TerrainChunk.MinHeight) & TopHeightMask);
 
         public static long ReplaceBottomHeight(long value, int bottomHeight) =>
-            value ^ ((value ^ (bottomHeight << BottomHeightShift)) & BottomHeightMask);
+            (value & ~BottomHeightMask) | (((long)(bottomHeight - TerrainChunk.MinHeight) & 0x7FF) << BottomHeightShift);
 
         public static long ReplaceSunlightHeight(long value, int sunlightHeight) =>
-            (value & 268435455L) | ((long)sunlightHeight << SunlightHeightShift);
+            (value & ~SunlightHeightMask) | (((long)(sunlightHeight - TerrainChunk.MinHeight) & 0x7FF) << SunlightHeightShift);
 
         public static long ReplaceHumidity(long value, int humidity) => value ^ ((value ^ ((long)humidity << HumidityShift)) & HumidityMask);
 

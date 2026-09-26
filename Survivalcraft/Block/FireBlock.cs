@@ -9,17 +9,17 @@ namespace Game {
             Texture2D texture = GetDefaultTexture(value);
             TerrainGeometrySubset[] alphaTestSubsetsByFace = texture == null ? geometry.AlphaTestSubsetsByFace : geometry.GetGeometry(texture).AlphaTestSubsetsByFace;
             int data = Terrain.ExtractData(value);
-            int value2 = y + 1 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 1, z) : 0;
+            int value2 = y + 1 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 1, z) : 0;
             int num = Terrain.ExtractContents(value2);
             int data2 = Terrain.ExtractData(value2);
-            int value3 = y + 2 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 2, z) : 0;
+            int value3 = y + 2 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 2, z) : 0;
             int num2 = Terrain.ExtractContents(value3);
             int data3 = Terrain.ExtractData(value3);
             if (HasFireOnFace(data, 0)) {
-                int value4 = y + 1 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 1, z + 1) : 0;
+                int value4 = y + 1 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 1, z + 1) : 0;
                 int num3 = Terrain.ExtractContents(value4);
                 int data4 = Terrain.ExtractData(value4);
-                int value5 = y + 2 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 2, z + 1) : 0;
+                int value5 = y + 2 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 2, z + 1) : 0;
                 int num4 = Terrain.ExtractContents(value5);
                 int data5 = Terrain.ExtractData(value5);
                 int num5 = DefaultTextureSlot;
@@ -85,10 +85,10 @@ namespace Game {
                 indices.Add(count + 2);
             }
             if (HasFireOnFace(data, 1)) {
-                int value6 = y + 1 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x + 1, y + 1, z) : 0;
+                int value6 = y + 1 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x + 1, y + 1, z) : 0;
                 int num6 = Terrain.ExtractContents(value6);
                 int data6 = Terrain.ExtractData(value6);
-                int value7 = y + 2 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x + 1, y + 2, z) : 0;
+                int value7 = y + 2 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x + 1, y + 2, z) : 0;
                 int num7 = Terrain.ExtractContents(value7);
                 int data7 = Terrain.ExtractData(value7);
                 int num8 = DefaultTextureSlot;
@@ -154,10 +154,10 @@ namespace Game {
                 indices2.Add(count2 + 2);
             }
             if (HasFireOnFace(data, 2)) {
-                int value8 = y + 1 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 1, z - 1) : 0;
+                int value8 = y + 1 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 1, z - 1) : 0;
                 int num9 = Terrain.ExtractContents(value8);
                 int data8 = Terrain.ExtractData(value8);
-                int value9 = y + 2 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x, y + 2, z - 1) : 0;
+                int value9 = y + 2 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x, y + 2, z - 1) : 0;
                 int num10 = Terrain.ExtractContents(value9);
                 int data9 = Terrain.ExtractData(value9);
                 int num11 = DefaultTextureSlot;
@@ -225,10 +225,10 @@ namespace Game {
             if (!HasFireOnFace(data, 3)) {
                 return;
             }
-            int value10 = y + 1 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x - 1, y + 1, z) : 0;
+            int value10 = y + 1 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x - 1, y + 1, z) : 0;
             int num12 = Terrain.ExtractContents(value10);
             int data10 = Terrain.ExtractData(value10);
-            int value11 = y + 2 < TerrainChunk.Height ? generator.Terrain.GetCellValueFast(x - 1, y + 2, z) : 0;
+            int value11 = y + 2 <= TerrainChunk.HeightMinusOne ? generator.Terrain.GetCellValueFast(x - 1, y + 2, z) : 0;
             int num13 = Terrain.ExtractContents(value11);
             int data11 = Terrain.ExtractData(value11);
             int num14 = DefaultTextureSlot;

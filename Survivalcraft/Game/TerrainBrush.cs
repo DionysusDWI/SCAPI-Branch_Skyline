@@ -223,7 +223,7 @@ namespace Game {
                 if (num >= 0
                     && num < TerrainChunk.Size
                     && num2 >= 0
-                    && num2 < TerrainChunk.Height
+                    && num2 <= TerrainChunk.HeightMinusOne
                     && num3 >= 0
                     && num3 < TerrainChunk.Size) {
                     int index = TerrainChunk.CalculateCellIndex(num, num2, num3);
@@ -279,7 +279,7 @@ namespace Game {
                 if (num >= 0
                     && num < TerrainChunk.Size
                     && num2 >= 0
-                    && num2 < TerrainChunk.Height
+                    && num2 <= TerrainChunk.HeightMinusOne
                     && num3 >= 0
                     && num3 < TerrainChunk.Size) {
                     int num4 = num + chunk.Origin.X;
@@ -342,7 +342,7 @@ namespace Game {
                 if (num >= 0
                     && num < TerrainChunk.Size
                     && num2 >= 0
-                    && num2 < TerrainChunk.Height
+                    && num2 <= TerrainChunk.HeightMinusOne
                     && num3 >= 0
                     && num3 < TerrainChunk.Size) {
                     chunk.SetCellValueFast(num, num2, num3, cell.Value);

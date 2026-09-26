@@ -11,7 +11,7 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 
 具体目标：
 
-* **更高的世界**：把竖直可建造空间从 0–255 扩到 0–1023（后续目标：更大跨度与负层）。
+* **更高的世界**：竖直可建造空间从 0–255 扩到 **-128 – 1023**（v0.0.1：0–1023；v0.0.2：加地下 128 层）。
 * **建筑辅助**：与外部操作桥（AgentBridge）/ 命令方块 mod 配合的批量建造、几何与光照失效自动化。
 * **创造模式工具**：面向大体量建筑的放置、选择、复制、验证能力。
 
@@ -21,7 +21,7 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 |---|---|
 | 上游 | SCAPI 游戏源码（`.resource/SurvivalcraftApi`，分支 `SCAPI1.9`，SCAPI 1.9.3.1） |
 | 目标框架 | `net10.0`（Windows 桌面构建） |
-| 本分支首个版本 | **v0.0.1**（见 `CHANGELOG-Skyline.md`） |
+| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）——见 `CHANGELOG-Skyline.md` |
 | License | 沿用仓库根的 `LICENSE`（上游内容版权归原作者，本分支仅作建筑特化修改） |
 
 ## 3. 目录结构
@@ -57,7 +57,25 @@ dotnet build .\Survivalcraft.Windows\Survivalcraft.Windows.csproj -c Release
 本源码树的 Content 比部分随包发布版新，混用会出现"缺少控件"之类的启动错误。
 部署前请备份原版 `Survivalcraft.dll` / `Engine.dll` / `EntitySystem.dll` / `Content.zip`。
 
-## 5. v0.0.1 首个特性：世界高度 0–255 → 0–1023
+## 5. v0.0.2 特性：世界竖直范围 → **-128 – 1023**（地下 128 层）
+
+在 v0.0.1（0–1023）基础上把地下打通，关键是六处 `y≥0` 假设：
+
+| 现象 | 位置 | 处理 |
+|---|---|---|
+| 负层不可写 | `TerrainChunk.CalculateCellIndex / Get-SetCellValueFast` | 位打包改**算术偏移** `(y-MinHeight)+x*Height+z*Height*Size` |
+| 列元数据放不下负数 | `Terrain` shaft 高度字段 | 10 位 → **11 位并存 `height - MinHeight`**（11+4+4+11+11=41 位，仍在 long 内） |
+| 负层不显示 | `TerrainUpdater` 几何片区间 | 片区间改 `MinHeight + 16*index` |
+| 负层灯不亮 | `TerrainUpdater.PropagateLightSources` 的 `if (y > 0)` | 改 `> MinHeight` |
+| 负层无碰撞 | `ComponentBody` 扫格下界 `Max(point.Y, 0)` | 改 `MinHeight` |
+| 负层被上界卡 | `ComponentHealth` 的 `Y < 0` 虚空伤害 | 改 `Y < MinHeight`（-128 以内安全） |
+| 老存档下移 | `TerrainSerializer23` 的层数起点 | **按流里总格数识别布局**（256 / 1024 / 1152 层），只有整高度流才从 `MinHeight` 起 |
+
+实测：`IsCellValid(-129/-128/0/1023/1024)=F/T/T/T/F`；地下 y=-65..-60 建房间后渲染/光照
+（12–15 递减）/碰撞（撞墙停在 x=2593.25）/存活（health 与 Air 恒 1）/存档往返全部通过，
+且 v0.0.1 的别墅与家具无损。
+
+## 5b. v0.0.1 特性：世界高度 0–255 → 0–1023
 
 改 16 个文件、+85/−73 行，修掉五条独立的限制链：
 
@@ -78,14 +96,15 @@ y=256/300/700/1000/1023 可写可读；存档往返后 y=300/700/1000 保留；y
 
 限制：
 
-1. 每区块单元数 65536 → 262144（内存约 ×4），视距大时注意；可降低 `settings.VisibilityRange`。
+1. 每区块单元数 65536 → **294912**（-128..1023，约 1.15 MB/区块），视距大时注意；可降低 `settings.VisibilityRange`。
 2. 命令方块 `place` 走 `SetCellValueFast`，不刷新 shaft/几何/光照 → 高处方块要用
    `ChangeCell`（桥的 `op:cell`）写，或建完触发 recalc。
-3. 目前上限 1023（`HeightBits=10`）；负 y（地下扩展）未实现；旧存档 y>255 区域为空。
+3. 范围 **-128..1023**；想更深/更高只需调 `TerrainChunk.MinHeight`（层数线性影响内存）；
+   地下区域没有地形生成（天然空腔，适合创造模式挖建）；旧版序列化器（14/22/129）仍按 0 起点。
 
 路线（草案）：
 
-* 更大高度 / 负层：把 `HeightBits` 与 shaft 位域再排一次（1024 之外的空间）。
+* 更深 / 更高：`MinHeight` 继续下探（索引与 shaft 都已是偏移式，改动面很小）。
 * 建筑 API：区块级批量放置 + 自动几何/光照失效，供 agent 直接调用。
 * 创造模式工具：区域选择/复制/镜像、蓝图导出。
 * 与 AgentBridge / 命令方块 mod 的接口对齐（本分支是"游戏侧"，桥与 mod 在另一个仓库）。

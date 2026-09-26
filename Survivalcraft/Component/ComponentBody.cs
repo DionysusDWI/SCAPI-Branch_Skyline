@@ -998,7 +998,8 @@ namespace Game {
             }
             Point3 point = Terrain.ToCell(box.Min);
             Point3 point2 = Terrain.ToCell(box.Max);
-            point.Y = MathUtils.Max(point.Y, 0);
+            // [负高度实验] 原来夹到 0；现在世界最低层是 MinHeight
+            point.Y = MathUtils.Max(point.Y, TerrainChunk.MinHeight);
             // [高度实验] 原来写死 255：y>255 的方块因此"没有碰撞体积"（身体枚举格子被夹到 255）
             point2.Y = MathUtils.Min(point2.Y, TerrainChunk.HeightMinusOne);
             if (point.Y > point2.Y) {

@@ -662,7 +662,8 @@ namespace Game {
             for (int k = 0; k < ChunkSizeY; k++) {
                 for (int l = 0; l < ChunkSizeX; l++) {
                     for (int m = 0; m < ChunkSizeZ; m++) {
-                        int num4 = Terrain.ReplaceLight(chunk.GetCellValueFast(m, k, l), 0);
+                        // [负高度实验] 流的第 k 层对应世界 y = MinHeight + k
+                        int num4 = Terrain.ReplaceLight(chunk.GetCellValueFast(m, k + TerrainChunk.MinHeight, l), 0);
                         if (num2 == 0) {
                             num3 = num4;
                             num2 = 1;
@@ -698,13 +699,27 @@ namespace Game {
                     chunk.SetShaftValueFast(i, j, value);
                 }
             }
+            // [负高度实验] 存档竖直范围从 0 起点改成了 MinHeight 起点，为了**兼容旧档**先扫一遍流，
+            // 用总格数推断这份数据是"旧布局(0..)"还是"新布局(MinHeight..)"。
+            int storedCells = 0;
+            int scan = num;
+            while (scan < size) {
+                scan = ReadRleValueFromBuffer(m_compressBuffer, scan, out int _, out int scanCount);
+                storedCells += scanCount;
+            }
+            int cellsPerLayer = ChunkSizeX * ChunkSizeZ;
+            int storedLayers = cellsPerLayer > 0 ? storedCells / cellsPerLayer : 0;
+            // 只有"整高度"的流才是新布局（从 MinHeight 起）；老的 256 层 / v0.0.1 的 1024 层
+            // 都是从 y=0 起，必须映射回 0，否则会把老世界整体下移 128。
+            int yBase = storedLayers == TerrainChunk.Height ? TerrainChunk.MinHeight : 0;
+
             int num2 = 0;
             int num3 = 0;
             int num4 = 0;
             while (num < size) {
                 num = ReadRleValueFromBuffer(m_compressBuffer, num, out int value2, out int count);
                 for (int k = 0; k < count; k++) {
-                    chunk.SetCellValueFast(num2, num3, num4, value2);
+                    chunk.SetCellValueFast(num2, num3 + yBase, num4, value2);
                     num2++;
                     if (num2 >= ChunkSizeX) {
                         num2 = 0;
@@ -717,7 +732,7 @@ namespace Game {
                 }
             }
             if (num2 != 0
-                || num3 != ChunkSizeY
+                || num3 != storedLayers
                 || num4 != 0) {
                 throw new InvalidOperationException("Corrupt chunk data.");
             }

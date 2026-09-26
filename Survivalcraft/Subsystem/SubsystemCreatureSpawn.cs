@@ -1201,7 +1201,7 @@ namespace Game {
             int y = spawnPoint.Y;
             int z = spawnPoint.Z;
             if (y <= 3
-                || y >= TerrainChunk.Height - 3) {
+                    || y >= TerrainChunk.HeightMinusOne - 3) {
                 return false;
             }
             switch (spawnLocationType) {

@@ -67,7 +67,7 @@ namespace Game {
                     chunk.SetHumidityFast(i, j, CalculateHumidity(num, num2));
                     bool flag = CalculateOceanShoreDistance(num, num2) >= 0f;
                     int num3 = TerrainChunk.CalculateCellIndex(i, 0, j);
-                    for (int k = 0; k < TerrainChunk.Height; k++) {
+            for (int k = 0; k <= TerrainChunk.HeightMinusOne; k++) {   // [负高度实验] Height 现在是层数，不能再当最大 y
                         int value = Terrain.MakeBlockValue(0);
                         if (flag) {
                             if (k < 2

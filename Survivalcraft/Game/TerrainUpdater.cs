@@ -816,7 +816,7 @@ namespace Game {
                     int num2 = TerrainChunk.HeightMinusOne;
                     int num4 = TerrainChunk.HeightMinusOne;
                     int num5 = TerrainChunk.CalculateCellIndex(i, TerrainChunk.HeightMinusOne, j);
-                    while (num4 >= 0) {
+                    while (num4 >= TerrainChunk.MinHeight) {   // [负高度实验] 原来到 0 就停
                         int cellValueFast = chunk.GetCellValueFast(num5);
                         if (Terrain.ExtractContents(cellValueFast) != 0) {
                             num = num4;
@@ -827,8 +827,8 @@ namespace Game {
                         num4--;
                         num5--;
                     }
-                    num4 = 0;
-                    num5 = TerrainChunk.CalculateCellIndex(i, 0, j);
+                    num4 = TerrainChunk.MinHeight;
+                    num5 = TerrainChunk.CalculateCellIndex(i, TerrainChunk.MinHeight, j);
                     while (num4 <= num + 1) {
                         int cellValueFast2 = chunk.GetCellValueFast(num5);
                         int num6 = Terrain.ExtractContents(cellValueFast2);
@@ -1015,7 +1015,7 @@ namespace Game {
                 int bottomHeightFast = chunk.GetBottomHeightFast(num, num2);
                 int num7 = TerrainChunk.CalculateCellIndex(num, 0, num2);
                 int num8 = TerrainChunk.CalculateCellIndex(num3, 0, num4);
-                for (int j = bottomHeightFast; j < TerrainChunk.Height; j++) {
+                for (int j = bottomHeightFast; j <= TerrainChunk.HeightMinusOne; j++) {
                     int cellValueFast = chunk.GetCellValueFast(num7 + j);
                     int num9 = Terrain.ExtractContents(cellValueFast);
                     if (blocks[num9].IsTransparent_(cellValueFast)) {
@@ -1057,7 +1057,7 @@ namespace Game {
                 if (light > 1) {
                     PropagateLightSource(lightSource.X - 1, lightSource.Y, lightSource.Z, light);
                     PropagateLightSource(lightSource.X + 1, lightSource.Y, lightSource.Z, light);
-                    if (lightSource.Y > 0) {
+                    if (lightSource.Y > TerrainChunk.MinHeight) {   // [负高度实验] 原来 > 0
                         PropagateLightSource(lightSource.X, lightSource.Y - 1, lightSource.Z, light);
                     }
                     if (lightSource.Y < TerrainChunk.HeightMinusOne) {
@@ -1100,7 +1100,7 @@ namespace Game {
                 else {
                     PropagateLightSource(chunkAtCell, x, y, z + 1, light);
                 }
-                if (y > 0) {
+                if (y > TerrainChunk.MinHeight) {   // [负高度实验] 原来 > 0
                     PropagateLightSource(chunkAtCell, x, y - 1, z, light);
                 }
                 if (y < TerrainChunk.HeightMinusOne) {
@@ -1198,9 +1198,10 @@ namespace Game {
                                         )
                                     );
                                     int x2_2 = chunk.GetTopHeightFast(x1, z1) + 1;
-                                    int num5 = MathUtils.Max(TerrainChunk.SliceHeight * index, x2_1, 1);
+                                    // [负高度实验] 片区间要跟着 MinHeight 走（这片 = MinHeight + 16*index .. +16）
+                                    int num5 = MathUtils.Max(TerrainChunk.MinHeight + TerrainChunk.SliceHeight * index, x2_1, TerrainChunk.MinHeight);
                                     // [高度实验] 原来写死 byte.MaxValue(255) —— 这就是"y>255 的方块不显示"的直接原因
-                                    int num6 = MathUtils.Min(TerrainChunk.SliceHeight * (index + 1), x2_2, TerrainChunk.HeightMinusOne);
+                                    int num6 = MathUtils.Min(TerrainChunk.MinHeight + TerrainChunk.SliceHeight * (index + 1), x2_2, TerrainChunk.HeightMinusOne);
                                     int cellIndex = TerrainChunk.CalculateCellIndex(x1, 0, z1);
                                     for (int y = num5; y < num6; ++y) {
                                         int cellValueFast = chunk.GetCellValueFast(cellIndex + y);
@@ -1267,7 +1268,7 @@ namespace Game {
                         );
                         int topHeight2 = topHeight + 2;
                         minBottomHeight = MathUtils.Max(minBottomHeight, 0);
-                        topHeight2 = MathUtils.Min(topHeight2, TerrainChunk.Height);
+                    topHeight2 = MathUtils.Min(topHeight2, TerrainChunk.HeightMinusOne);
                         int startSlice = MathUtils.Max((minBottomHeight - 1) / TerrainChunk.SliceHeight, 0);
                         int endSlice = MathUtils.Min((topHeight2 + 1) / TerrainChunk.SliceHeight, TerrainChunk.SliceHeight - 1);
                         int hash2 = 1;

@@ -12,17 +12,21 @@ namespace Game {
 
         public const int Size = 16;
 
-        public const int HeightBits = 10;   // [高度实验] 8 -> 10（y 用 10 位）
+        public const int HeightBits = 11;   // [负高度实验] 索引改成算术偏移后这里只作参考
 
-        public const int Height = 1024;     // [高度实验] 256 -> 1024（0..1023）
+        /// <summary>[负高度实验] 世界最低层（含）。0 以上仍保留到 <see cref="HeightMinusOne"/>。</summary>
+        public const int MinHeight = -128;
+
+        /// <summary>[负高度实验] 每区块的竖直层数 = MaxHeight - MinHeight + 1。</summary>
+        public const int Height = 1152;     // -128..1023
 
         public const int SizeMinusOne = 15;
 
-        public const int HeightMinusOne = 1023;
+        public const int HeightMinusOne = 1023;   // = 最大 y（MaxHeight）
 
         public const int SliceHeight = 16;
 
-        public const int SlicesCount = 64;  // [高度实验] 16 -> 64（每片 16 格）
+        public const int SlicesCount = 72;  // [负高度实验] 1152/16 = 72
 
         public Terrain Terrain;
 
@@ -80,7 +84,10 @@ namespace Game {
             Terrain = terrain;
             Coords = new Point2(x, z);
             Origin = new Point2(x * Size, z * Size);
-            BoundingBox = new BoundingBox(new Vector3(Origin.X, 0f, Origin.Y), new Vector3(Origin.X + Size, Height, Origin.Y + Size));
+            // [负高度实验] 包围盒跟着世界竖直范围走（z 裁剪要用它，不能还是 0..Height）
+            BoundingBox = new BoundingBox(
+                new Vector3(Origin.X, MinHeight, Origin.Y),
+                new Vector3(Origin.X + Size, HeightMinusOne + 1, Origin.Y + Size));
             Center = new Vector2((float)Origin.X + Size / 2, (float)Origin.Y + Size / 2);
             Cells = m_cellsCache.Rent(Size * Size * Height, true);
             Shafts = m_shaftsCache.Rent(Size * Size, true);
@@ -118,8 +125,8 @@ namespace Game {
         public static bool IsCellValid(int x, int y, int z) {
             if (x >= 0
                 && x < Size
-                && y >= 0
-                && y < Height
+                && y >= MinHeight
+                && y <= HeightMinusOne
                 && z >= 0) {
                 return z < Size;
             }
@@ -136,25 +143,18 @@ namespace Game {
         }
 
         public static int CalculateCellIndex(int x, int y, int z) {
-            if (y is >= 0 and < Height) {
-                // [高度实验] z 的位移必须跟着 HeightBits 走（原来是写死的 12 = 8+4）
-                return y | (x << HeightBits) | (z << (HeightBits + SizeBits));
+            // [负高度实验] 位打包改成算术偏移：索引 = (y - MinHeight) + x*Height + z*Height*Size。
+            // 这样 y 可以是负数，也不再要求 Height 是 2 的幂。
+            if (y < MinHeight || y > HeightMinusOne) {
+                throw new ArgumentOutOfRangeException(nameof(y), $"y={y} out of range [{MinHeight},{HeightMinusOne}]");
             }
-            int absY = Math.Abs(y);
-            int yUpperBits = absY >> HeightBits;
-            if (yUpperBits > 0x7FFF) {
-                throw new ArgumentOutOfRangeException(nameof(y), "Height is too large.");
-            }
-            int yLowerBits = absY & HeightMinusOne;
-            yUpperBits = yUpperBits & 0x7FFF;
-            return ((y < 0 ? 1 : 0) << 31) | (yUpperBits << (HeightBits + SizeBits + SizeBits))
-                | (z << (HeightBits + SizeBits)) | (x << HeightBits) | yLowerBits;
+            return y - MinHeight + x * Height + z * Height * Size;
         }
 
         public virtual int CalculateTopmostCellHeight(int x, int z) {
             int num = CalculateCellIndex(x, HeightMinusOne, z);
             int num2 = HeightMinusOne;
-            while (num2 >= 0) {
+            while (num2 >= MinHeight) {   // [负高度实验] 原来到 0 就停
                 if (Terrain.ExtractContents(GetCellValueFast(num)) != 0) {
                     return num2;
                 }
@@ -166,16 +166,16 @@ namespace Game {
 
         public virtual int GetCellValueFast(int index) => Cells[index];
 
-        public virtual int GetCellValueFast(int x, int y, int z) => Cells[y + x * Height + z * Height * Size];
+        public virtual int GetCellValueFast(int x, int y, int z) => Cells[y - MinHeight + x * Height + z * Height * Size];
 
-        public virtual int GetCellValueFast(Point3 p) => Cells[p.Y + p.X * Height + p.Z * Height * Size];
+        public virtual int GetCellValueFast(Point3 p) => Cells[p.Y - MinHeight + p.X * Height + p.Z * Height * Size];
 
         public virtual void SetCellValueFast(int x, int y, int z, int value) {
-            Cells[y + x * Height + z * Height * Size] = value;
+            Cells[y - MinHeight + x * Height + z * Height * Size] = value;
         }
 
         public virtual void SetCellValueFast(Point3 p, int value) {
-            Cells[p.Y + p.X * Height + p.Z * Height * Size] = value;
+            Cells[p.Y - MinHeight + p.X * Height + p.Z * Height * Size] = value;
         }
 
         public virtual void SetCellValueFast(int index, int value) {
