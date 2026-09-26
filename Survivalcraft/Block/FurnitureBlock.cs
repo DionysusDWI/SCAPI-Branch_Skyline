@@ -29,6 +29,16 @@ namespace Game {
             if (design == null) {
                 return;
             }
+            // [v0.0.9] 高复杂度家具的几何预算守卫：单个 16³ 区块里 N 件家具 = N × 单件顶点数（乘法），
+            // 实测一件分辨率 28 的棋盘家具 ≈263k 顶点 / 6.5MB 显存，塞满会外推 26GB 显存 + 86GB 内存。
+            // 超预算的实例退化成方盒（可见占位）或跳过，见 Game/SkylineFurniture.cs。
+            if (!SkylineFurniture.TryReserve(design)) {
+                if (SkylineFurniture.FallbackBox) {
+                    generator.GenerateCubeVertices(this, value, x, y, z, Color.White, geometry.OpaqueSubsetsByFace);
+                    SkylineFurniture.NoteFallbackBox();
+                }
+                return;
+            }
             FurnitureGeometry geometry2 = design.Geometry;
             int mountingFacesMask = design.MountingFacesMask;
             for (int i = 0; i < 6; i++) {

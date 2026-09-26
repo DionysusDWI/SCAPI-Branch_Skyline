@@ -1173,6 +1173,8 @@ namespace Game {
         }
 
         public virtual void GenerateChunkVertices(TerrainChunk chunk, int stage) {
+            // [v0.0.9] 家具几何预算：以"区块 + 阶段"为窗口重新计数（见 Game/SkylineFurniture.cs）
+            SkylineFurniture.BeginStage($"{chunk.Coords.X},{chunk.Coords.Y}/s{stage}");
             m_subsystemTerrain.BlockGeometryGenerator.ResetCache();
             TerrainChunk chunkAtCoords1 = m_terrain.GetChunkAtCoords(chunk.Coords.X - 1, chunk.Coords.Y - 1);
             TerrainChunk chunkAtCoords2 = m_terrain.GetChunkAtCoords(chunk.Coords.X, chunk.Coords.Y - 1);
@@ -1311,10 +1313,17 @@ namespace Game {
                             bottomHeight - 1
                         );
                         int topHeight2 = topHeight + 2;
-                        minBottomHeight = MathUtils.Max(minBottomHeight, 0);
-                    topHeight2 = MathUtils.Min(topHeight2, TerrainChunk.HeightMinusOne);
-                        int startSlice = MathUtils.Max((minBottomHeight - 1) / TerrainChunk.SliceHeight, 0);
-                        int endSlice = MathUtils.Min((topHeight2 + 1) / TerrainChunk.SliceHeight, TerrainChunk.SliceHeight - 1);
+                        minBottomHeight = MathUtils.Max(minBottomHeight, TerrainChunk.MinHeight);
+                        topHeight2 = MathUtils.Min(topHeight2, TerrainChunk.HeightMinusOne);
+                        // [v0.0.9 修复] 切片区间必须覆盖到 SlicesCount（分支里 = 128），
+                        // 且要用 MinHeight 做偏移（几何生成 GenerateChunkVertices 用的就是
+                        // MinHeight + SliceHeight*index）。原来写的是 `SliceHeight - 1`（=15）——
+                        // 那是上游 16 切片时代的值；高度扩到 2048/128 片后没同步，导致
+                        // **16 号以上的切片内容哈希永不变化 → 写在 y≈-768 以上的方块
+                        // 永远不会触发几何重建 → "有碰撞、无渲染"**（2026-09-26 实测）。
+                        int startSlice = MathUtils.Max((minBottomHeight - TerrainChunk.MinHeight - 1) / TerrainChunk.SliceHeight, 0);
+                        int endSlice = MathUtils.Min((topHeight2 - TerrainChunk.MinHeight + 1) / TerrainChunk.SliceHeight,
+                            TerrainChunk.SlicesCount - 1);
                         int hash2 = 1;
                         hash2 += Terrain.ExtractTemperature(shaftValueFast);
                         hash2 *= 31;
@@ -1322,8 +1331,8 @@ namespace Game {
                         hash2 *= 31;
                         for (int slice = startSlice; slice <= endSlice; slice++) {
                             int hash3 = hash2;
-                            int startY = MathUtils.Max(slice * TerrainChunk.SliceHeight - 1, minBottomHeight);
-                            int endY = MathUtils.Min(slice * TerrainChunk.SliceHeight + TerrainChunk.SliceHeight + 1, topHeight2);
+                            int startY = MathUtils.Max(TerrainChunk.MinHeight + slice * TerrainChunk.SliceHeight - 1, minBottomHeight);
+                            int endY = MathUtils.Min(TerrainChunk.MinHeight + slice * TerrainChunk.SliceHeight + TerrainChunk.SliceHeight + 1, topHeight2);
                             int cellIndex = TerrainChunk.CalculateCellIndex(x, startY, z);
                             int endCellIndex = cellIndex + endY - startY;
                             while (cellIndex < endCellIndex) {

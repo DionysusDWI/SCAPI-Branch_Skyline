@@ -47,7 +47,32 @@ namespace Game {
         /// <summary>一行状态，便于桥/日志读取。</summary>
         public static string Describe() =>
             $"Skyline build=[{BuildMinY},{BuildMaxY}] survival=[{SurvivalMinY},{SurvivalMaxY}] freeView={FreeViewMode} "
-            + $"residency={ChunkResidencyMode} regions={Regions.Count} v={m_residencyVersion}";
+            + $"residency={ChunkResidencyMode} regions={Regions.Count} v={m_residencyVersion} "
+            + SkylineFurniture.Describe();
+
+        // ==========================================================================================
+        // v0.0.9：高复杂度家具的几何预算（实现在 Game/SkylineFurniture.cs，这里只做转发，
+        // 好处是桥不用改代码就能通过既有 `skyline` 根读写——桥根是 typeof(SkylineRuntime)）
+        // ==========================================================================================
+
+        public static bool FurnitureBudgetEnabled {
+            get => SkylineFurniture.BudgetEnabled;
+            set => SkylineFurniture.BudgetEnabled = value;
+        }
+
+        public static int FurnitureMaxStageVertices {
+            get => SkylineFurniture.MaxStageFurnitureVertices;
+            set => SkylineFurniture.MaxStageFurnitureVertices = value;
+        }
+
+        public static bool FurnitureFallbackBox {
+            get => SkylineFurniture.FallbackBox;
+            set => SkylineFurniture.FallbackBox = value;
+        }
+
+        public static string FurnitureDescribe() => SkylineFurniture.Describe();
+
+        public static void FurnitureResetStats() => SkylineFurniture.ResetStats();
 
         // ==========================================================================================
         // v0.0.5：区块列驻留（Chunk Residency）
