@@ -34,7 +34,7 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 |---|---|
 | 上游 | SCAPI 游戏源码（`.resource/SurvivalcraftApi`，分支 `SCAPI1.9`，SCAPI 1.9.3.1） |
 | 目标框架 | `net10.0`（Windows 桌面构建） |
-| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）、**v0.0.3**（-1024–1023 + 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复）、**v0.0.4**（竖直范围鲁棒性 16 处 + 显卡自动选择）、**v0.0.5**（区块列驻留 + 蓝图/区域变换 + 分层云雾/天空高度 + NVAPI 只读深化 + 最底层几何崩溃修复）——见 `CHANGELOG-Skyline.md` |
+| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）、**v0.0.3**（-1024–1023 + 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复）、**v0.0.4**（竖直范围鲁棒性 16 处 + 显卡自动选择）、**v0.0.5**（区块列驻留 + 蓝图/区域变换 + 分层云雾/天空高度 + NVAPI 只读深化 + 最底层几何崩溃修复）、**v0.0.6**（贝塞尔曲线铺设 `SkylineBuilder`）——见 `CHANGELOG-Skyline.md` |
 | License | 沿用仓库根的 `LICENSE`（上游内容版权归原作者，本分支仅作建筑特化修改） |
 
 ## 3. 目录结构
@@ -185,6 +185,36 @@ python tools\scbridge.py raw '{"op":"invoke","target":"skyline.FreeViewMode","va
 实测（Windows / 世界 `AgentLab`）：`IsCellValid(255/256/1023/1024)=T/T/T/F`；
 y=256/300/700/1000/1023 可写可读；存档往返后 y=300/700/1000 保留；y=301–305 可见；
 手持取光在高处为 14–15；y=700 悬停不掉血不缺氧；y=301 平台撞墙停在 x=2603.75。
+
+## 5a. v0.0.6 特性：贝塞尔曲线铺设（`SkylineBuilder`）
+
+> 用户口径："**不是某个圆或者椭圆的一部分，而是通过贝塞尔曲线生成的**"——像 Axiom 那样，
+> 把一段横截面（车道 / 车道线 / 护栏 / 路肩）沿任意贝塞尔曲线扫出去。
+
+| 环节 | 做法 |
+|---|---|
+| 曲线 | 三次贝塞尔（4 控制点）；控制点多于 4 个时用 **Catmull-Rom 转贝塞尔**（曲线过每个控制点、C1 连续） |
+| 采样 | **按弧长等距**（先建累计弧长表再等距取站）——按 t 等分会在弯道处站点变密 |
+| 坐标系 | **平行传输（rotation-minimizing frame）**：法向绕相邻切线夹角轴旋转，避免剖面扭转 |
+| 剖面 | 从世界里**切一段横截面**（局部轴 = 横 R / 竖 U / 沿 A，建议沿路径方向厚 1 格） |
+| 写入 | `SubsystemTerrain.ChangeCell`（刷光照/几何/方块行为）+ 逐格统计 + 每次扫掠一个撤销组 |
+| 选项 | `step`、`lat`/`vy`、`mirror`、`groundFollow`/`groundOffset`、`onlyAir`、`dry`、`max`、`ensureLoaded` |
+
+桥调用（AgentBridge 根 `skylinebuilder` / `builder`）：
+
+```powershell
+$spec = "points:2900,100,7000;2940,104,7006;2990,96,7024;3040,100,7060 profile:2900,100,6997;2900,101,7003 step:1 onlyAir:1 groundFollow:0"
+python tools\scbridge.py raw '{\"op\":\"invoke\",\"target\":\"skylinebuilder\",\"member\":\"Preview\",\"action\":\"call\",\"args\":[\"' + $spec + '\"]}'
+python tools\scbridge.py raw '{\"op\":\"invoke\",\"target\":\"skylinebuilder\",\"member\":\"SweepBezier\",\"action\":\"call\",\"args\":[\"' + $spec + '\"]}'
+python tools\scbridge.py raw '{\"op\":\"invoke\",\"target\":\"skylinebuilder\",\"member\":\"Undo\",\"action\":\"call\"}'
+```
+
+实测（AgentLab）：154 站 / 1386 格 → **写入 1258 格、0.5 ms、`skipNotLoaded=0`**；
+沿曲线 5 个抽样点窗口内都有路面；`Undo()` 一次还原 1258 格（剩余 0）。
+截图：`data/sessions/skyline-v005/builder/shots/bezier-road-on-road.png`。
+
+已知限制：剖面须"沿路径厚 1 格"（更厚会自交）；不支持倾斜超高（banking）与变截面；
+`groundFollow` 在陡坡处会台阶化；撤销栈只保留最近一次扫掠且不写存档。
 
 ## 6. 已知限制 / 后续路线
 
