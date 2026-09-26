@@ -723,7 +723,9 @@ namespace Game {
                 indices5.Array[count10 + 4] = count9 + 3;
                 indices5.Array[count10 + 5] = count9;
             }
-            cellValueFast = chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF);
+            // [Skyline v0.0.5] 世界最底层没有"下面那一格"：y==MinHeight 时 y-1 会算出负数下标
+            // （原版 y=0 是基岩、不参与方块几何，所以上游踩不到；扩展高度后 -1024 可以建方块）
+            cellValueFast = y > TerrainChunk.MinHeight ? chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF) : 0;
             if ((block.GenerateFacesForSameNeighbors || Terrain.ExtractContents(cellValueFast) != blockIndex)
                 && block.ShouldGenerateFace(
                     SubsystemTerrain,
@@ -1166,7 +1168,7 @@ namespace Game {
                 indices5.Array[count10 + 4] = count9 + 3;
                 indices5.Array[count10 + 5] = count9;
             }
-            cellValueFast = chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF);
+            cellValueFast = y > TerrainChunk.MinHeight ? chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF) : 0;   // [Skyline v0.0.5] 最底层没有下一格
             if ((block.GenerateFacesForSameNeighbors || Terrain.ExtractContents(cellValueFast) != blockIndex)
                 && block.ShouldGenerateFace(
                     SubsystemTerrain,
@@ -1599,7 +1601,7 @@ namespace Game {
                 indices5.Array[count10 + 4] = count9 + 3;
                 indices5.Array[count10 + 5] = count9;
             }
-            cellValueFast = chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF);
+            cellValueFast = y > TerrainChunk.MinHeight ? chunkAtCell.GetCellValueFast(x & 0xF, y - 1, z & 0xF) : 0;   // [Skyline v0.0.5] 最底层没有下一格
             if ((block.GenerateFacesForSameNeighbors || Terrain.ExtractContents(cellValueFast) != blockIndex)
                 && block.ShouldGenerateFace(
                     SubsystemTerrain,
@@ -2147,19 +2149,40 @@ namespace Game {
 
         public static int CombineLightAndShadow(int light, int shadow) => MathUtils.Max(light - MathUtils.Max(shadow / 7, 0), 0);
 
+        // ================================================================================================
+        // [Skyline v0.0.5] 光照取样的"没有下一格"兜底
+        //
+        // 原版世界最底层 y=0 是基岩（不参与方块几何），所以下面这些"取下一格"的写法永远不会出事。
+        // 扩展高度后玩家可以在 y=-1024 建方块，于是：
+        //   * faces 0..3 里的 `GetCellValueFast(index - 1)` 在区块第一列会算出 -1 → IndexOutOfRangeException
+        //     （其它列则读到"上一列的顶层"，光照算错）；
+        //   * face 5 直接取 y-1，同样越界。
+        // 统一走下面的 helper：越界/缺区块一律按"空气、无光"处理。
+        // ================================================================================================
+        static int GetCellValueForLightBelow(TerrainChunk chunk, int index, int y) {
+            if (chunk == null || y <= TerrainChunk.MinHeight) {
+                return 0;
+            }
+            return chunk.GetCellValueFast(index - 1);
+        }
+
+        static int GetCellValueForLight(TerrainChunk chunk, int index) {
+            return chunk == null ? 0 : chunk.GetCellValueFast(index);
+        }
+
         public virtual int CalculateVertexLightFace0(int x, int y, int z) {
             int light = 0;
             int shadow = 0;
             TerrainChunk chunkAtCell = Terrain.GetChunkAtCell(x - 1, z);
             int num = TerrainChunk.CalculateCellIndex((x - 1) & 0xF, y, z & 0xF);
-            int cellValueFast = chunkAtCell.GetCellValueFast(num - 1);
-            int cellValueFast2 = chunkAtCell.GetCellValueFast(num);
+            int cellValueFast = GetCellValueForLightBelow(chunkAtCell, num, y);
+            int cellValueFast2 = GetCellValueForLight(chunkAtCell, num);
             CalculateCubeVertexLight(cellValueFast, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast2, ref light, ref shadow);
             TerrainChunk chunkAtCell2 = Terrain.GetChunkAtCell(x, z);
             int num2 = TerrainChunk.CalculateCellIndex(x & 0xF, y, z & 0xF);
-            int cellValueFast3 = chunkAtCell2.GetCellValueFast(num2 - 1);
-            int cellValueFast4 = chunkAtCell2.GetCellValueFast(num2);
+            int cellValueFast3 = GetCellValueForLightBelow(chunkAtCell2, num2, y);
+            int cellValueFast4 = GetCellValueForLight(chunkAtCell2, num2);
             CalculateCubeVertexLight(cellValueFast3, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast4, ref light, ref shadow);
             return CombineLightAndShadow(light, shadow);
@@ -2170,14 +2193,14 @@ namespace Game {
             int shadow = 0;
             TerrainChunk chunkAtCell = Terrain.GetChunkAtCell(x, z - 1);
             int num = TerrainChunk.CalculateCellIndex(x & 0xF, y, (z - 1) & 0xF);
-            int cellValueFast = chunkAtCell.GetCellValueFast(num - 1);
-            int cellValueFast2 = chunkAtCell.GetCellValueFast(num);
+            int cellValueFast = GetCellValueForLightBelow(chunkAtCell, num, y);
+            int cellValueFast2 = GetCellValueForLight(chunkAtCell, num);
             CalculateCubeVertexLight(cellValueFast, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast2, ref light, ref shadow);
             TerrainChunk chunkAtCell2 = Terrain.GetChunkAtCell(x, z);
             int num2 = TerrainChunk.CalculateCellIndex(x & 0xF, y, z & 0xF);
-            int cellValueFast3 = chunkAtCell2.GetCellValueFast(num2 - 1);
-            int cellValueFast4 = chunkAtCell2.GetCellValueFast(num2);
+            int cellValueFast3 = GetCellValueForLightBelow(chunkAtCell2, num2, y);
+            int cellValueFast4 = GetCellValueForLight(chunkAtCell2, num2);
             CalculateCubeVertexLight(cellValueFast3, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast4, ref light, ref shadow);
             return CombineLightAndShadow(light, shadow);
@@ -2188,14 +2211,14 @@ namespace Game {
             int shadow = 0;
             TerrainChunk chunkAtCell = Terrain.GetChunkAtCell(x - 1, z - 1);
             int num = TerrainChunk.CalculateCellIndex((x - 1) & 0xF, y, (z - 1) & 0xF);
-            int cellValueFast = chunkAtCell.GetCellValueFast(num - 1);
-            int cellValueFast2 = chunkAtCell.GetCellValueFast(num);
+            int cellValueFast = GetCellValueForLightBelow(chunkAtCell, num, y);
+            int cellValueFast2 = GetCellValueForLight(chunkAtCell, num);
             CalculateCubeVertexLight(cellValueFast, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast2, ref light, ref shadow);
             TerrainChunk chunkAtCell2 = Terrain.GetChunkAtCell(x, z - 1);
             int num2 = TerrainChunk.CalculateCellIndex(x & 0xF, y, (z - 1) & 0xF);
-            int cellValueFast3 = chunkAtCell2.GetCellValueFast(num2 - 1);
-            int cellValueFast4 = chunkAtCell2.GetCellValueFast(num2);
+            int cellValueFast3 = GetCellValueForLightBelow(chunkAtCell2, num2, y);
+            int cellValueFast4 = GetCellValueForLight(chunkAtCell2, num2);
             CalculateCubeVertexLight(cellValueFast3, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast4, ref light, ref shadow);
             return CombineLightAndShadow(light, shadow);
@@ -2206,14 +2229,14 @@ namespace Game {
             int shadow = 0;
             TerrainChunk chunkAtCell = Terrain.GetChunkAtCell(x - 1, z - 1);
             int num = TerrainChunk.CalculateCellIndex((x - 1) & 0xF, y, (z - 1) & 0xF);
-            int cellValueFast = chunkAtCell.GetCellValueFast(num - 1);
-            int cellValueFast2 = chunkAtCell.GetCellValueFast(num);
+            int cellValueFast = GetCellValueForLightBelow(chunkAtCell, num, y);
+            int cellValueFast2 = GetCellValueForLight(chunkAtCell, num);
             CalculateCubeVertexLight(cellValueFast, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast2, ref light, ref shadow);
             TerrainChunk chunkAtCell2 = Terrain.GetChunkAtCell(x - 1, z);
             int num2 = TerrainChunk.CalculateCellIndex((x - 1) & 0xF, y, z & 0xF);
-            int cellValueFast3 = chunkAtCell2.GetCellValueFast(num2 - 1);
-            int cellValueFast4 = chunkAtCell2.GetCellValueFast(num2);
+            int cellValueFast3 = GetCellValueForLightBelow(chunkAtCell2, num2, y);
+            int cellValueFast4 = GetCellValueForLight(chunkAtCell2, num2);
             CalculateCubeVertexLight(cellValueFast3, ref light, ref shadow);
             CalculateCubeVertexLight(cellValueFast4, ref light, ref shadow);
             return CombineLightAndShadow(light, shadow);
@@ -2232,10 +2255,13 @@ namespace Game {
         public virtual int CalculateVertexLightFace5(int x, int y, int z) {
             int light = 0;
             int shadow = 0;
-            CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x - 1, y - 1, z - 1), ref light, ref shadow);
-            CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x, y - 1, z - 1), ref light, ref shadow);
-            CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x - 1, y - 1, z), ref light, ref shadow);
-            CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x, y - 1, z), ref light, ref shadow);
+            // [Skyline v0.0.5] 世界最底层没有"下面那一层"：y-1 会越界（原版 y=0 是基岩，踩不到）
+            if (y > TerrainChunk.MinHeight) {
+                CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x - 1, y - 1, z - 1), ref light, ref shadow);
+                CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x, y - 1, z - 1), ref light, ref shadow);
+                CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x - 1, y - 1, z), ref light, ref shadow);
+                CalculateCubeVertexLight(Terrain.GetCellValueFastChunkExists(x, y - 1, z), ref light, ref shadow);
+            }
             return CombineLightAndShadow(light, shadow);
         }
 

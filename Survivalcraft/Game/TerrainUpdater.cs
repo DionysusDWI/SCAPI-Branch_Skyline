@@ -208,6 +208,12 @@ namespace Game {
 
         public Dictionary<int, UpdateLocation?> m_pendingLocations = [];
 
+        // [Skyline v0.0.5] 区块列驻留：上一次已生效的 SkylineRuntime.ResidencyVersion，
+        // 以及我们塞进 Locations 字典的哨兵键（负数，与玩家下标 0..3 不冲突）。
+        public int m_appliedResidencyVersion = -1;
+
+        public List<int> m_residencyLocationKeys = [];
+
         public static int ChunkUpdates;
 
         public static int SlowTerrainUpdate;
@@ -346,7 +352,9 @@ namespace Game {
                 UnpauseUpdateThread();
                 m_updateEvent.Set();
             }
-            if (m_pendingLocations.Count > 0) {
+            SkylineRuntime.Tick();
+            bool residencyChanged = SkylineRuntime.ResidencyVersion != m_appliedResidencyVersion;
+            if (m_pendingLocations.Count > 0 || residencyChanged) {
                 m_pauseEvent.Reset();
                 if (m_updateEvent.WaitOne(0)) {
                     m_pauseEvent.Set();
@@ -358,6 +366,9 @@ namespace Game {
                             else {
                                 m_updateParameters.Locations.Remove(pendingLocation.Key);
                             }
+                        }
+                        if (residencyChanged) {
+                            ApplySkylineResidencyLocations();
                         }
                         if (AllocateAndFreeChunks(m_updateParameters.Locations.Values.ToArray())) {
                             m_updateParameters.Chunks = m_terrain.AllocatedChunks;
@@ -512,6 +523,39 @@ namespace Game {
                 }
             );
             return result;
+        }
+
+        // ------------------------------------------------------------------------------------------
+        // [Skyline v0.0.5] 区块列驻留：把 SkylineRuntime 的驻留区域铺成一串"覆盖圆"，
+        // 作为额外的 update locations 塞进 m_updateParameters.Locations（哨兵键 -1000 起）。
+        //
+        // 这样完全复用引擎既有的 allocate / load / upgrade 流程：
+        //   * AllocateAndFreeChunks 不再释放区域内的区块（列被钉在内存里，远处写入不再静默失效）；
+        //   * FindBestChunkToUpdate 会把区域内的列推进到 InvalidVertices1（内容可读写）
+        //     或 Valid（ResidencyFullDetail=true，连几何一起生成）。
+        // 只在配置版本号变化时重建；开关关闭时把哨兵键全部移除，回到原版行为。
+        // ------------------------------------------------------------------------------------------
+        public virtual void ApplySkylineResidencyLocations() {
+            m_appliedResidencyVersion = SkylineRuntime.ResidencyVersion;
+            foreach (int key in m_residencyLocationKeys) {
+                m_updateParameters.Locations.Remove(key);
+            }
+            m_residencyLocationKeys.Clear();
+            if (!SkylineRuntime.ChunkResidencyMode) {
+                return;
+            }
+            int nextKey = -1000;
+            foreach (SkylineRuntime.ResidencyCircle circle in SkylineRuntime.BuildResidencyCircles()) {
+                float visibility = SkylineRuntime.ResidencyFullDetail ? circle.RadiusBlocks : 0f;
+                m_updateParameters.Locations[nextKey] = new UpdateLocation {
+                    Center = circle.Center,
+                    LastChunksUpdateCenter = circle.Center,
+                    VisibilityDistance = visibility,
+                    ContentDistance = MathUtils.Max(circle.RadiusBlocks, visibility)
+                };
+                m_residencyLocationKeys.Add(nextKey);
+                nextKey--;
+            }
         }
 
         public virtual bool SendReceiveChunkStates() {

@@ -152,6 +152,17 @@ namespace Game {
                 Dictionary<string, string> cfg = LoadConfig();
                 cfg["last_run_renderer"] = LastRenderer;
                 cfg["last_run_angle_forced"] = AngleForcedThisRun ? "1" : "0";
+                // [v0.0.5] ANGLE 路径下 EGL 的 swap interval 需要在上下文建立后再显式设一次，
+                // 否则启动时读到的"帧率上限"（SettingsManager.PresentationInterval）不生效（实测会跑成不限帧）。
+                if (AngleForcedThisRun) {
+                    try {
+                        Window.PresentationInterval = SettingsManager.PresentationInterval;
+                        Log.Information($"Skyline GPU: re-applied the frame limit for the ANGLE path (PresentationInterval={SettingsManager.PresentationInterval})");
+                    }
+                    catch (Exception ex) {
+                        Log.Error($"Skyline GPU: re-applying the frame limit failed (ignored). {ex}");
+                    }
+                }
                 string previousState = cfg.GetValueOrDefault("state", "");
                 if (TargetAdapter != null
                     && !string.IsNullOrEmpty(TargetAdapter.Name)) {
@@ -293,8 +304,11 @@ namespace Game {
         // ================================================================================================
 #if WINDOWS
         static void PrepareWindows() {
-            if (Program.StartupParameters.TryGetValue("skylinegpu", out string parameter)
-                && string.Equals(parameter, "off", StringComparison.OrdinalIgnoreCase)) {
+            string startupParameter = null;
+            if (Program.StartupParameters.TryGetValue("skylinegpu", out string parameter)) {
+                startupParameter = parameter;
+            }
+            if (string.Equals(startupParameter, "off", StringComparison.OrdinalIgnoreCase)) {
                 Enabled = false;
                 State = "disabled";
                 LastAction = "startup parameter -skylinegpu off";
@@ -317,6 +331,30 @@ namespace Game {
             }
 
             Dictionary<string, string> cfg = LoadConfig();
+            // [v0.0.5] `-skylinegpu angle`：显式强制走 ANGLE 直选（即使目标卡已经是系统默认）。
+            // 之前只有配置文件里写 strategy=angle 才能强制，文档与命令行不一致。
+            if (string.Equals(startupParameter, "angle", StringComparison.OrdinalIgnoreCase)) {
+                cfg["strategy"] = "angle";
+                Log.Information("Skyline GPU: forced ANGLE path by the startup parameter (-skylinegpu angle)");
+            }
+            // [v0.0.5] UsingAngle 标记的生命周期：如果是上一次 Skyline 的 ANGLE 兜底写下的标记，
+            // 而这次要走"系统偏好 + 原生驱动"，就把它删掉（只删我们自己写的；用户手工建的不动）。
+            // 不删的话游戏会永远停在 ANGLE 兼容模式，回不到原生 GL。
+            if (!string.Equals(cfg.GetValueOrDefault("strategy", ""), "angle", StringComparison.OrdinalIgnoreCase)
+                && string.Equals(cfg.GetValueOrDefault("angle_marker_ours", "0"), "1", StringComparison.Ordinal)) {
+                try {
+                    string markerPath = Path.Combine(AppContext.BaseDirectory, "UsingAngle");
+                    if (File.Exists(markerPath)) {
+                        File.Delete(markerPath);
+                        Log.Information("Skyline GPU: removed the UsingAngle marker written by a previous Skyline ANGLE run; native GL will be used on this start");
+                    }
+                    cfg["angle_marker_ours"] = "0";
+                    SaveConfig(cfg);
+                }
+                catch (Exception ex) {
+                    Log.Error($"Skyline GPU: removing the UsingAngle marker failed (ignored). {ex}");
+                }
+            }
             string strategy = cfg.GetValueOrDefault("strategy", "auto");
             AdapterInfo target = null;
             if (uint.TryParse(cfg.GetValueOrDefault("target_luid_high", ""), out uint high)
@@ -467,6 +505,8 @@ namespace Game {
             GLWrapper.PrecreatedEglDisplay = display;
             AngleForcedThisRun = true;
             cfg["strategy"] = "angle";
+            // 记下"这个 UsingAngle 标记是 Skyline 自己写出来的"，下次回到系统偏好路径时才能安全清掉
+            cfg["angle_marker_ours"] = File.Exists(Path.Combine(AppContext.BaseDirectory, "UsingAngle")) ? "0" : "1";
             cfg["angle_egl_version"] = $"{major}.{minor}";
             cfg.Remove("angle_missing");
             cfg.Remove("angle_load_failed");

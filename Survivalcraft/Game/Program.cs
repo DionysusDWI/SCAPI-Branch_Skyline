@@ -230,6 +230,8 @@ namespace Game {
             };
             // Skyline：必须在创建窗口/图形上下文之前完成显卡选择（见 Game/SkylineGpu.cs）
             SkylineGpu.Prepare();
+            // Skyline：NVIDIA 深化（NVAPI 直连，单独开关；非 NVIDIA 机器上完全无副作用）
+            SkylineNvidia.Prepare();
             Window.Run(0, 0, WindowMode.Resizable, title);
         }
 
@@ -277,6 +279,7 @@ namespace Game {
             }
             // Skyline：图形上下文已建立，复核"实际跑在哪张显卡"并写回配置
             SkylineGpu.OnGameInitialized();
+            SkylineNvidia.OnGameInitialized();
         }
 
         public static void Run() {
@@ -303,6 +306,8 @@ namespace Game {
                     DialogsManager.Update();
                     // Skyline：到主菜单后弹一次"检测到更强显卡，重启后生效"提示
                     SkylineGpu.Tick();
+                    // Skyline：NVIDIA 温度/占用轮询（内部 1 秒节流）
+                    SkylineNvidia.Tick();
 #if !IOS && !BROWSER
                     JsInterface.Update();
 #endif

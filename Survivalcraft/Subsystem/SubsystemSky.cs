@@ -332,6 +332,8 @@ namespace Game {
                     float num5 = m_fogSeedRandom.Bool(0.66f) ? m_fogSeedRandom.Float(12f, 22f) : m_fogSeedRandom.Float(12f, 80f);
                     m_viewFogBottom = MathUtils.Lerp(num4, x2, m_subsystemWeather.FogProgress);
                     m_viewFogTop = m_viewFogBottom + num5;
+                    // Skyline v0.0.5：视角雾带高度可由 SkylineAtmosphere 接管（默认关闭 = 原版 62~180 绝对高度）
+                    SkylineAtmosphere.ApplyFogBand(ref m_viewFogBottom, ref m_viewFogTop, viewPosition);
                     m_viewFogDensity = MathF.Pow(m_subsystemWeather.FogIntensity, 2f) * m_fogSeedRandom.Float(0.04f, 0.1f);
                     float num6 = 256f;
                     float num7 = 128f;
@@ -708,7 +710,9 @@ namespace Game {
                     float num6 = num4 > 0 ? num5 / MathF.Sqrt(num2 * num2 + num3 * num3) : 0f;
                     float num7 = num2 * num6;
                     float num8 = num3 * num6;
-                    float y = MathUtils.Lerp(600f, 60f, num5 * num5);
+                    // Skyline v0.0.5：云层高度可由 SkylineAtmosphere 接管（默认关闭 = 原版 600..60 绝对高度；
+                    // 打开后可让云层跟随相机高度，解决"高空建筑跑到云上面"的问题）
+                    float y = SkylineAtmosphere.CloudLayerY(num4, num5, viewPosition);
                     Vector3 position = new(viewPosition.X + num7 * 1900f, y, viewPosition.Z + num8 * 1900f);
                     Vector2 texCoord = new Vector2(position.X, position.Z) / 1900f * 1.75f - v;
                     Color color = m_cloudsLayerColors[num4];

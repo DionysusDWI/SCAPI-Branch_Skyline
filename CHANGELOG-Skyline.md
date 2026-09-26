@@ -3,6 +3,73 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.0.5] - 2026-09-26
+
+第五个版本：把分支从"范围可用、卡选得对"推进到**"能大面积盖、能高处看、能把建筑当对象搬"**——
+四个新模块 + 一个既有崩溃修复（全部带运行时实测证据）：
+
+1. **区块列驻留**：远处建造不再"静默失效"（列被钉在内存里；写入接口也不再假装成功）；
+2. **NVIDIA 深化**：NVAPI 直连只读信息 + DLSS/光追**独立开关**（默认关闭，硬件支持与渲染器支持分开报告）；
+3. **蓝图/区域变换**：把一个区域当对象**捕获/旋转/镜像/贴回/导入导出**，还有 Fill/Replace；
+4. **分层云雾/天空高度**：云层与视图雾带的高度可配、可逐层指定、可跟随相机高度——解决"高空建筑在云上面"；
+5. **修既有 bug**：世界最底层（y = MinHeight）放方块会让区块几何生成抛 `IndexOutOfRangeException`（第一列算到 `Cells[-1]`）。
+
+**本版相对 v0.0.4 的变更**：v0.0.4 解决的是"竖直范围本身稳定 + 跑在最强显卡上"；
+但**大范围施工**仍受"远处列没加载就静默丢弃"限制，**高空**仍受"云层写死在 60..600 绝对高度"限制，
+建筑也只能一格一格改。v0.0.5 补的正是这三条**创作链路上的硬伤**（驻留 / 云雾高度 / 蓝图），
+顺带把 NVIDIA 侧的信息面打开（为将来 DLSS / 光追铺路），并修掉一个会让主线程卡死的既有几何崩溃。
+
+### Added
+
+- **`Game/SkylineRuntime.cs`（+377 行）· 区块列驻留**：`ChunkResidencyMode`（**独立开关，默认关闭**）、
+  `AddResidencyRegion / RemoveResidencyRegion / ClearResidencyRegions`、
+  非阻塞 `EnsureRegionLoaded`（临时区 `__ensure`，TTL 默认 300 s，自动回收）、
+  `ResidencyStatus()`（每区 chunks / allocated / contentsReady / geometryReady / estimatedMB）、
+  `ResidencyFullDetail`（true=连几何一起生成，false=只加载内容省显存）、`ResidencyMaxChunks` 预算守卫（默认 192 ≈ 384 MB）。
+  实现上只往 `TerrainUpdater` 的 update locations 追加"覆盖圆"，**不改相机可见距离**（与将来的游览模式球形视距不冲突）。
+- **`Game/SkylineNvidia.cs`（新文件）· NVIDIA 深化（NVAPI 直连）**：运行时 `NativeLibrary.TryLoad("nvapi64.dll")`
+  + `nvapi_QueryInterface`，函数 ID 与结构体布局逐条对照官方 `nvapi.h` / `nvapi_interface.h`；
+  读出驱动版本/显卡名/显存/核心数/架构/PCI ID/温度/占用，**只读、不碰渲染管线**；
+  `AllowDlss` / `AllowRayTracing` 是**独立开关（默认 false）**，且如实区分"硬件支持"与"当前渲染器支持"（本版是 OpenGL ES，两者都是 false）。
+  默认打开（信息读取），可用 `-nvapi off` / 配置 `enabled=0` / 桥 `SetSwitches(false,…)` **整体关闭**；
+  非 NVIDIA 机器上只是"一次 TryLoad 失败即返回"（实测 `state=no-dll`，无异常、无副作用）。
+- **`Game/SkylineBlueprint.cs`（新文件）· 蓝图 / 区域变换**：`Capture / CaptureAt / Paste（旋转 0/90/180/270、XZ 镜像、只填空位）/
+  Copy / MirrorRegion / Fill / Replace / Export / Import / ListFiles / Info / LastResultJson`；
+  写世界一律走 `ChangeCell` + 光照重算，写完**回读校验**，并把"列没加载"如实报成 `skipNotLoaded`（绝不静默成功）。
+- **`Game/SkylineAtmosphere.cs`（新文件）· 分层云雾 / 天空高度**：`CloudBaseY~CloudTopY` 可配、
+  `LayerHeightsY="300,320,340,360"` **逐层指定绝对高度**、`CloudAltitudeBlend` 让云层跟随相机高度；
+  `FogAltitudeOffsetY / FogAltitudeBlend` 让视图雾带随高度抬升；另有 `Explain(viewY)` 预演、`Status()`、`HighAltitudePreset()`、`Reset()`。
+- `Subsystem/SubsystemSky.cs`：两处钩子（云层高度、视图雾带），**关闭时与原版逐位一致**（`cloudModified == 0` 可判据）。
+- 桥侧（另一个仓库）：反射根 `skylinenvidia` / `skylinebuilder` / `skylineblueprint` / `skylineatmosphere`；
+  `op:cell` 增加写入守卫（未分配列 → 明确报错并提示开驻留；内容未加载 → 报错；写后回读 → `write_did_not_stick`；`"force":true` 可跳过前两项）。
+
+### Fixed
+
+- **`Game/BlockGeometryGenerator.cs`（既有 bug）**：y = `TerrainChunk.MinHeight` 的方块在**区块第一列（localX=0 / localZ=0）**
+  生成几何时，三处"取下面一格"的取样（`GetCellValueFast(x, y-1, z)` 与 faces 光照的 `index - 1`）会算到 `-1`，
+  抛 `IndexOutOfRangeException`（原版 y=0 是基岩、不参与几何，所以没暴露）。现在最底层一律按"没有下一格"处理（空气、无光）。
+  运行时 A/B（全高墙 x=2560..2575 / z=6736，横跨全高）：修复前 **30~40 条/分钟 + 主线程卡死**，修复后 **0 条、进程 Responding=True**。
+- `Game/SkylineBlueprint.cs`：回读校验原本逐位比较（含 light），而 `ChangeCell` 后引擎会重算光照 →
+  正常写入被误报成 `failed`（实测 192 格里有 6 格误报）。改为只比 `contents + data`（`SameBlockIgnoringLight`）。
+
+### Changed
+
+- `Game/TerrainUpdater.cs`（+46 行）：`ApplySkylineResidencyLocations()` 把驻留矩形铺成覆盖圆塞进 update locations（哨兵键从 -1000 起），
+  只在 `SkylineRuntime.ResidencyVersion` 变化时重建；关掉开关就完全回到原版行为。
+- `Game/SkylineGpu.cs`：ANGLE 路径在上下文建立后**重新应用帧率上限**（否则实测会跑成不限帧）；
+  新增 `-skylinegpu angle` 强制走 ANGLE 直选（与文档口径一致）；`UsingAngle` 标记记录"是不是 Skyline 自己写的"，
+  下次回到"系统偏好 + 原生 GL"时**只删自己写的那个标记**（用户手工建的不动）。
+- `Game/Program.cs`：接入 `SkylineNvidia.Prepare()` / `OnGameInitialized()` / `Tick()`（NVAPI 初始化在创建窗口之前，温度/占用轮询 1 秒节流）。
+
+### 实测证据（要点）
+
+| 模块 | 判据 | 结果 |
+|---|---|---|
+| 区块列驻留 | 离玩家 467.8 m 的 64×64 区：开关关→写远处报错；开→`contentsReady=chunks` 后可写可读；关开关→释放；重开→从磁盘恢复 | **6/6 PASS ×2 轮**（释放 4.6~24.5 s，与区块数成正比：每区块落盘 ≈2 MB） |
+| 蓝图/区域变换 | 8×6×4 图案：捕获 192 → 原样贴回逐格全等 → 旋转 90°（4×6×8、材质多重集一致、两次粘贴逐格一致）→ 就地镜像（192 格全对称、再镜像还原）→ Export/Forget/Import 往返 → 关驻留后远处粘贴 `written=0 / skipNotLoaded=192` | **9/9 PASS** |
+| 分层云雾 | 高空 (y≈1022) 上半幅"云占比"：关闭 51.1% → 打开 76.4%；地面 7.226% → 7.224%；雾带 [79.2,91.5] → [1101.8,1114.0] | **6/6 PASS** |
+| NVIDIA | `state=ok driver="r610_85" gpu="RTX 4060 Laptop GPU" vram=8187MB cores=3072 arch=Ada(AD100) temp/util 随负载变化`；指向不存在的 dll → `state=no-dll` 且无异常 | 实机复核通过 |
+
 ## [v0.0.4] - 2026-09-26
 
 第四个版本：把 **-1024..1023** 的竖直范围从"能写能存"推进到**"各方面都稳定"**——
