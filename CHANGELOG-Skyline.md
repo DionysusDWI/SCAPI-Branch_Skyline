@@ -77,7 +77,10 @@ v0.0.4 补的是**范围之外的下游行为**——方块行为子系统、方
 ```
 第一次启动：4 adapters, default="AMD Radeon 780M Graphics", best="NVIDIA GeForce RTX 4060 Laptop GPU"
           wrote HKCU GPU preference GpuPreference=2 for "...\Survivalcraft.exe"
-          → 本次仍跑默认核显，并弹出"重启后生效"对话框（截图：data/sessions/skyline-v004/gpu-restart-prompt.png）
+          → 本次仍跑默认核显，主菜单弹出"重启后生效"提示
+            （截图：data/sessions/skyline-v004/gpu-restart-prompt.png —— 该图取自修复"首启误报升级"之前的中间构建，
+              所以文案是"系统显卡偏好未生效…请再重启一次"；修复后的首启只提示"重启后生效"，
+              升级提示只在系统偏好确实没生效的下一次启动才出现）
 重启后  ：default="NVIDIA GeForce RTX 4060 Laptop GPU"；Renderer=NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2
           → 独立复核：Survivalcraft 进程 GPU 引擎占用 67.9%~71.4% 全在 NVIDIA LUID，AMD 侧 ~1%
 ANGLE 兜底：ANGLE forced to "NVIDIA GeForce RTX 4060 Laptop GPU" (luid 00000000-00013D69)
