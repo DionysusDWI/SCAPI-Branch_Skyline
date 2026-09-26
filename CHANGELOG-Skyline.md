@@ -3,6 +3,37 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.0.7] - 2026-09-26
+
+第七个版本：把用户口径的**三段高度带**变成一个"一键预设"——低层雾（近地面）+ **底层云 +300~+400** +
+**高层云 ≈+900**，都按**绝对高度**规划（不做体积云/体积雾）。
+
+**本版相对 v0.0.6 的变更**：v0.0.5 已交付 `SkylineAtmosphere`（云层高度可配、可逐层指定、可跟随相机；
+雾带可偏移/跟随），但"底云 +300~400 / 高云 ≈900"这个**具体分带**要手写一串属性；
+v0.0.7 只加一个 `LayeredPreset()`（以及把它的数字写进文档），其余模块与行为不变。
+
+### Added
+
+- **`SkylineAtmosphere.LayeredPreset()`**：一键把 4 层云按用户口径排成两带——
+  头顶两圈 → **880/900**（高层云），外圈两圈 → **340/380**（底层云）；
+  同时 `FogAltitudeOffsetY=80` + `FogAltitudeBlend=1`（低层雾贴着地形/相机走），`CloudAltitudeBlend=0`（云用绝对高度，分带才成立）。
+  实测 `lastCloudYs=[900,880,380,340]`、`Explain()` 逐层给出 `currentY`；`Reset()` 仍然回到原版口径（`enabled=False`、`cloudModified=0`）。
+
+### Verified
+
+| 判据 | 结果 |
+|---|---|
+| `LayeredPreset()` 后逐层云高 | `[900,880,380,340]`（= 高云带 880~900、底云带 340~380） |
+| 低层雾 | `fogOffset=80 fogBlend=1`，雾带跟随视图高度（`lastFogBottom/Top` 可读） |
+| 关闭对照 | `Reset()` → `enabled=False cloud=60..600 cloudBlend=0`，`cloudModified=0`（与原版逐位一致） |
+| 截图 | `data/sessions/skyline-v005/atmosphere/layered-high-on.png`（地面朝上：两条云带都在头顶） |
+
+### Known issues
+
+- 4 层云是"两带"的最小实现（每带 2 层、间距 20 格）；要做**厚度可调/更多层数**需要改 `SubsystemSky` 的层数，
+  本版没做（用户也明确说"暂不需要体积云"）。
+- 分带后云与云之间会出现"空白天带"（340~880 之间没云），这是有意的；不想要就 `LayerHeightsY` 自己重排。
+
 ## [v0.0.6] - 2026-09-26
 
 第六个版本：补齐 v0.0.5 里被推迟的**曲线建筑生成**——按用户口径"**不是某个圆或者椭圆的一部分，而是通过贝塞尔曲线生成的**"：

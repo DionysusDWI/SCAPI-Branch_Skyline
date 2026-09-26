@@ -269,6 +269,29 @@ namespace Game {
             return Describe();
         }
 
+        /// <summary>
+        /// **用户口径的三带预设**（v0.0.7）：低层雾（近地面，抬升原版雾带）+ 底层云 **+300~+400** + 高层云 **≈+900**。
+        ///
+        /// 做法：4 层云里最外两圈（layer 2/3）压到 340~380 当"底云"，头顶两圈（layer 0/1）抬到 880~900 当"高云"；
+        /// 视图雾带整体抬到地表上方一点点（`FogAltitudeOffsetY=80`，`FogAltitudeBlend=1` 让它跟着地形高度走）。
+        /// 想改数字就照这个模式赋 `LayerHeightsY` / `FogAltitudeOffsetY` 即可。
+        /// </summary>
+        public static string LayeredPreset() {
+            m_cloudBaseY = 340f;      // 底云带下沿
+            m_cloudTopY = 900f;       // 高云带上沿
+            m_layerHeightsOverride[0] = 900f;   // 头顶那一圈 → 高层云
+            m_layerHeightsOverride[1] = 880f;
+            m_layerHeightsOverride[2] = 380f;   // 外圈两圈 → 底层云
+            m_layerHeightsOverride[3] = 340f;
+            m_layerHeightsOverrideActive = true;
+            m_cloudAltitudeBlend = 0f;          // 绝对高度（不跟随相机），这样"高度分带"才成立
+            m_fogAltitudeOffsetY = 80f;         // 低层雾：比地表略高一点，贴地那一段才有雾
+            m_fogAltitudeBlend = 1f;            // 跟着地形/相机高度走
+            m_enabled = true;
+            m_lastError = "";
+            return Describe();
+        }
+
         /// <summary>恢复原版口径并关闭总开关。</summary>
         public static string Reset() {
             m_enabled = false;
