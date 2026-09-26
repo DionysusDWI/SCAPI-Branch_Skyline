@@ -102,9 +102,15 @@ runB(重启)：default="NVIDIA …" → Renderer=NVIDIA GeForce RTX 4060 Laptop 
 ```
 
 日志原文：`data/sessions/skyline-v004/gpu-runA-fresh-amd-first-run.log.txt` / `gpu-runB-restart-nvidia.log.txt`。
-同一场景（别墅 y≈88）实测帧率：原生路径（NVIDIA，垂直同步）≈ 30 fps；ANGLE/D3D11（NVIDIA）≈ 56 fps
-（`gpu-run3-angle-nvidia.log.txt`）——兼容模式在帧率上不吃亏，但它会切换渲染后端，
-所以**默认仍走"系统偏好 + 原生"**，ANGLE 只作兜底/可选项（`SkylineGpu.cfg` 里写 `strategy=angle` 可强制）。
+同一场景（别墅 y≈88）实测帧率：原生路径（NVIDIA）≈ 30 fps；ANGLE/D3D11（NVIDIA）≈ 56 fps
+（`gpu-run3-angle-nvidia.log.txt`）。
+**⚠ 这个 30 不是原生路径的锅**：把 `Window.PresentationInterval` 改成 0（关掉帧率上限）后，
+同一场景同一位置的**原生 NVIDIA** 实测 **485–930 fps**——因为 `Settings.xml` 里 `PresentationInterval = 2`
+就是设置界面的"帧率上限 30"（= 60Hz 下每 2 个 vblank 交换一次），原生路径老实遵守它，
+而 ANGLE 那条路（EGL 后端）没有把 2 当成 30fps 上限，才显得"更快"。
+结论：**两种路径的能力都远超 60fps**，差别只是对 `PresentationInterval` 的解释；做性能对比前先统一该设置。
+兼容模式没有帧率优势，但它会切换渲染后端，所以**默认仍走"系统偏好 + 原生"**，
+ANGLE 只作兜底/可选项（`SkylineGpu.cfg` 里写 `strategy=angle` 可强制）。
 
 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
 
