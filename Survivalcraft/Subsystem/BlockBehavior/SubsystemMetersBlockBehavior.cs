@@ -148,9 +148,10 @@ namespace Game {
                 int num12 = num9 + y;
                 int num13 = num10 + z;
                 TerrainChunk chunkAtCell = terrain.GetChunkAtCell(num11, num13);
+                // [Skyline v0.0.4] 原来写死 0/256：热量表（米/温度计）在扩展高度下不工作
                 if (chunkAtCell == null
-                    || num12 < 0
-                    || num12 >= 256) {
+                    || num12 < TerrainChunk.MinHeight
+                    || num12 > TerrainChunk.HeightMinusOne) {
                     continue;
                 }
                 int x2 = num11 & 0xF;
@@ -229,8 +230,8 @@ namespace Game {
                         int x3 = (x + j) & 0xF;
                         int num33 = y + l;
                         int z3 = (z + k) & 0xF;
-                        if (num33 >= 0
-                            && num33 < 256) {
+                        if (num33 >= TerrainChunk.MinHeight
+                            && num33 <= TerrainChunk.HeightMinusOne) {
                             float heat2 = GetHeat(chunkAtCell2.GetCellValueFast(x3, num33, z3));
                             if (heat2 > 0f
                                 && !SubsystemTerrain.Raycast(

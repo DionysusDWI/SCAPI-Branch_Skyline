@@ -3,6 +3,97 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.0.4] - 2026-09-26
+
+第四个版本：把 **-1024..1023** 的竖直范围从"能写能存"推进到**"各方面都稳定"**——
+清掉 16 处写死的竖直上下界（`0 / 255 / 256`）并修好由此产生的 6 类行为缺陷；
+同时新增**显卡自动选择**（DXGI 评分选卡 + 两种切换机制 + 重启提示）。
+
+**本版相对 v0.0.3 的变更**：v0.0.3 只保证"范围本身可用"（写入/存档/光照/几何），
+v0.0.4 补的是**范围之外的下游行为**——方块行为子系统、方块实体、寻路、阴影、降雪、VR 落点等
+仍然按 0..255 的老口径工作；另外 v0.0.3 完全没有显卡选择能力。
+
+### Added
+
+- **`Game/SkylineGpu.cs`（新文件）**：Windows 显卡自动选择模块（非 mod，游戏本体内置），流程按需求实现：
+  1. **第一次运行**用**默认显示适配器**跑起来 → DXGI 枚举全部适配器 → 按"软件适配器排除、独显 > 核显、NVIDIA 优先、显存大者优先"评分；
+  2. 选出最优卡后写入 Windows"本应用显卡偏好"（`HKCU\Software\Microsoft\DirectX\UserGpuPreferences`，值名 = **exe 全路径**，值 `GpuPreference=2;`），并在主菜单弹一次**"检测到更强显卡，重启后生效"**[立即重启][稍后]；
+  3. **重启后**用 `Display.DeviceDescription` 复核是否真的跑在目标卡上，结论写回 `SkylineGpu.cfg` 与日志（`applied` / `escalated` / `failed`）；
+  4. 兜底：系统偏好不可用时改走 **ANGLE 按 LUID 直选 D3D11 适配器**（`eglGetPlatformDisplayEXT` + `EGL_PLATFORM_ANGLE_DEVICE_ID_HIGH/LOW_ANGLE`），这条**本次启动即可生效**。
+  关闭开关：启动参数 `-skylinegpu off`；清空目标：删掉游戏目录 `SkylineGpu.cfg`。
+- `Engine/Engine.Graphics/EGL.cs`、`GLWrapper.cs`：新增 `TryCreatePlatformDisplay(luidHigh, luidLow, …)` 预检并把已初始化的 `EGLDisplay` 交给 `GLWrapper` 复用（只创建一次设备）。
+- `Build-Windows.ps1 -Deploy` 的部署清单增加 `libEGL.dll` / `libGLESv2.dll` / `glfw3.dll`（按 LUID 选卡依赖它们）。
+- 桥侧（另一个仓库）：`skylinegpu.Describe() / Rescan() / ClearTarget()` 反射根，可用 `{"op":"invoke","target":"skylinegpu","member":"Describe","action":"call"}` 直接读状态。
+
+### Changed（竖直范围：16 处硬编码上下界）
+
+| 文件 | 原来写死 | 现在 |
+|---|---|---|
+| `Subsystem/BlockBehavior/SubsystemCollapsingBlockBehavior.cs` | `p.Y <= 0` 直接返回、`for (i = p.Y; i < 256; i++)` | `<= TerrainChunk.MinHeight`、`i <= HeightMinusOne` |
+| `Subsystem/SubsystemBlockEntities.cs` | `Coordinates.Y >= 0` 才登记 | `>= TerrainChunk.MinHeight`；另**容忍重复键**（见 Fixed） |
+| `Subsystem/BlockBehavior/SubsystemFluidBlockBehavior.cs` | `y < 255`、`y >= 0 && y < 255`、`while (y < 255)` | `y < HeightMinusOne`、`y >= MinHeight && y < HeightMinusOne` |
+| `Subsystem/BlockBehavior/SubsystemPlantBlockBehavior.cs` | `y <= 0 \|\| y >= 255` 不生长 | `y <= MinHeight \|\| y >= HeightMinusOne` |
+| `Subsystem/BlockBehavior/SubsystemWoodBlockBehavior.cs` | `Max(y - 3, 0)`、`Min(y + 3, 255)` ×2 处 | `Max(y - 3, MinHeight)`、`Min(y + 3, HeightMinusOne)` |
+| `Subsystem/BlockBehavior/SubsystemDeciduousLeavesBlockBehavior.cs` | `p.Y >= 1 && p.Y < 256` | `p.Y > MinHeight && p.Y <= HeightMinusOne` |
+| `Subsystem/BlockBehavior/SubsystemSoilBlockBehavior.cs` | `y > 0 && y < 254`（湿润判定） | `y > MinHeight && y < HeightMinusOne - 1` |
+| `Subsystem/BlockBehavior/SubsystemMetersBlockBehavior.cs` | `num12 < 0 \|\| >= 256`、`num33 >= 0 && < 256` | `MinHeight` / `HeightMinusOne` |
+| `Subsystem/SubsystemPathfinding.cs` | 阻挡检测夹 `0..255` | 夹 `MinHeight..HeightMinusOne` |
+| `Subsystem/SubsystemShadows.cs`、`Subsystem/SubsystemModelsRenderer.cs` | 阴影取样 `Min(y, 255)`、`Max(y-2, 0)` | `HeightMinusOne` / `MinHeight` |
+| `Subsystem/SubsystemWeather.cs` | 积雪判定 `num6 + 1 >= 255` | `num6 >= HeightMinusOne` |
+| `Subsystem/SubsystemCreatureSpawn.cs` | 鳐鱼水底扫描 `num29 > 0` | `num29 > TerrainChunk.MinHeight` |
+| `Component/ComponentInput.cs` | VR 落点净空 `Max(cellY, 0)` / `< 255` | `MinHeight` / `HeightMinusOne` |
+| `Component/Behavior/ComponentFlyAwayBehavior.cs`、`ComponentRunAwayBehavior.cs` | 落脚点扫描 `255..0` | `HeightMinusOne..MinHeight` |
+
+### Fixed
+
+- **沙/砾石柱不再在范围内卡住**：原来 `p.Y <= 0` 让 y<=0 直接不判定、`< 256` 让 y>255 扫不到柱顶；
+  实测 y=1001 与 y=-19 的沙柱失去支撑后**悬空不动**，现在与 y=2 的对照一样正常塌落。
+- **y<0 的方块实体（箱子/熔炉/工作台/发射器…）打不开**：`SubsystemBlockEntities` 原来用 `Coordinates.Y >= 0` 过滤，
+  y<0 的方块实体不会进索引 → `GetBlockEntity()` 永远返回 null → 交互链直接失败。实测 y=-3 的箱子现在能打开（弹出 `ChestWidget`）。
+  同时**容忍重复键**：旧版在 y<0 不登记，同一坐标会被反复创建并一起存进存档；修好范围后这些重复项会让
+  `Dictionary.Add` 抛异常 → **整个存档加载失败**。现在重复项只保留先登记的并记一条警告。
+- **y>254 的液体 `isTop` 不更新**：水面被当成"未标记顶部"渲染成整块立方体；实测 y=1000 与 y=200 的水现在**同为 57 格铺开 +
+  边缘 6 格外溢**，水源 `data` 都带 `0x10`（isTop）位。顺带修好 `GetSurfaceHeight` 在 y<0 / y>254 取不到液面（游泳/浮力/液面高度）。
+- 一并恢复的小项：植物在地下/高处不生长、伐木后树叶连带检查越界、落叶柱扫描失效、耕地湿润判定失效、
+  生物在扩展高度找不到逃跑/飞走落脚点、高处角色与生物阴影取样被夹到 y=255、高处不积雪、VR 传送落点净空只看 0..254。
+
+### Verified（运行时 A/B 实测，2026-09-26）
+
+| 项 | 改前（v0.0.3 构建） | 改后（v0.0.4 构建） |
+|---|---|---|
+| 沙柱失去支撑 y=2（对照） | 塌落 | 塌落 |
+| 沙柱失去支撑 **y=1001** | **悬空不动** | 塌落到 y=1000 |
+| 沙柱失去支撑 **y=-19** | **悬空不动** | 塌落（离开探测窗口 = 继续下落） |
+| 箱子 **y=-1000** 交互 | `handled=0`、无界面 | — |
+| 箱子 **y=-3** 交互 | （同上口径） | `handled=1` + 弹出 `ChestWidget` |
+| 水 y=200（对照） | 57 格铺开、isTop… | 57 格铺开、`data=0x10` |
+| 水 **y=1000** | 可流动但取样/浮力失效 | 57 格铺开、6 格外溢、`data=0x10` |
+| 爆炸 y=200 vs y=1000 | 均由局部 256³ 网格处理（无差异） | 同左 |
+| 4852 方块批量放置 | — | **0.58 s / 8366 格每秒**，FPS 59，内存无增长 |
+| `SaveProject(true,false)`（含地形区块回写） | — | 0.34 s，`Project.xml` 落盘 |
+
+显卡选择（`Bugs/Game.log` + 独立性能计数器 `heightlab/gpu-probe.ps1`）：
+
+```
+第一次启动：4 adapters, default="AMD Radeon 780M Graphics", best="NVIDIA GeForce RTX 4060 Laptop GPU"
+          wrote HKCU GPU preference GpuPreference=2 for "...\Survivalcraft.exe"
+          → 本次仍跑默认核显，并弹出"重启后生效"对话框（截图：data/sessions/skyline-v004/gpu-restart-prompt.png）
+重启后  ：default="NVIDIA GeForce RTX 4060 Laptop GPU"；Renderer=NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2
+          → 独立复核：Survivalcraft 进程 GPU 引擎占用 67.9%~71.4% 全在 NVIDIA LUID，AMD 侧 ~1%
+ANGLE 兜底：ANGLE forced to "NVIDIA GeForce RTX 4060 Laptop GPU" (luid 00000000-00013D69)
+          Renderer=ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU (0x000028E0) Direct3D11 …, D3D11-32.0.16.1088)
+```
+
+构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
+
+### Known issues
+
+- 区块是**按 XZ 整列**（16×16×2048）加载的；离玩家很远、尚未 Valid 的列里，`ChangeCell` 写入会被静默丢弃
+  （引擎原有行为，不是本版引入）。脚本化建造时请把场地放在玩家附近，或先走过去把列激活。
+- `ComponentFlyAway/RunAway` 的落脚点扫描从 256 次变成 2048 次（每次决策成本上升 ~8 倍）；实测未造成可见卡顿，
+  后续可改成"从生物所在高度向下 bounded 扫描"。
+- 云层/雾的视觉参数仍是原版口径（云在 y≈256 附近），高空建筑会位于云层之上。
+
 ## [v0.0.3] - 2026-09-26
 
 第三个版本：地下深度从 **-128** 对齐到 **-1024**（世界竖直范围 **-1024..1023**，共 2048 层），

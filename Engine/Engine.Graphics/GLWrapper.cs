@@ -75,6 +75,13 @@ namespace Engine.Graphics {
         public static int GL_MAX_VERTEX_UNIFORM_VECTORS;
         /// <summary>是否使用 ANGLE（EGL）兼容模式。Windows 端运行时检测/回退决定，其他平台恒为 false。</summary>
         public static bool UsingAngle = false;
+        /// <summary>Skyline：是否按 <see cref="AngleAdapterLuidHigh"/>/<see cref="AngleAdapterLuidLow"/> 强制选择 ANGLE 的 D3D11 适配器。</summary>
+        public static bool AngleAdapterForced = false;
+        /// <summary>Skyline：目标显示适配器的 LUID 高/低 32 位（DXGI_ADAPTER_DESC1.AdapterLuid）。</summary>
+        public static uint AngleAdapterLuidHigh = 0u;
+        public static uint AngleAdapterLuidLow = 0u;
+        /// <summary>Skyline：预检阶段已经创建并初始化好的 EGLDisplay；非 0 时直接复用，避免二次创建设备。</summary>
+        public static IntPtr PrecreatedEglDisplay = IntPtr.Zero;
 
         public static void Initialize() {
 #if BROWSER
@@ -157,11 +164,51 @@ namespace Engine.Graphics {
 
 #if BROWSER || WINDOWS
         /// <summary>
+        /// 创建 EGLDisplay：Skyline 指定了适配器 LUID 时走 eglGetPlatformDisplayEXT（D3D11 平台 + 设备 ID），
+        /// 否则或失败时回退 eglGetDisplay(EGL_DEFAULT_DISPLAY)。
+        /// </summary>
+        static IntPtr CreateEglDisplay() {
+#if WINDOWS
+            if (UsingAngle
+                && AngleAdapterForced) {
+                try {
+                    if (PrecreatedEglDisplay != IntPtr.Zero) {
+                        Log.Information("Skyline GPU: reusing the pre-validated ANGLE platform display");
+                        return PrecreatedEglDisplay;
+                    }
+                    Egl.GetPlatformDisplayExtDelegate getPlatformDisplay = Egl.GetPlatformDisplayExt();
+                    if (getPlatformDisplay != null) {
+                        int[] attribs = [
+                            Egl.PlatformAngleType, Egl.PlatformAngleTypeD3d11,
+                            Egl.PlatformAngleDeviceIdHigh, unchecked((int)AngleAdapterLuidHigh),
+                            Egl.PlatformAngleDeviceIdLow, unchecked((int)AngleAdapterLuidLow),
+                            Egl.None
+                        ];
+                        IntPtr display = getPlatformDisplay(Egl.PlatformAngle, IntPtr.Zero, attribs);
+                        if (display != IntPtr.Zero) {
+                            Log.Information($"Skyline GPU: created ANGLE D3D11 platform display for adapter LUID {AngleAdapterLuidHigh:X8}-{AngleAdapterLuidLow:X8}");
+                            return display;
+                        }
+                        Log.Warning($"Skyline GPU: eglGetPlatformDisplayEXT returned no display (eglGetError=0x{Egl.GetError():X4}), falling back to the default display");
+                    }
+                    else {
+                        Log.Warning("Skyline GPU: eglGetPlatformDisplayEXT is unavailable, falling back to the default display");
+                    }
+                }
+                catch (Exception ex) {
+                    Log.Error($"Skyline GPU: failed to create platform display for the requested adapter, falling back to the default display. Reason: {ex}");
+                }
+            }
+#endif
+            return Egl.GetDisplay(IntPtr.Zero);
+        }
+
+        /// <summary>
         /// 通过 EGL 初始化 OpenGL ES 上下文（BROWSER 由浏览器宿主提供 EGL，WINDOWS 使用随游戏分发的 ANGLE libEGL.dll）
         /// </summary>
         /// <param name="hwnd">原生窗口句柄，BROWSER 下传 IntPtr.Zero（目标 surface 由宿主决定）</param>
         static void InitializeEgl(IntPtr hwnd) {
-            m_eglDisplay = Egl.GetDisplay(IntPtr.Zero);
+            m_eglDisplay = CreateEglDisplay();
             if (m_eglDisplay == IntPtr.Zero) {
                 throw new Exception("eglGetDisplay failed");
             }

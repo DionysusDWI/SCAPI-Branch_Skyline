@@ -27,6 +27,12 @@ namespace Engine.Graphics {
         public const int NoContext = 0x0;
         public const int NativeVisualId = 0x302E;
         public const int OpenglEsApi = 0x30A0;
+        // --- Skyline：按显示适配器 LUID 选择 ANGLE 的 D3D11 设备（EGL_ANGLE_platform_angle_device_id）---
+        public const int PlatformAngle = 0x3202;
+        public const int PlatformAngleType = 0x3203;
+        public const int PlatformAngleTypeD3d11 = 0x3208;
+        public const int PlatformAngleDeviceIdHigh = 0x34D6;
+        public const int PlatformAngleDeviceIdLow = 0x34D7;
 
         [DllImport(LibEgl, EntryPoint = "eglGetDisplay", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
@@ -35,6 +41,10 @@ namespace Engine.Graphics {
         [DllImport(LibEgl, EntryPoint = "eglInitialize", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
         public static extern bool Initialize(IntPtr dpy, out int major, out int minor);
+
+        [DllImport(LibEgl, EntryPoint = "eglTerminate", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
+        public static extern bool Terminate(IntPtr dpy);
 
         [DllImport(LibEgl, EntryPoint = "eglChooseConfig", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
@@ -72,5 +82,43 @@ namespace Engine.Graphics {
         [DllImport(LibEgl, EntryPoint = "eglGetProcAddress", CharSet = CharSet.Ansi, CallingConvention = CallingConvention.Cdecl)]
         [DefaultDllImportSearchPaths(DllImportSearchPath.SafeDirectories)]
         public static extern IntPtr GetProcAddress(string proc);
+
+        public delegate IntPtr GetPlatformDisplayExtDelegate(int platform, IntPtr nativeDisplay, int[] attribList);
+
+        /// <summary>
+        /// 取 eglGetPlatformDisplayEXT（ANGLE 平台显示创建入口，用于按 LUID 选适配器）；不支持时返回 null。
+        /// </summary>
+        public static GetPlatformDisplayExtDelegate GetPlatformDisplayExt() {
+            IntPtr proc = GetProcAddress("eglGetPlatformDisplayEXT");
+            return proc == IntPtr.Zero ? null : Marshal.GetDelegateForFunctionPointer<GetPlatformDisplayExtDelegate>(proc);
+        }
+
+        /// <summary>
+        /// Skyline 预检：按 LUID 创建 ANGLE D3D11 平台显示并完成 eglInitialize。
+        /// 成功返回**已初始化**的 EGLDisplay（可直接交给 GLWrapper 复用，避免二次创建设备），失败返回 IntPtr.Zero。
+        /// </summary>
+        public static IntPtr TryCreatePlatformDisplay(uint luidHigh, uint luidLow, out int major, out int minor) {
+            major = 0;
+            minor = 0;
+            GetPlatformDisplayExtDelegate getPlatformDisplay = GetPlatformDisplayExt();
+            if (getPlatformDisplay == null) {
+                return IntPtr.Zero;
+            }
+            int[] attribs = [
+                PlatformAngleType, PlatformAngleTypeD3d11,
+                PlatformAngleDeviceIdHigh, unchecked((int)luidHigh),
+                PlatformAngleDeviceIdLow, unchecked((int)luidLow),
+                None
+            ];
+            IntPtr display = getPlatformDisplay(PlatformAngle, IntPtr.Zero, attribs);
+            if (display == IntPtr.Zero) {
+                return IntPtr.Zero;
+            }
+            if (!Initialize(display, out major, out minor)) {
+                Terminate(display);
+                return IntPtr.Zero;
+            }
+            return display;
+        }
     }
 }

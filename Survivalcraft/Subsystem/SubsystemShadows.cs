@@ -35,8 +35,9 @@ namespace Game {
             int num8 = Terrain.ToCell(shadowPosition.Z + num4);
             for (int i = num5; i <= num7; i++) {
                 for (int j = num6; j <= num8; j++) {
-                    int num9 = MathUtils.Min(Terrain.ToCell(shadowPosition.Y), 255);
-                    int num10 = MathUtils.Max(num9 - 2, 0);
+                    // [Skyline v0.0.4] 原来写死 255/0：高处的物体阴影取样被夹到 y=255
+                    int num9 = MathUtils.Min(Terrain.ToCell(shadowPosition.Y), TerrainChunk.HeightMinusOne);
+                    int num10 = MathUtils.Max(num9 - 2, TerrainChunk.MinHeight);
                     for (int num11 = num9; num11 >= num10; num11--) {
                         int cellValueFast = m_subsystemTerrain.Terrain.GetCellValueFast(i, num11, j);
                         int num12 = Terrain.ExtractContents(cellValueFast);

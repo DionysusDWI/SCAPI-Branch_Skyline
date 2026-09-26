@@ -692,7 +692,8 @@ namespace Game {
                         for (int i = point.X - 2; i <= point.X + 2; i++) {
                             for (int j = point.Z - 2; j <= point.Z + 2; j++) {
                                 if (m_subsystemTerrain.Terrain.GetCellContents(point.X, point.Y, point.Z) == 18) {
-                                    for (int num29 = point.Y - 1; num29 > 0; num29--) {
+                                    // [Skyline v0.0.4] 原来写死 0：扩展高度下 y<0 的水底扫描不会执行
+                                    for (int num29 = point.Y - 1; num29 > TerrainChunk.MinHeight; num29--) {
                                         switch (m_subsystemTerrain.Terrain.GetCellContents(point.X, num29, point.Z)) {
                                             case 2: num27++; break;
                                             case 7: num28++; break;

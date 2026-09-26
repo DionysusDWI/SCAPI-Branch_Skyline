@@ -79,8 +79,9 @@ namespace Game {
         }
 
         public virtual void Grow(int value, int x, int y, int z, int pollPass) {
-            if (y <= 0
-                || y >= 255) {
+            // [Skyline v0.0.4] 原来写死 0/255：扩展高度下植物在地下与高处都不生长
+            if (y <= TerrainChunk.MinHeight
+                || y >= TerrainChunk.HeightMinusOne) {
                 return;
             }
             bool skipVanilla = false;

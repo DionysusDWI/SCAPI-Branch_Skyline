@@ -86,9 +86,10 @@ namespace Game {
         }
 
         public bool DetermineHydration(int x, int y, int z, int steps) {
+            // [Skyline v0.0.4] 原来写死 0/254：土壤湿润（耕地/水浸）判定在扩展高度下失效
             if (steps > 0
-                && y > 0
-                && y < 254) {
+                && y > TerrainChunk.MinHeight
+                && y < TerrainChunk.HeightMinusOne - 1) {
                 if (DetermineHydrationHelper(x - 1, y, z, steps - 1)) {
                     return true;
                 }

@@ -489,8 +489,9 @@ namespace Game {
                         }
                     }
                     else {
+                        // [Skyline v0.0.4] 原来写死 255：y>253 的方块上不再积雪
                         if ((!forceDepositSnow && !(precipitationShaftInfo.Intensity > 0.5f))
-                            || num6 + 1 >= 255) {
+                            || num6 >= TerrainChunk.HeightMinusOne) {
                             continue;
                         }
                         if (SubsystemSnowBlockBehavior.CanSupportSnow(cellValueFast)) {

@@ -141,10 +141,11 @@ namespace Game {
 
             public bool IsBlocked(BoundingBox box) {
                 int num = Terrain.ToCell(box.Min.X);
-                int num2 = MathUtils.Max(Terrain.ToCell(box.Min.Y), 0);
+                // [Skyline v0.0.4] 原来写死 0/255：扩展高度下寻路的阻挡检测只看 0..255
+                int num2 = MathUtils.Max(Terrain.ToCell(box.Min.Y), TerrainChunk.MinHeight);
                 int num3 = Terrain.ToCell(box.Min.Z);
                 int num4 = Terrain.ToCell(box.Max.X);
-                int num5 = MathUtils.Min(Terrain.ToCell(box.Max.Y), 255);
+                int num5 = MathUtils.Min(Terrain.ToCell(box.Max.Y), TerrainChunk.HeightMinusOne);
                 int num6 = Terrain.ToCell(box.Max.Z);
                 for (int i = num; i <= num4; i++) {
                     for (int j = num3; j <= num6; j++) {

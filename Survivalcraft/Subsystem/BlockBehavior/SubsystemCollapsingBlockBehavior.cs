@@ -65,7 +65,8 @@ namespace Game {
         }
 
         public void TryCollapseColumn(Point3 p) {
-            if (p.Y <= 0) {
+            // [Skyline v0.0.4] 原来写死 0：y<=0 与 y 很高时沙/砾石柱都不判定崩塌
+            if (p.Y <= TerrainChunk.MinHeight) {
                 return;
             }
             int cellValue = SubsystemTerrain.Terrain.GetCellValue(p.X, p.Y - 1, p.Z);
@@ -73,7 +74,8 @@ namespace Game {
                 return;
             }
             List<MovingBlock> list = new();
-            for (int i = p.Y; i < 256; i++) {
+            // [Skyline v0.0.4] 原来写死 256：扩展高度下扫不到柱顶
+            for (int i = p.Y; i <= TerrainChunk.HeightMinusOne; i++) {
                 int cellValue2 = SubsystemTerrain.Terrain.GetCellValue(p.X, i, p.Z);
                 Block block = BlocksManager.Blocks[Terrain.ExtractContents(cellValue2)];
                 if (!block.GetIsCollapsable(cellValue2)) {

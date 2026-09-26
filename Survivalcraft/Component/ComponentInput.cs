@@ -735,7 +735,8 @@ namespace Game {
 
         int CountClearance(int cellX, int cellY, int cellZ) {
             int clearance = 0;
-            for (int y = Math.Max(cellY, 0); y <= cellY + 1 && y < 255; y++) {
+            // [Skyline v0.0.4] 原来写死 0/255：扩展高度下 VR 传送落点净空判定只看 0..254
+            for (int y = Math.Max(cellY, TerrainChunk.MinHeight); y <= cellY + 1 && y <= TerrainChunk.HeightMinusOne; y++) {
                 int value = m_subsystemTerrain.Terrain.GetCellValue(cellX, y, cellZ);
                 Block block = BlocksManager.Blocks[Terrain.ExtractContents(value)];
                 if (block is LadderBlock || !block.IsCollidable_(value))

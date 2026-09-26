@@ -11,9 +11,12 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 
 具体目标：
 
-* **更高的世界**：竖直可建造空间从 0–255 扩到 **-1024 – 1023**（v0.0.1：0–1023；v0.0.2：-128–1023；v0.0.3：-1024–1023）。
+* **更高的世界**：竖直可建造空间从 0–255 扩到 **-1024 – 1023**（v0.0.1：0–1023；v0.0.2：-128–1023；
+  v0.0.3：-1024–1023 + 64 格生存余量；v0.0.4：把范围内的行为子系统、方块实体、寻路/阴影/降雪等全部对齐到新范围）。
 * **生存余量与取景模式**：建筑范围之外上下各留 **64 格生存余量**（人物安全范围 -1088..1087）；
   `SkylineRuntime.FreeViewMode`（取景模式）打开后不受高度/深度伤害与缺氧限制（v0.0.3 只做底层接口，暂无 UI 按钮）。
+* **跑在最强显卡上**：v0.0.4 起内置 `SkylineGpu`——第一次运行用默认适配器扫描并提示重启，重启后自动跑在评分最高的显卡
+  （独显优先、NVIDIA 优先、显存大者优先）；系统偏好不可用时用 ANGLE 按 LUID 直选。
 * **建筑辅助**：与外部操作桥（AgentBridge）/ 命令方块 mod 配合的批量建造、几何与光照失效自动化。
 * **创造模式工具**：面向大体量建筑的放置、选择、复制、验证能力。
 
@@ -23,7 +26,7 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 |---|---|
 | 上游 | SCAPI 游戏源码（`.resource/SurvivalcraftApi`，分支 `SCAPI1.9`，SCAPI 1.9.3.1） |
 | 目标框架 | `net10.0`（Windows 桌面构建） |
-| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）、**v0.0.3**（-1024–1023 + 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复）——见 `CHANGELOG-Skyline.md` |
+| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）、**v0.0.3**（-1024–1023 + 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复）、**v0.0.4**（竖直范围鲁棒性 16 处 + 显卡自动选择）——见 `CHANGELOG-Skyline.md` |
 | License | 沿用仓库根的 `LICENSE`（上游内容版权归原作者，本分支仅作建筑特化修改） |
 
 ## 3. 目录结构
@@ -55,9 +58,55 @@ dotnet build .\Survivalcraft.Windows\Survivalcraft.Windows.csproj -c Release
 
 ### 部署（替换游戏本体，不是 mod）
 
-把上面 4 个产物覆盖到游戏目录（例如 `Windows-SCAPI_1.9.3.1\`）。**Content.zip 必须与 dll 同源**——
-本源码树的 Content 比部分随包发布版新，混用会出现"缺少控件"之类的启动错误。
-部署前请备份原版 `Survivalcraft.dll` / `Engine.dll` / `EntitySystem.dll` / `Content.zip`。
+把产物覆盖到游戏目录（例如 `Windows-SCAPI_1.9.3.1\`）：`Survivalcraft.dll` / `Engine.dll` / `EntitySystem.dll` / `Content.zip`，
+v0.0.4 起还要一起部署 `libEGL.dll` / `libGLESv2.dll` / `glfw3.dll`（ANGLE 按 LUID 选卡依赖它们）。
+**Content.zip 必须与 dll 同源**——本源码树的 Content 比部分随包发布版新，混用会出现"缺少控件"之类的启动错误。
+部署前请备份原版这些文件（`Build-Windows.ps1 -Deploy` 会自动覆盖）。
+
+## 5. v0.0.4 特性：竖直范围鲁棒性（16 处硬编码上下界）+ 显卡自动选择
+
+### 5.1 竖直范围：把 0..255 的老口径全部对齐到 -1024..1023
+
+v0.0.3 只保证"范围本身可用"（写入/存档/光照/几何），但**下游行为子系统**仍按 `0 / 255 / 256` 工作，实测表现：
+
+| 现象 | 根因 | 现在 |
+|---|---|---|
+| 高处的沙/砾石柱失去支撑**悬空不塌** | `CollapsingBlockBehavior` 的 `p.Y <= 0` / `< 256` | 跟 `MinHeight` / `HeightMinusOne` |
+| 地下（y<0）的**箱子打不开** | `SubsystemBlockEntities` 用 `Coordinates.Y >= 0` 过滤 | `>= MinHeight`（并容忍旧档里的重复项） |
+| y>254 的**水面渲染成整块**立方体 | `UpdateIsTop` 的 `y < 255` | `y < HeightMinusOne` |
+| 地下/高处的**植物不生长**、耕地不湿润、木头/落叶扫描越界 | 各 block behavior 写死 0/255 | 全部改用 `MinHeight` / `HeightMinusOne` |
+| 扩展高度**寻路/阴影/降雪**异常 | `SubsystemPathfinding` / `SubsystemShadows` / `SubsystemModelsRenderer` / `SubsystemWeather` | 同上 |
+| VR 传送落点净空只看 0..254 | `ComponentInput.CountClearance` | `MinHeight..HeightMinusOne` |
+| 生物在扩展高度找不到逃跑/飞走落脚点 | `ComponentFlyAway/RunAwayBehavior` 的 `255..0` 扫描 | `HeightMinusOne..MinHeight` |
+
+实测口径（详见 `CHANGELOG-Skyline.md` 的 Verified 表）：沙柱在 y=2/y=1000/y=-20 三个高度行为一致；
+箱子在 y=-3 可以正常打开（`handled=1` + `ChestWidget`）；水在 y=200 与 y=1000 都是 57 格铺开 + 6 格外溢 + `data` 带 isTop 位。
+
+### 5.2 显卡自动选择（`Game/SkylineGpu.cs`）
+
+```
+# 看状态（游戏内 / 桥）
+SkylineGpu.Describe()      → 适配器列表、评分选中的卡、当前渲染器、状态文件内容
+SkylineGpu.Rescan()        → 立刻重新枚举（只读，不影响本次运行）
+SkylineGpu.ClearTarget()   → 清掉目标卡（下次启动重新扫描）
+
+# 关掉这套逻辑（用默认适配器跑）
+run-game.ps1 -ExtraArgs "-skylinegpu off"
+
+# 状态文件（删掉即重新扫描）
+<游戏目录>\SkylineGpu.cfg
+```
+
+流程与需求一一对应：**第一次运行 = 默认显示适配器**（写 `GpuPreference=2` 并弹一次"重启后生效"）
+→ **重启 = 目标卡**（复核 `Display.DeviceDescription`，写 `state=applied`）
+→ 系统偏好没生效时，下一次启动自动改走 **ANGLE 按 LUID 直选**（`EGL_PLATFORM_ANGLE_DEVICE_ID_HIGH/LOW_ANGLE`），
+本次启动即成；两条路都不行才记 `failed` 并提示看日志。
+
+证据：`data/sessions/skyline-v004/gpu-restart-prompt.png`（重启提示对话框）、`gpu-verified-after.txt`（两步流程日志）、
+`gpu-preference-proof.md`（"写注册表偏好 → 同一 exe 的 GL_RENDERER 从 AMD 变 NVIDIA"的因果实验）、
+`heightlab/gpu-probe.ps1`（独立用 Windows 性能计数器归因）。
+
+## 5b. v0.0.3 特性：世界竖直范围 → **-1024 – 1023** + 64 格生存余量 / 取景模式
 
 ## 5. v0.0.3 特性：世界竖直范围 → **-1024 – 1023** + 64 格生存余量 / 取景模式
 
@@ -95,7 +144,7 @@ python tools\scbridge.py raw '{"op":"invoke","target":"skyline","member":"Descri
 python tools\scbridge.py raw '{"op":"invoke","target":"skyline.FreeViewMode","value":true}'   # 读取时不带 value
 ```
 
-## 5b. v0.0.2 特性：世界竖直范围 → **-128 – 1023**（地下 128 层）
+## 5c. v0.0.2 特性：世界竖直范围 → **-128 – 1023**（地下 128 层）
 
 在 v0.0.1（0–1023）基础上把地下打通，关键是六处 `y≥0` 假设：
 
@@ -113,7 +162,7 @@ python tools\scbridge.py raw '{"op":"invoke","target":"skyline.FreeViewMode","va
 （12–15 递减）/碰撞（撞墙停在 x=2593.25）/存活（health 与 Air 恒 1）/存档往返全部通过，
 且 v0.0.1 的别墅与家具无损。
 
-## 5c. v0.0.1 特性：世界高度 0–255 → 0–1023
+## 5d. v0.0.1 特性：世界高度 0–255 → 0–1023
 
 改 16 个文件、+85/−73 行，修掉五条独立的限制链：
 
@@ -140,6 +189,12 @@ y=256/300/700/1000/1023 可写可读；存档往返后 y=300/700/1000 保留；y
 3. 范围 **-1024..1023**（人物另有上下各 64 格生存余量，见 §5）；想更深/更高只需调 `TerrainChunk.MinHeight`（层数线性影响内存）；
    地下区域没有地形生成（天然空腔，适合创造模式挖建）；旧版序列化器（14/22/129）仍按 0 起点。
 4. 取景模式（`FreeViewMode`）只有底层接口：伤害/缺氧豁免已生效，UI 按钮与相机自由飞行未做。
+5. 区块是**按 XZ 整列**（16×16×2048）加载的：离玩家很远、尚未 Valid 的列里，脚本写入（`op:cell`）会被**静默丢弃**。
+   脚本化建造请把场地放在玩家附近，或先用 `teleport`/`surface` 把那一列踩出来（v0.0.4 实测踩过的坑）。
+6. 云层/雾的视觉参数仍是原版口径（云在 y≈256 附近），高空建筑会**位于云层之上**；`ComponentFlyAway/RunAway`
+   的落脚点扫描从 256 次变成 2048 次（每次决策成本上升，实测无可见卡顿）。
+7. 显卡自动选择：只在 **Windows** 有效；换卡需要重启（系统偏好的生效时机），日志里搜 `Skyline GPU:` 可看全流程。
+   想要固定用核显，把 Windows"图形设置"里本游戏设为"省电"或在 `SkylineGpu.cfg` 里清掉目标（删文件即可）。
 
 路线（草案）：
 

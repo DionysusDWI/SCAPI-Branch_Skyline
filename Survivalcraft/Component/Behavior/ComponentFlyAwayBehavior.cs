@@ -177,7 +177,8 @@ namespace Game {
             for (int i = 0; i < 20; i++) {
                 int num2 = Terrain.ToCell(position.X + m_random.Float(-20f, 20f));
                 int num3 = Terrain.ToCell(position.Z + m_random.Float(-20f, 20f));
-                for (int num4 = 255; num4 >= 0; num4--) {
+                // [Skyline v0.0.4] 原来写死 255..0：扩展高度下找不到落脚点
+                for (int num4 = TerrainChunk.HeightMinusOne; num4 >= TerrainChunk.MinHeight; num4--) {
                     int cellValue = m_subsystemTerrain.Terrain.GetCellValue(num2, num4, num3);
                     if (BlocksManager.Blocks[Terrain.ExtractContents(cellValue)].GetIsCollidable(m_componentCreature.ComponentBody, cellValue)
                         || Terrain.ExtractContents(cellValue) == 18) {

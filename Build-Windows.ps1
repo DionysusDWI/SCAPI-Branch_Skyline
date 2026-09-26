@@ -1,4 +1,4 @@
-<#
+﻿<#
 SCAPI Skyline Project —— Windows 基础构建 / 部署脚本
 
 用法：
@@ -37,7 +37,12 @@ if (-not $Deploy) { return }
 if (-not $GameDir) { $GameDir = Join-Path $root "..\.game\v1.9.3\Windows-SCAPI_1.9.3.1" }
 if (-not (Test-Path $GameDir)) { throw "game dir not found: $GameDir" }
 
-$files = @("Survivalcraft.dll", "Engine.dll", "EntitySystem.dll", "Content.zip")
+# [Skyline v0.0.4] libEGL.dll / libGLESv2.dll 是"按 LUID 选显卡"的 ANGLE 后端，必须一起部署，
+#                否则 SkylineGpu 只能退回到"写 Windows 显卡偏好 + 重启"那条兜底路径。
+$files = @(
+    "Survivalcraft.dll", "Engine.dll", "EntitySystem.dll", "Content.zip",
+    "libEGL.dll", "libGLESv2.dll", "glfw3.dll"
+)
 foreach ($f in $files) {
     $src = Join-Path $out $f
     if (Test-Path $src) {

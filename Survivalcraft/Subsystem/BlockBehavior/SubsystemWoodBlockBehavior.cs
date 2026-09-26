@@ -25,10 +25,11 @@ namespace Game {
                 return;
             }
             int num = x - 3;
-            int num2 = MathUtils.Max(y - 3, 0);
+            // [Skyline v0.0.4] 原来写死 0/255：伐木后的树叶连带检查在扩展高度下越界
+            int num2 = MathUtils.Max(y - 3, TerrainChunk.MinHeight);
             int num3 = z - 3;
             int num4 = x + 3;
-            int num5 = MathUtils.Min(y + 3, 255);
+            int num5 = MathUtils.Min(y + 3, TerrainChunk.HeightMinusOne);
             int num6 = z + 3;
             for (int i = num; i <= num4; i++) {
                 for (int j = num3; j <= num6; j++) {
@@ -105,10 +106,10 @@ namespace Game {
             }
             bool flag = false;
             int num = p.X - 3;
-            int num2 = MathUtils.Max(p.Y - 3, 0);
+            int num2 = MathUtils.Max(p.Y - 3, TerrainChunk.MinHeight);
             int num3 = p.Z - 3;
             int num4 = p.X + 3;
-            int num5 = MathUtils.Min(p.Y + 3, 255);
+            int num5 = MathUtils.Min(p.Y + 3, TerrainChunk.HeightMinusOne);
             int num6 = p.Z + 3;
             for (int i = num; i <= num4; i++) {
                 for (int j = num3; j <= num6; j++) {

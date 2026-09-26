@@ -30,7 +30,8 @@ namespace Game {
 
         public virtual void UpdateIsTop(int value, int x, int y, int z) {
             Terrain terrain = SubsystemTerrain.Terrain;
-            if (y < 255) {
+            // [Skyline v0.0.4] 原来写死 255：y>254 的液体不更新 isTop（液面渲染/浮力取样失效）
+            if (y < TerrainChunk.HeightMinusOne) {
                 TerrainChunk chunkAtCell = terrain.GetChunkAtCell(x, z);
                 if (chunkAtCell != null) {
                     int num = TerrainChunk.CalculateCellIndex(x & 0xF, y, z & 0xF);
@@ -64,12 +65,13 @@ namespace Game {
         }
 
         public float? GetSurfaceHeight(int x, int y, int z, out FluidBlock surfaceFluidBlock) {
-            if (y >= 0
-                && y < 255) {
+            // [Skyline v0.0.4] 原来写死 0/255：y<0 或 y>254 时取不到液面（游泳/浮力/液面高度全失效）
+            if (y >= TerrainChunk.MinHeight
+                && y < TerrainChunk.HeightMinusOne) {
                 TerrainChunk chunkAtCell = SubsystemTerrain.Terrain.GetChunkAtCell(x, z);
                 if (chunkAtCell != null) {
                     int num = TerrainChunk.CalculateCellIndex(x & 0xF, 0, z & 0xF);
-                    while (y < 255) {
+                    while (y < TerrainChunk.HeightMinusOne) {
                         int num2 = Terrain.ExtractContents(chunkAtCell.GetCellValueFast(num + y + 1));
                         if (BlocksManager.FluidBlocks[num2] == null) {
                             int cellValueFast = chunkAtCell.GetCellValueFast(num + y);

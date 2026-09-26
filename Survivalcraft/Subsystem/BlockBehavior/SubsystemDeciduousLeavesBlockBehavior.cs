@@ -35,8 +35,9 @@ namespace Game {
 
         public void CreateFallenLeaves(Point3 p, bool applyImmediately) {
             int? num = null;
-            while (p.Y >= 1
-                && p.Y < 256) {
+            // [Skyline v0.0.4] 原来写死 1/256：落叶柱扫描在扩展高度下无效
+            while (p.Y > TerrainChunk.MinHeight
+                && p.Y <= TerrainChunk.HeightMinusOne) {
                 int cellValue = m_subsystemTerrain.Terrain.GetCellValue(p.X, p.Y, p.Z);
                 if (num.HasValue) {
                     if (SubsystemFallenLeavesBlockBehavior.CanSupportFallenLeaves(cellValue)

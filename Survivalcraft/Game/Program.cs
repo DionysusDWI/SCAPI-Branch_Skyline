@@ -228,6 +228,8 @@ namespace Game {
                 ExceptionManager.ReportExceptionToUser("Unhandled exception.", e.Exception);
                 e.IsHandled = true;
             };
+            // Skyline：必须在创建窗口/图形上下文之前完成显卡选择（见 Game/SkylineGpu.cs）
+            SkylineGpu.Prepare();
             Window.Run(0, 0, WindowMode.Resizable, title);
         }
 
@@ -273,6 +275,8 @@ namespace Game {
             catch (Exception e) {
                 Log.Error(e.ToString());
             }
+            // Skyline：图形上下文已建立，复核"实际跑在哪张显卡"并写回配置
+            SkylineGpu.OnGameInitialized();
         }
 
         public static void Run() {
@@ -297,6 +301,8 @@ namespace Game {
                     MusicManager.Update();
                     ScreensManager.Update();
                     DialogsManager.Update();
+                    // Skyline：到主菜单后弹一次"检测到更强显卡，重启后生效"提示
+                    SkylineGpu.Tick();
 #if !IOS && !BROWSER
                     JsInterface.Update();
 #endif
