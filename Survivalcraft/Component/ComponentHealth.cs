@@ -279,7 +279,9 @@ namespace Game {
                         Terrain.ToCell(position.Z)
                     );
                     // [高度实验] 原来写死 259f（= 世界顶 255 + 4），改成跟着世界高度走
-                    Air = BlocksManager.Blocks[cellContents] is FluidBlock || position.Y > TerrainChunk.HeightMinusOne + 4f
+                    // [v0.0.3] 缺氧阈值 = 建筑上限 + 64 格生存余量（取景模式下不缺氧）
+                    Air = BlocksManager.Blocks[cellContents] is FluidBlock
+                        || (!SkylineRuntime.FreeViewMode && position.Y > SkylineRuntime.SurvivalMaxY)
                         ? MathUtils.Saturate(Air - dt / AirCapacity) : 1f;
                 }
                 else if (BreathingMode == BreathingMode.Water) {
@@ -318,8 +320,10 @@ namespace Game {
                     || m_componentCreature.ComponentBody.StandingOnBody != null;
                 //虚空伤害
                 // [高度实验] 原来写死 296f（= 世界顶 255 + 41），改成跟着世界高度走
+                // [v0.0.3] 虚空伤害只在"建筑范围 ±64 格生存余量"之外生效；取景模式完全关掉
                 if (VoidDamageFactor > 0f
-                    && (position.Y < TerrainChunk.MinHeight || position.Y > TerrainChunk.HeightMinusOne + 41f)
+                    && !SkylineRuntime.FreeViewMode
+                    && (position.Y < SkylineRuntime.SurvivalMinY || position.Y > SkylineRuntime.SurvivalMaxY)
                     && m_subsystemTime.PeriodicGameTimeEvent(2.0, 0.0)) {
                     Injure(VoidDamageFactor * 0.1f, null, true, LanguageControl.Get(fName, 3));
                     m_componentPlayer?.ComponentGui.DisplaySmallMessage(LanguageControl.Get(fName, 4), Color.White, true, false);

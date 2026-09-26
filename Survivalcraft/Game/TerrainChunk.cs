@@ -15,10 +15,10 @@ namespace Game {
         public const int HeightBits = 11;   // [负高度实验] 索引改成算术偏移后这里只作参考
 
         /// <summary>[负高度实验] 世界最低层（含）。0 以上仍保留到 <see cref="HeightMinusOne"/>。</summary>
-        public const int MinHeight = -128;
+        public const int MinHeight = -1024;   // [v0.0.3] 负高度对齐到 -1024
 
         /// <summary>[负高度实验] 每区块的竖直层数 = MaxHeight - MinHeight + 1。</summary>
-        public const int Height = 1152;     // -128..1023
+        public const int Height = 2048;     // -1024..1023
 
         public const int SizeMinusOne = 15;
 
@@ -26,7 +26,7 @@ namespace Game {
 
         public const int SliceHeight = 16;
 
-        public const int SlicesCount = 72;  // [负高度实验] 1152/16 = 72
+        public const int SlicesCount = 128;  // [v0.0.3] 2048/16 = 128
 
         public Terrain Terrain;
 
@@ -145,9 +145,12 @@ namespace Game {
         public static int CalculateCellIndex(int x, int y, int z) {
             // [负高度实验] 位打包改成算术偏移：索引 = (y - MinHeight) + x*Height + z*Height*Size。
             // 这样 y 可以是负数，也不再要求 Height 是 2 的幂。
-            if (y < MinHeight || y > HeightMinusOne) {
-                throw new ArgumentOutOfRangeException(nameof(y), $"y={y} out of range [{MinHeight},{HeightMinusOne}]");
-            }
+            // [v0.0.3] 越界时**夹紧**而不是抛异常：几何生成会读 y±1 的邻居格，
+            // 抛异常会让整片 slice 的网格生成中断（表现为"整块地形消失"）。
+            if (y < MinHeight) { y = MinHeight; }
+            else if (y > HeightMinusOne) { y = HeightMinusOne; }
+            if (x < 0) { x = 0; } else if (x >= Size) { x = Size - 1; }
+            if (z < 0) { z = 0; } else if (z >= Size) { z = Size - 1; }
             return y - MinHeight + x * Height + z * Height * Size;
         }
 

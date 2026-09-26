@@ -67,7 +67,8 @@ namespace Game {
             // 根据绘制内容分别计算光照
             if (m_value != 0 && !ForceDrawHandOnly) {
                         // [高度实验] 同 ComponentFirstPersonModel：写死 255 会让高处手持方块变黑
-                        if (num >= 0
+                        // [v0.0.3] 下界同理不能写死 0，否则地下（y<0）手持方块也是全黑
+                        if (num >= TerrainChunk.MinHeight
                             && num <= TerrainChunk.HeightMinusOne) {
                     TerrainChunk chunkAtCell = m_subsystemTerrain.Terrain.GetChunkAtCell(x, z);
                     if (chunkAtCell != null

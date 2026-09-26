@@ -709,9 +709,13 @@ namespace Game {
             }
             int cellsPerLayer = ChunkSizeX * ChunkSizeZ;
             int storedLayers = cellsPerLayer > 0 ? storedCells / cellsPerLayer : 0;
-            // 只有"整高度"的流才是新布局（从 MinHeight 起）；老的 256 层 / v0.0.1 的 1024 层
-            // 都是从 y=0 起，必须映射回 0，否则会把老世界整体下移 128。
-            int yBase = storedLayers == TerrainChunk.Height ? TerrainChunk.MinHeight : 0;
+            // [v0.0.3] 各版本布局都以 0..1023 为核心向下扩展：
+            //   256 层  = 原版 0..255        → 起点 0
+            //   1024 层 = v0.0.1 0..1023     → 起点 0
+            //   1152 层 = v0.0.2 -128..1023  → 起点 -128
+            //   2048 层 = v0.0.3 -1024..1023 → 起点 MinHeight
+            // 通式：层数 > 1024 时起点 = 1024 - 层数。
+            int yBase = storedLayers > 1024 ? 1024 - storedLayers : 0;
 
             int num2 = 0;
             int num3 = 0;

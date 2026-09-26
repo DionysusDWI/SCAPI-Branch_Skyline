@@ -4,6 +4,30 @@
 
 生存战争插件版是基于 Candy Rufus Game 开发的 [生存战争 Survivalcraft](https://kaalus.wordpress.com/) 二次开发的支持加载模组的版本
 
+## SCAPI Skyline Project
+
+> 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力（面向 AI / agent 建造与创造模式工具）。
+
+**当前状态：v0.0.3** —— 世界竖直范围 **-1024..1023**（共 2048 层），建筑范围上下限之外各留 **64 格生存余量**，
+新增**取景模式（`FreeViewMode`）底层接口**，并修复地下（y<0）手持方块全黑的光照问题。
+
+| 版本 | 内容 | 日期 |
+|---|---|---|
+| v0.0.1 | 世界高度 0–255 → **0–1023**（16 文件特化） | 2026-09-26 |
+| v0.0.2 | 地下负高度打通到 **-128**（-128–1023，含旧存档兼容） | 2026-09-26 |
+| v0.0.3 | 地下对齐 **-1024**（-1024–1023）+ 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复 | 2026-09-26 |
+
+构建（Windows，仅 `Survivalcraft.Windows` 目标）：
+
+```powershell
+$env:NUGET_PACKAGES="$PWD\packages"
+powershell -ExecutionPolicy Bypass -File .\Build-Windows.ps1            # 只构建
+powershell -ExecutionPolicy Bypass -File .\Build-Windows.ps1 -Deploy    # 构建并覆盖到游戏目录
+```
+
+文档：[`SKYLINE.md`](SKYLINE.md)（分支章程 / 构建部署）· [`CHANGELOG-Skyline.md`](CHANGELOG-Skyline.md)（各版本改动）
+发布页：<https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>
+
 ## 用户下载和使用说明
 
 [点击此处](https://gitee.com/SC-SPM/SurvivalcraftApi/releases/latest) 进入发布页来下载

@@ -3,6 +3,64 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.0.3] - 2026-09-26
+
+第三个版本：地下深度从 **-128** 对齐到 **-1024**（世界竖直范围 **-1024..1023**，共 2048 层），
+建筑范围（-1024..1023）之外上下各留 **64 格生存余量**（人物安全范围 **-1088..1087**），
+新增**取景模式（`FreeViewMode`）**底层接口，并修复**地下（y<0）手持方块全黑**的光照问题。
+
+### Added
+
+- **`Game/SkylineRuntime.cs`（新文件）**：面向"创意建筑"的运行时口径与开关，全部为静态成员，可被外部（如 AgentBridge）直接调用：
+  - `SurvivalMargin = 64`：建筑范围之外仍允许角色生存的余量；
+  - `FreeViewMode`：取景模式。为 `true` 时**完全不受**高度/深度伤害与缺氧限制（本版只有底层接口，**没有 UI 按钮**）；
+  - `BuildMinY / BuildMaxY` = **-1024 / 1023**，`SurvivalMinY / SurvivalMaxY` = **-1088 / 1087**；
+  - `IsInsideBuildRange(y)` / `IsInsideSurvivalRange(y)` / `Describe()`（一行状态，便于桥与日志读取）。
+
+### Changed
+
+| 文件 | 改动 |
+|---|---|
+| `Game/TerrainChunk.cs` | `MinHeight` **-128 → -1024**；`Height` **1152 → 2048**（层数语义：-1024..1023）；`SlicesCount` **72 → 128**；`CalculateCellIndex` 的越界处理由**抛 `ArgumentOutOfRangeException`** 改为**夹紧（clamp）** |
+| `Game/SkylineRuntime.cs` | 新增（见上） |
+| `Component/ComponentHealth.cs` | 缺氧上界与虚空伤害阈值改用 `SkylineRuntime.SurvivalMaxY / SurvivalMinY`；取景模式下不缺氧、不扣虚空血（虚空伤害仍为每 2 秒 `VoidDamageFactor * 0.1`） |
+| `Game/TerrainSerializer23.cs` | 存档层数起点改为通式 `yBase = storedLayers > 1024 ? 1024 - storedLayers : 0` |
+| `Component/ComponentFirstPersonModel.cs`、`Component/ComponentVrHandsModel.cs` | 手持取光下界 `num5 >= 0` → `num5 >= TerrainChunk.MinHeight` |
+| `Managers/LightingManager.cs` | `CalculateSmoothLight` 取样下界 `num2 >= 0` → `num2 >= TerrainChunk.MinHeight`（手部模型 / 模特 / 界面取样同源） |
+
+### Fixed
+
+- **地下（y<0）手持方块全黑**：v0.0.1 只把取光上界改到 `HeightMinusOne`，下界仍写死 `0`；
+  一旦眼位 y<0，取光分支被整段跳过，`m_itemLight` 保持初值 **0** → 手持方块按 0 光渲染 = 纯黑。
+  现在下界跟随 `TerrainChunk.MinHeight`，手持亮度与该格世界光一致（暗角为 0 属正确行为）。
+- **超界邻居格让整片地形消失**：几何生成会读 y±1 的邻居格，越界时 `CalculateCellIndex` 抛异常会让
+  整个 slice 的网格生成中断；改为夹紧后只读到边界层，不再中断。
+- **旧存档读错位**：v0.0.2 的"整高度流才从 `MinHeight` 起"只认 1152 层，换到 2048 层后会把
+  256 / 1024 / 1152 层的旧档读错位；改成通式后，各版本存档都落回原 y 位置。
+
+### Verified
+
+Windows / 世界 `AgentLab`（SCAPI 1.9.3.1 源码树本地构建）：
+
+| 项目 | 结果 |
+|---|---|
+| `IsCellValid(-1025/-1024/-1000/0/1023/1024)` | `F/T/T/T/T/F` |
+| 写入并读回 y=-200 / -1000 / -1024 | 全部成功 |
+| 地下 y≈-1000 的房间（方块 / 光照 9–15 / 几何渲染） | 正常 |
+| 存档往返（`SaveProject` → 重启 → 读回） | 数据保留 |
+| 生存余量（普通模式） | y=1050 与 y=-1050：`Health`、`Air` 恒 1；y=1100 与 y=-1100：开始掉血 + 缺氧 |
+| 取景模式 | `FreeViewMode=true` 时 y=±1200 的 `Health`/`Air` 恒 1；关闭后恢复扣血 |
+| 接口读数 | `Skyline build=[-1024,1023] survival=[-1088,1087] freeView=False/True` |
+| 手持取光 | 眼位 y=-998.76 → `m_itemLight = 11`（与该格世界光 11 一致）；y=1001 → 15；格光 0 的暗角 → 0（修复前地下恒 0） |
+
+### Known issues
+
+- 每区块 **16×16×2048 = 524288 格 ≈ 2 MB**（int 4B）：约为原版（256KB）的 **8 倍**、v0.0.2（≈1.15MB）的 1.78 倍；
+  视距大时注意内存（可降低 `settings.VisibilityRange`）。
+- 地下（y<0）**没有地形生成**（生成器只填 y≥0），是天然空腔，适合创造模式挖建。
+- 取景模式目前只有底层接口（伤害 / 缺氧豁免），UI 按钮与相机自由飞行未做。
+- 旧版序列化器（14 / 22 / 129）仍按 0 起点读写（只服务很早的存档）。
+
 ## [v0.0.2] - 2026-09-26
 
 第二个版本：世界竖直范围从 **0–1023** 扩到 **-128–1023**（地下 128 层），并保持旧存档兼容。

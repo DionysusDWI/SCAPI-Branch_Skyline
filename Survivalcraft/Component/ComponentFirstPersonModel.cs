@@ -118,7 +118,8 @@ namespace Game {
                     //每隔一段时间重新计算光照。这两段原本分别在对应的绘制前面，为避免被接口跳过所以移到前面来
                     if (m_value != 0 && !ForceDrawHandOnly) {
                         // [高度实验] 原来写死 num5 <= 255：站在 y>255 时手持方块取不到光照 → 手里方块全黑
-                        if (num5 >= 0
+                        // [v0.0.3] 下界同样不能写死 0：地下 y<0（现在到 MinHeight）手持方块取不到光 → 手里方块全黑
+                        if (num5 >= TerrainChunk.MinHeight
                             && num5 <= TerrainChunk.HeightMinusOne) {
                             TerrainChunk chunkAtCell = m_subsystemTerrain.Terrain.GetChunkAtCell(x, z);
                             if (chunkAtCell != null

@@ -11,7 +11,9 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 
 具体目标：
 
-* **更高的世界**：竖直可建造空间从 0–255 扩到 **-128 – 1023**（v0.0.1：0–1023；v0.0.2：加地下 128 层）。
+* **更高的世界**：竖直可建造空间从 0–255 扩到 **-1024 – 1023**（v0.0.1：0–1023；v0.0.2：-128–1023；v0.0.3：-1024–1023）。
+* **生存余量与取景模式**：建筑范围之外上下各留 **64 格生存余量**（人物安全范围 -1088..1087）；
+  `SkylineRuntime.FreeViewMode`（取景模式）打开后不受高度/深度伤害与缺氧限制（v0.0.3 只做底层接口，暂无 UI 按钮）。
 * **建筑辅助**：与外部操作桥（AgentBridge）/ 命令方块 mod 配合的批量建造、几何与光照失效自动化。
 * **创造模式工具**：面向大体量建筑的放置、选择、复制、验证能力。
 
@@ -21,13 +23,13 @@ Skyline 分支**只为一件事服务**：让《生存战争》成为可以大�
 |---|---|
 | 上游 | SCAPI 游戏源码（`.resource/SurvivalcraftApi`，分支 `SCAPI1.9`，SCAPI 1.9.3.1） |
 | 目标框架 | `net10.0`（Windows 桌面构建） |
-| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）——见 `CHANGELOG-Skyline.md` |
+| 版本 | **v0.0.1**（0–1023）、**v0.0.2**（-128–1023，含旧存档兼容）、**v0.0.3**（-1024–1023 + 上下各 64 格生存余量 + 取景模式接口 + 手持光照修复）——见 `CHANGELOG-Skyline.md` |
 | License | 沿用仓库根的 `LICENSE`（上游内容版权归原作者，本分支仅作建筑特化修改） |
 
 ## 3. 目录结构
 
 ```
-Engine/ EntitySystem/ Survivalcraft/          # 上游源码（本分支已修改其中 16 个文件）
+Engine/ EntitySystem/ Survivalcraft/          # 上游源码（本分支在其上做高度/光照特化修改，清单见 CHANGELOG-Skyline.md）
 Engine.Windows/ EntitySystem.Windows/ Survivalcraft.Windows/   # Windows 构建目标
 Engine.Android|Browser|IOS|Linux/ ...         # 其它平台目标（需要对应 workload，本分支不构建）
 build/ docs/ scripts/                         # 上游构建脚本与文档
@@ -57,7 +59,43 @@ dotnet build .\Survivalcraft.Windows\Survivalcraft.Windows.csproj -c Release
 本源码树的 Content 比部分随包发布版新，混用会出现"缺少控件"之类的启动错误。
 部署前请备份原版 `Survivalcraft.dll` / `Engine.dll` / `EntitySystem.dll` / `Content.zip`。
 
-## 5. v0.0.2 特性：世界竖直范围 → **-128 – 1023**（地下 128 层）
+## 5. v0.0.3 特性：世界竖直范围 → **-1024 – 1023** + 64 格生存余量 / 取景模式
+
+在 v0.0.2（-128–1023）基础上把地下对齐到 **-1024**，并明确"建筑范围之外仍可生存"的余量口径：
+
+| 项目 | 值 |
+|---|---|
+| 建筑范围 `SkylineRuntime.BuildMinY..BuildMaxY` | **-1024 .. 1023**（世界真实存在的格子） |
+| 生存余量 `SurvivalMargin` | **64 格**（建筑上下限之外各一份） |
+| 人物安全范围 `SurvivalMinY..SurvivalMaxY` | **-1088 .. 1087**（普通模式在此不掉虚空血、不缺氧） |
+| 取景模式 `FreeViewMode` | 为 true 时**完全不受**虚空伤害 / 缺氧限制（底层接口，无 UI 按钮） |
+
+改动点：
+
+| 文件 | 改动 |
+|---|---|
+| `Game/TerrainChunk.cs` | `MinHeight -128 → -1024`；`Height 1152 → 2048`（层数）；`SlicesCount 72 → 128`；`CalculateCellIndex` **越界改为夹紧**（抛异常会让整片 slice 的网格生成中断 = "地形整块消失"） |
+| `Game/SkylineRuntime.cs` | **新增**：`SurvivalMargin` / `FreeViewMode` / 范围属性 / `IsInside*Range()` / `Describe()` |
+| `Component/ComponentHealth.cs` | 缺氧与虚空伤害阈值改走 `SkylineRuntime`；取景模式下豁免 |
+| `Game/TerrainSerializer23.cs` | 存档起点通式 `yBase = storedLayers > 1024 ? 1024 - storedLayers : 0`（兼容 256 / 1024 / 1152 / 2048 层的旧档） |
+| `Component/ComponentFirstPersonModel.cs`、`ComponentVrHandsModel.cs` | 手持取光下界 `0 → TerrainChunk.MinHeight`（**修掉地下手持方块全黑**） |
+| `Managers/LightingManager.cs` | `CalculateSmoothLight` 取样下界 `0 → TerrainChunk.MinHeight` |
+
+实测（Windows / 世界 `AgentLab`）：`IsCellValid(-1025/-1024/-1000/0/1023/1024) = F/T/T/T/T/F`；
+y=-200/-1000/-1024 可写可读；y≈-1000 的房间渲染与光照（9–15）正常；存档往返保留；
+普通模式下 y=±1050 不掉血不缺氧、y=±1100 开始掉血 + 缺氧；`FreeViewMode=true` 时 y=±1200 仍安全；
+手持取光：y=-998.76 → 11（等于该格世界光）、y=1001 → 15、暗角（格光 0）→ 0。
+
+接口（游戏侧 `Game.SkylineRuntime` 是静态成员，可被外部桥直接调用；下面的示例用配套的 AgentBridge 工具，
+该 mod 与工具在另一个仓库，仅作调用形式说明）：
+
+```powershell
+python tools\scbridge.py raw '{"op":"invoke","target":"skyline","member":"Describe","action":"call"}'
+# Skyline build=[-1024,1023] survival=[-1088,1087] freeView=False
+python tools\scbridge.py raw '{"op":"invoke","target":"skyline.FreeViewMode","value":true}'   # 读取时不带 value
+```
+
+## 5b. v0.0.2 特性：世界竖直范围 → **-128 – 1023**（地下 128 层）
 
 在 v0.0.1（0–1023）基础上把地下打通，关键是六处 `y≥0` 假设：
 
@@ -75,7 +113,7 @@ dotnet build .\Survivalcraft.Windows\Survivalcraft.Windows.csproj -c Release
 （12–15 递减）/碰撞（撞墙停在 x=2593.25）/存活（health 与 Air 恒 1）/存档往返全部通过，
 且 v0.0.1 的别墅与家具无损。
 
-## 5b. v0.0.1 特性：世界高度 0–255 → 0–1023
+## 5c. v0.0.1 特性：世界高度 0–255 → 0–1023
 
 改 16 个文件、+85/−73 行，修掉五条独立的限制链：
 
@@ -96,11 +134,12 @@ y=256/300/700/1000/1023 可写可读；存档往返后 y=300/700/1000 保留；y
 
 限制：
 
-1. 每区块单元数 65536 → **294912**（-128..1023，约 1.15 MB/区块），视距大时注意；可降低 `settings.VisibilityRange`。
+1. 每区块单元数 65536 → **524288**（-1024..1023，int 4B ≈ **2 MB/区块**，是原版 256KB 的 8 倍），视距大时注意；可降低 `settings.VisibilityRange`。
 2. 命令方块 `place` 走 `SetCellValueFast`，不刷新 shaft/几何/光照 → 高处方块要用
    `ChangeCell`（桥的 `op:cell`）写，或建完触发 recalc。
-3. 范围 **-128..1023**；想更深/更高只需调 `TerrainChunk.MinHeight`（层数线性影响内存）；
+3. 范围 **-1024..1023**（人物另有上下各 64 格生存余量，见 §5）；想更深/更高只需调 `TerrainChunk.MinHeight`（层数线性影响内存）；
    地下区域没有地形生成（天然空腔，适合创造模式挖建）；旧版序列化器（14/22/129）仍按 0 起点。
+4. 取景模式（`FreeViewMode`）只有底层接口：伤害/缺氧豁免已生效，UI 按钮与相机自由飞行未做。
 
 路线（草案）：
 

@@ -40,7 +40,7 @@ namespace Game {
             int num4 = (int)MathF.Ceiling(p.Y);
             int z = (int)MathF.Ceiling(p.Z);
             Terrain terrain = subsystemTerrain.Terrain;
-            if (num2 >= 0
+            if (num2 >= TerrainChunk.MinHeight   // [v0.0.3] 原来写死 0：地下 y<0 时手部/模特/界面光照取样直接返回 null
                 && num4 <= TerrainChunk.HeightMinusOne) {
                 TerrainChunk chunkAtCell = terrain.GetChunkAtCell(num, num3);
                 TerrainChunk chunkAtCell2 = terrain.GetChunkAtCell(x, num3);
