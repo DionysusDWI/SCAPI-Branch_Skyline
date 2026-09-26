@@ -102,9 +102,10 @@ run-game.ps1 -ExtraArgs "-skylinegpu off"
 → 系统偏好没生效时，下一次启动自动改走 **ANGLE 按 LUID 直选**（`EGL_PLATFORM_ANGLE_DEVICE_ID_HIGH/LOW_ANGLE`），
 本次启动即成；两条路都不行才记 `failed` 并提示看日志。
 
-证据：`data/sessions/skyline-v004/gpu-restart-prompt.png`（重启提示对话框）、`gpu-verified-after.txt`（两步流程日志）、
-`gpu-preference-proof.md`（"写注册表偏好 → 同一 exe 的 GL_RENDERER 从 AMD 变 NVIDIA"的因果实验）、
-`heightlab/gpu-probe.ps1`（独立用 Windows 性能计数器归因）。
+证据：`data/sessions/skyline-v004/gpu-run1-first-run-prompt-v004.png`（首启"重启后生效"对话框，最终构建）、
+`gpu-runA-fresh-amd-first-run.log.txt` / `gpu-runB-restart-nvidia.log.txt`（"全新安装副本"的两步流程日志）、
+`gpu-verified-after.txt`、`gpu-preference-proof.md`（"写注册表偏好 → 同一 exe 的 GL_RENDERER 从 AMD 变 NVIDIA"的因果实验）、
+`heightlab/gpu-probe.ps1`（独立用 Windows 性能计数器归因，实测渲染占用全在 NVIDIA LUID）。
 
 ## 5b. v0.0.3 特性：世界竖直范围 → **-1024 – 1023** + 64 格生存余量 / 取景模式
 

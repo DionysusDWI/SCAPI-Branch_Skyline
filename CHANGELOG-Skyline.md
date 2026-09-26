@@ -69,8 +69,9 @@ v0.0.4 补的是**范围之外的下游行为**——方块行为子系统、方
 | 水 y=200（对照） | 57 格铺开、isTop… | 57 格铺开、`data=0x10` |
 | 水 **y=1000** | 可流动但取样/浮力失效 | 57 格铺开、6 格外溢、`data=0x10` |
 | 爆炸 y=200 vs y=1000 | 均由局部 256³ 网格处理（无差异） | 同左 |
-| 4852 方块批量放置 | — | **0.58 s / 8366 格每秒**，FPS 59，内存无增长 |
-| `SaveProject(true,false)`（含地形区块回写） | — | 0.34 s，`Project.xml` 落盘 |
+| 4852 方块批量放置（64×64 地板 + 3 高围墙） | — | **0.58–0.83 s（5,846–8,366 格/秒）**，0 失败，内存无增长 |
+| `SaveProject(true,false)`（含地形区块回写） | — | 0.17–0.34 s，`Project.xml` 落盘 |
+| 旧存档里的**重复方块实体**（y<0 反复创建留下的 `(2504,-1000,6774)` 两条） | 修好登记范围后 `Dictionary.Add` 抛 `An item with the same key has already been added` → **整个存档加载失败** | 容忍重复：保留先登记的并记 `Duplicated block entity at …` 警告，存档正常加载 |
 
 显卡选择（`Bugs/Game.log` + 独立性能计数器 `heightlab/gpu-probe.ps1`）：
 
@@ -86,6 +87,19 @@ v0.0.4 补的是**范围之外的下游行为**——方块行为子系统、方
 ANGLE 兜底：ANGLE forced to "NVIDIA GeForce RTX 4060 Laptop GPU" (luid 00000000-00013D69)
           Renderer=ANGLE (NVIDIA, NVIDIA GeForce RTX 4060 Laptop GPU (0x000028E0) Direct3D11 …, D3D11-32.0.16.1088)
 ```
+
+干净复现（把整个游戏目录复制到新路径 = 等价"全新安装"，排除驱动对旧 exe 路径的记忆）：
+
+```
+runA(首次)：default="AMD Radeon 780M Graphics", best="NVIDIA …" → 写偏好 + state=pending_restart + 弹窗，本次仍跑 AMD
+           截图：data/sessions/skyline-v004/gpu-run1-first-run-prompt-v004.png
+runB(重启)：default="NVIDIA …" → Renderer=NVIDIA GeForce RTX 4060 Laptop GPU/PCIe/SSE2，state=applied
+```
+
+日志原文：`data/sessions/skyline-v004/gpu-runA-fresh-amd-first-run.log.txt` / `gpu-runB-restart-nvidia.log.txt`。
+同一场景（别墅 y≈88）实测帧率：原生路径（NVIDIA，垂直同步）≈ 30 fps；ANGLE/D3D11（NVIDIA）≈ 56 fps
+（`gpu-run3-angle-nvidia.log.txt`）——兼容模式在帧率上不吃亏，但它会切换渲染后端，
+所以**默认仍走"系统偏好 + 原生"**，ANGLE 只作兜底/可选项（`SkylineGpu.cfg` 里写 `strategy=angle` 可强制）。
 
 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
 
