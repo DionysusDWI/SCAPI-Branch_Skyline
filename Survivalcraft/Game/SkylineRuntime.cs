@@ -232,6 +232,15 @@ namespace Game {
         /// <summary>[v0.1.73] LOD 单元区域仓（落盘 + 按需回读）的账本。</summary>
         public static string LodRegionStore() => SkylineLod.RegionStoreDescribe();
 
+        /// <summary>[v0.1.74] 地形区块表的一致性诊断（开地址表被置空打断探测链 → 僵尸区块）。</summary>
+        public static string TerrainStorage() {
+            Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+            if (terrain == null) {
+                return "{\"ok\":false,\"err\":\"no terrain\"}";
+            }
+            return terrain.m_allChunks.Diagnose(terrain.m_allocatedChunks.Count);
+        }
+
         /// <summary>[v0.1.15] LOD 坡向明暗强度（0 = 关闭；默认 0.45）。改动后需重建网格才生效：
         /// `skyline.LodReset()` 或等下一次 `MeshRebuildSeconds`。</summary>
         public static float LodSlopeShadingStrength {

@@ -92,5 +92,69 @@ namespace Game {
             };
             return o.ToJsonString();
         }
+
+        /// <summary>
+        /// [v0.1.74] **受控分配-丢弃探针**（诊断用）：分配 `mb` 个 1 MiB 的字节数组、立刻丢掉、
+        /// 强制回收，然后报告前后的 `GetTotalMemory(true)`。
+        ///
+        /// 为什么要它：本项目连续两轮在"活对象 vs 堆容量"上误判（notes/149、notes/152）。
+        /// 如果"分配 200 MiB 再丢掉"会让 `GetTotalMemory(true)` **永久抬高**，
+        /// 那说明这个口径里混进了**空闲容量**，那么"移动时数字变大"就**不能**直接读成泄漏。
+        /// </summary>
+        public static string MemoryChurn(int mb, bool keep) {
+            long before = GC.GetTotalMemory(true);
+            byte[][] blocks = new byte[Math.Clamp(mb, 1, 512)][];
+            for (int i = 0; i < blocks.Length; i++) {
+                blocks[i] = new byte[1048576];
+            }
+            long peak = GC.GetTotalMemory(false);
+            if (!keep) {
+                for (int i = 0; i < blocks.Length; i++) {
+                    blocks[i] = null;
+                }
+                blocks = null;
+            }
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            long after = GC.GetTotalMemory(true);
+            JsonObject o = new() {
+                ["requestedMiB"] = mb,
+                ["kept"] = keep,
+                ["beforeMiB"] = Math.Round(before / 1048576.0, 1),
+                ["peakMiB"] = Math.Round(peak / 1048576.0, 1),
+                ["afterMiB"] = Math.Round(after / 1048576.0, 1),
+                ["residueMiB"] = Math.Round((after - before) / 1048576.0, 1)
+            };
+            return o.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.74] **带 LOH 压缩的强制回收**（诊断用）。为什么单列一个动作：
+        /// `GC.GetTotalMemory(true)` 会把**大对象堆里的空闲段**也算进去，而 LOH **默认不压缩** ——
+        /// 只靠"普通 GC 后数字不降"**区分不了"活对象"与"LOH 高水位"**（这坑在 notes/149 与 notes/152 都踩过）。
+        /// 先 `LargeObjectHeapCompactionMode = CompactOnce` 再 `Collect`，才是"能把 LOH 收回去"的那种回收。
+        /// </summary>
+        public static string MemoryCompactAndCollect() {
+            long before = GC.GetTotalMemory(false);
+            try {
+                System.Runtime.GCSettings.LargeObjectHeapCompactionMode =
+                    System.Runtime.GCLargeObjectHeapCompactionMode.CompactOnce;
+            }
+            catch (Exception e) {
+                return new JsonObject { ["ok"] = false, ["err"] = e.Message }.ToJsonString();
+            }
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            long after = GC.GetTotalMemory(true);
+            JsonObject o = new() {
+                ["ok"] = true,
+                ["beforeMiB"] = Math.Round(before / 1048576.0, 1),
+                ["afterMiB"] = Math.Round(after / 1048576.0, 1),
+                ["reclaimedMiB"] = Math.Round((before - after) / 1048576.0, 1),
+                ["lohMiBAfter"] = Math.Round(GC.GetGCMemoryInfo().GenerationInfo.Length > 3
+                    ? GC.GetGCMemoryInfo().GenerationInfo[3].SizeAfterBytes / 1048576.0 : 0, 1)
+            };
+            return o.ToJsonString();
+        }
     }
 }

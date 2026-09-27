@@ -165,6 +165,33 @@ namespace Game {
         // 顶点属性格式（SkylineLodVertex，28 B）与老格式（TerrainVertex，20 B）的常驻字节就靠这两个数算。
         static int m_vertexCount, m_vertexCountFine, m_vertexCountNear;
 
+        // ===== [v0.1.74] 网格重建的**复用缓冲**（里程碑 2.2：不要"只增不减"）=====
+        //
+        // 为什么必须有：重建一次网格要几千~几万项 —— `keys`/`tops`/`walls` 三个 List、
+        // 顶点数组（TerrainVertex 20 B 或 SkylineLodVertex 28 B）、索引数组（short/int），
+        // 加起来一次就是**几个 MB**，全都 **>85 KB ⇒ 落在大对象堆（LOH）上**。
+        // 而**LOH 默认不压缩**（`LargeObjectHeapCompactionMode.Default`），于是"边走边重建"
+        // 会把 LOH 的高水位一路抬上去：实测走动时 **LOH 70 → 299 MiB**，而且强制 GC 也收不回来
+        // （收回来的是垃圾，收不回来的是**高水位/空闲段**）。这解释了 v0.1.70~v0.1.73 一直没归因掉的
+        // "移动时存活堆增长"（`notes/152 §6`），也是"LOD 关掉后斜率从 +420 掉到 +78 MiB/960 m"的那 340 MiB。
+        //
+        // 修法：把这三类缓冲做成**静态复用**（每次 Clear/EnsureCapacity），重建不再产生 MB 级垃圾。
+        static readonly List<long> m_keysScratch = [];
+        static readonly List<(int x0, int z0, float yHigh, float yLow, int side, int value)> m_wallsScratch = [];
+        static readonly List<(long Key, int Height, int Value, byte Light)> m_topsScratch = [];
+        static TerrainVertex[] m_vertexScratch;
+        static SkylineLodVertex[] m_attrVertexScratch;
+        static short[] m_indexScratch;
+        static int[] m_index32Scratch;
+
+        static void EnsureCapacity<T>(ref T[] array, int count) {
+            if (array != null && array.Length >= count) {
+                return;
+            }
+            int capacity = array == null ? Math.Max(count, 1024) : Math.Max(count, array.Length * 2);
+            array = new T[capacity];
+        }
+
         // side 编号与侧壁代码一致：0=+Z、1=-Z、2=+X、3=-X
         static readonly int[] s_sideDx = [0, 0, 1, -1];
         static readonly int[] s_sideDz = [1, -1, 0, 0];
@@ -1095,7 +1122,8 @@ namespace Game {
             float minSq = minDist * minDist;
             float maxSq = maxDist * maxDist;
 
-            var keys = new List<long>();
+            m_keysScratch.Clear();
+            List<long> keys = m_keysScratch;
             if (layer == 0) {                                // v0.1.15：坡向明暗诊断只在粗层重置（避免细层覆盖）
                 m_slopeStatMin = float.MaxValue;
                 m_slopeStatMax = float.MinValue;
@@ -1135,10 +1163,12 @@ namespace Game {
 
             // 侧壁（v0.1.0 改进）：相邻单元高度差 ≥ 0.5 m 时，从**高的一侧**向下画一圈
             // 双面"裙边墙"，消除浮空平板之间的断层/黑洞（post3 取证）。
-            var walls = new List<(int x0, int z0, float yHigh, float yLow, int side, int value)>();
+            m_wallsScratch.Clear();
+            List<(int x0, int z0, float yHigh, float yLow, int side, int value)> walls = m_wallsScratch;
             // [v0.1.62] **第二层表面的顶面表**：与主表面合成同一张表，走同一套材质/光照管线
             // （没有第二层单元的格时，这张表 == keys，逐位回 v0.1.61）。
-            var tops = new List<(long Key, int Height, int Value, byte Light)>(keys.Count);
+            m_topsScratch.Clear();
+            List<(long Key, int Height, int Value, byte Light)> tops = m_topsScratch;
             int secondSheets = 0;
             foreach (long key in keys) {
                 Cell c0 = dict[key];
@@ -1197,11 +1227,28 @@ namespace Game {
             // （`Shader.GetVertexAttribData`），所以游戏 `Opaque` 着色器照样能画这个 buffer ——
             // 这正是"加属性而不是换格式"。关掉开关即逐位回到 v0.1.59 的 20 B 路径。
             bool attr = SkylineRuntime.LodVertexAttributes;
-            TerrainVertex[] bakedVertices = attr ? null : new TerrainVertex[vertexCount];
-            SkylineLodVertex[] attrVertices = attr ? new SkylineLodVertex[vertexCount] : null;
-            short[] indices = new short[indexCount];
             bool bigIndices = vertexCount > 65535;
-            var indices32 = bigIndices ? new int[indexCount] : null;
+            // [v0.1.74] 全部改用**静态复用缓冲**（见字段处的注释：这些数组是 MB 级 LOH 垃圾的主要来源）。
+            TerrainVertex[] bakedVertices = null;
+            SkylineLodVertex[] attrVertices = null;
+            short[] indices = null;
+            int[] indices32 = null;
+            if (attr) {
+                EnsureCapacity(ref m_attrVertexScratch, vertexCount);
+                attrVertices = m_attrVertexScratch;
+            }
+            else {
+                EnsureCapacity(ref m_vertexScratch, vertexCount);
+                bakedVertices = m_vertexScratch;
+            }
+            if (bigIndices) {
+                EnsureCapacity(ref m_index32Scratch, indexCount);
+                indices32 = m_index32Scratch;
+            }
+            else {
+                EnsureCapacity(ref m_indexScratch, indexCount);
+                indices = m_indexScratch;
+            }
             var light = new Color((byte)220, (byte)220, (byte)220);
             int vi = 0, ii = 0, built = 0;
             // 写一个顶点：属性路径多写面法线（`face` 沿用 CellFace 编号 0=+Z 1=+X 2=-Z 3=-X 4=+Y 5=-Y）

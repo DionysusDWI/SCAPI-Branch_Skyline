@@ -7,6 +7,88 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.74] - 2026-09-28
+
+第八十四个版本：**里程碑 2.2 —— "内存只增不减"的真根因定位并修复**。
+
+用户口径（逐字）："继续推进基于滑动窗口的内存占用优化方式，**及时将已卸载区块的内容移除出内存，
+避免内存堆积和只增不减**"。
+
+### 根因：LOD 采样戳用**强引用**记住了每个区块
+
+`SkylineLodRefresh.SampleStamp` 里有一个 **`public object Chunk`**：
+
+```csharp
+struct SampleStamp {
+    public object Chunk;    // 采样时的 TerrainChunk 实例（重分配后必然是别的对象）
+    ...
+}
+static readonly Dictionary<long, SampleStamp> m_stamps = [];   // 从不清理
+```
+
+本意是对的（用对象身份判断"区块是否被 `FreeChunk → AllocateChunk` 重建过"），
+但它把**每一个被采样过的 `TerrainChunk` 永久钉在内存里**；而一个区块还带着
+**128 个 slice 几何**（2048/16）+ 一堆 VB/IB。这些"僵尸区块"**不在 `AllocatedChunks` 里**，
+所以卸载逻辑永远碰不到它们 —— 走过的地方越多，内存只增不减。
+
+### 定位过程（每一步都否掉上一步的猜测）
+
+| 步骤 | 仪器 | 结论 |
+|---|---|---|
+| 1 | 强制回收后的**存活堆**（`GC.GetTotalMemory(true)`） | 走 960 m 涨 **+32~+420 MiB** ⇒ 确实在涨 |
+| 2 | **开关归因**：LOD 开 / 关 | **+420 vs +78 MiB / 960 m** ⇒ LOD 路径是主因 |
+| 3 | **LOH 压缩 + 全量 GC** | 只回收 **2.5 MiB** ⇒ 不是大对象堆碎片 |
+| 4 | **受控分配-丢弃探针**（分配 200 MiB 再丢） | 残留仅 **1.0 MiB** ⇒ `GetTotalMemory(true)` 是真实存活字节 |
+| 5 | **`dotnet-gcdump report`** | GC 堆 684 MiB / 4.95M 对象；**`TerrainChunk` 1,223 个**（在册仅约 202）、`TerrainGeometry` 156,553 ⇒ 僵尸区块 |
+| 6 | **`dotnet-dump` + SOS `gcroot`** | 持有链逐字：`strong handle → Dictionary<Int64, SkylineLod+SampleStamp> → Entry[] → TerrainChunk` |
+
+### 相对 v0.1.73 的变更
+
+| 项 | 内容 |
+|---|---|
+| **`TerrainChunk.InstanceId`** | 单调递增的实例编号（构造时 `Interlocked.Increment`）—— 给"区块被重建过"一个可比较的标识，**不需要持有对象** |
+| **`SampleStamp.ChunkId`** | `object Chunk` → `int ChunkId`（语义一样，不再钉住区块） |
+| **`MaxStamps`** | 采样戳表上限（默认 200,000，到顶整表清空 ⇒ 下一轮全量 FirstSeen 重采一次），让这张表**有界** |
+| **`Terrain.ChunksStorage.Diagnose`** | 开地址表一致性诊断（`allocated` / `arrayNonEmpty` / `duplicates`），桥动词 `skyline.TerrainStorage()` |
+| **`SkylineMemory`** | `MemoryProbe()`（分代 + LOH + 地形段缓存在用/缓存 + 各集合计数）、`MemoryCompactAndCollect()`、`MemoryChurn(mb)`（受控分配探针） |
+
+### 验证（同一条测量，前后对比）
+
+| 判据 | 修复前 | 修复后 |
+|---|---|---|
+| 存活堆 / 走行距离 | **+225~420 MiB / 960 m** | **+25.5 MiB / 1,920 m**（≈13 MiB/km） |
+| GC 堆总量 | 684 MiB | **229 MiB**（−66%） |
+| 堆内对象数 | 4,952,769 | **1,067,753**（−78%） |
+| `Game.TerrainChunk` | **1,223** | **201**（= 在册数） |
+| `Game.TerrainGeometry` | **156,553** | **25,737**（= 201×128） |
+| 地形表一致性 | — | `allocated=201 arrayNonEmpty=201 duplicates=0` |
+
+### 回归门禁
+
+**PASS 16 / FAIL 0 / SKIP 0 / KNOWN 1**。新增 `terrain-storage` 判据（僵尸区块门禁）；
+并修正**两条过期判据**（都是判据本身错，不是代码回归）：`shell-mesh-tiers` 的"没数据"由 FAIL 改 **SKIP**；
+`shell-column` 原来要求"壳材质 == 地形材质"，但 **v0.1.59 起草方块本来就会换成泥土** ⇒ 改为按替换口径比。
+
+### 顺带：装好两件内存分析工具（走本地代理安装，**未克隆任何仓库**）
+
+`dotnet-gcdump`（类型统计）与 `dotnet-dump` + SOS（`gcroot` 持有链）——
+**把"内存归因"从猜变成了可执行流程**。
+
+### 与前面几篇的关系（避免误读）
+
+* v0.1.70（`notes/149`）的"没有泄漏"结论**在当时是错的**：那次只测了 5 km、且刚重启
+  （僵尸区块还只有 200 量级）。根因是"**走过的地方越多越明显**" ⇒ **内存泄漏的判据必须覆盖足够长的行程**。
+* v0.1.73（`notes/152 §6`）的"四个已知结构已排除"是对的，但**漏了第五个** `m_stamps`：
+  它**不直接持有 LOD 单元**，而是**间接持有区块对象**，所以按"谁持有单元"去找找不到。
+
+### 未做 / 风险（不粉饰）
+
+* `m_stamps` 仍按"访问过的地方"增长（每条 24 B、有上限）；更干净是按相机距离裁剪（优化，非 bug）。
+* 堆里还有约 1M 个对象 / 229 MiB 未做逐类型"应然 vs 实然"对账。
+* `dotnet-dump` 全量转储 **2.1 GB**、`gcroot` 首次要缓存 GC 根（数秒~数分钟）——分析要留时间预算。
+
+详见 `notes/153-内存只增不减的真根因.md`；证据 `data/sessions/skyline-v0174/`。
+
 ## [v0.1.73] - 2026-09-28
 
 第八十三个版本：**里程碑 2.2 收官 —— LOD 单元区域仓（落盘 + 按需回读）** + **内存归因仪器**。

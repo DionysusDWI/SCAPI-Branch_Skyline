@@ -53,6 +53,9 @@ namespace Game {
         /// </summary>
         public static int DirtyChunksMaxPerTick { get; set; } = 64;
 
+        /// <summary>[v0.1.74] 采样戳表上限（条）。到顶整表清空（代价：下一轮全量重采一次）。</summary>
+        public static int MaxStamps { get; set; } = 200000;
+
         /// <summary>
         /// 编辑后的**沉降期**（秒）：LOD 的采样数据源是 `TerrainChunk.GetTopHeightFast`（区块的
         /// "顶面高度"字段），它由地形更新器的光照阶段重算——而光照阶段是**排队**跑的（实测编辑后
@@ -98,7 +101,11 @@ namespace Game {
         }
 
         struct SampleStamp {
-            public object Chunk;    // 采样时的 TerrainChunk 实例（重分配后必然是别的对象）
+            // [v0.1.74] 这里**曾经是 `object Chunk`（强引用）** —— 那会把每个采样过的区块永久钉住
+            // （m_stamps 从不清理）。实测堆里 1,223 个 TerrainChunk 全是这么留下来的（`notes/153`，
+            // SOS `gcroot` 的持有链：strong handle → Dictionary<long,SampleStamp> → Entry[] → TerrainChunk）。
+            // 改成**实例编号**：判断"区块被重建过"的语义完全一样，但不再持有对象。
+            public int ChunkId;
             public int Counter;     // 采样时的 ModificationCounter
             public double Time;     // 采样时刻（Time.RealTime）
         }
@@ -276,7 +283,7 @@ namespace Game {
             if (!m_stamps.TryGetValue(key, out SampleStamp stamp)) {
                 return ResampleReason.FirstSeen;            // 本会话没采过（v0.1.0~v0.1.6 的历史数据也走这里纠正）
             }
-            if (!ReferenceEquals(stamp.Chunk, chunk)) {
+            if (stamp.ChunkId != chunk.InstanceId) {
                 return ResampleReason.NewChunk;             // 区块被 FreeChunk → AllocateChunk 重建过
             }
             if (stamp.Counter != chunk.ModificationCounter) {
@@ -293,8 +300,13 @@ namespace Game {
             int cx = chunk.Origin.X >> CellShift;
             int cz = chunk.Origin.Y >> CellShift;
             long key = Key(cx, cz);
+            // [v0.1.74] 采样戳表也要有上限：它随"走过的单元"单调增长（虽然一条只 ~24 B）。
+            // 到顶就整表清空 —— 代价是下一轮全量 FirstSeen 重采一次，换来**有界**的内存。
+            if (m_stamps.Count > MaxStamps) {
+                m_stamps.Clear();
+            }
             m_stamps[key] = new SampleStamp {
-                Chunk = chunk,
+                ChunkId = chunk.InstanceId,
                 Counter = chunk.ModificationCounter,
                 // v0.1.8：脏重采把"保鲜起点"往后挪，使该单元在 DirtyVerifySeconds 后被兜底通道复核一次
                 // （万一第一次仍撞上未沉降完的光照阶段，复核负责纠正）。

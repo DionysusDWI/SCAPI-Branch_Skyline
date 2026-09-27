@@ -102,6 +102,7 @@ namespace Game {
             Terrain = terrain;
             Coords = new Point2(x, z);
             Origin = new Point2(x * Size, z * Size);
+            InstanceId = System.Threading.Interlocked.Increment(ref s_instanceIdSeed);
             // [负高度实验] 包围盒跟着世界竖直范围走（z 裁剪要用它，不能还是 0..Height）
             BoundingBox = new BoundingBox(
                 new Vector3(Origin.X, MinHeight, Origin.Y),
@@ -110,6 +111,19 @@ namespace Game {
             Cells = new int[ColumnSlicesCount][];
             Shafts = m_shaftsCache.Rent(Size * Size, true);
         }
+
+        // ===== [v0.1.74] 区块**实例编号**（里程碑 2.2：修掉"只增不减"的真根因）=====
+        //
+        // 背景：LOD 的采样戳需要判断"这个区块是不是被 FreeChunk → AllocateChunk 重建过"
+        // （重建过就必须重采）。原来的做法是在采样戳里存 `object Chunk`（**强引用**），
+        // 而采样戳表从不清理 ⇒ **每个采样过的区块都被永久钉在内存里**：
+        // 实测堆里 1,223 个 TerrainChunk（在册只有约 202），每个还带着 128 个 slice 几何与一堆 VB/IB。
+        // SOS 的 `gcroot` 给出的持有链是
+        //   strong handle → Dictionary<long, SkylineLod.Refresh+SampleStamp> → Entry[] → TerrainChunk。
+        // 修法：给区块一个**单调递增的实例编号**，采样戳只存这个 int —— 语义完全一样，但不再持有对象。
+        static int s_instanceIdSeed;
+
+        public readonly int InstanceId;
 
         /// <summary>取某一段（未租借则为 null；读路径当成全 0/空气）。</summary>
         public int[] GetColumnSlice(int seg) =>

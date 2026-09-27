@@ -44,21 +44,54 @@ namespace Game {
                 m_array[num] = chunk;
             }
 
-            public virtual void Remove(int x, int y) {
-                int num = (x + (y << Shift)) & CapacityMinusOne;
-                while (true) {
-                    TerrainChunk terrainChunk = m_array[num];
-                    if (terrainChunk == null) {
-                        return;
-                    }
-                    if (terrainChunk.Coords.X == x
-                        && terrainChunk.Coords.Y == y) {
-                        break;
-                    }
-                    num = (num + 1) & CapacityMinusOne;
+        public virtual void Remove(int x, int y) {
+            int num = (x + (y << Shift)) & CapacityMinusOne;
+            while (true) {
+                TerrainChunk terrainChunk = m_array[num];
+                if (terrainChunk == null) {
+                    return;
                 }
-                m_array[num] = null;
+                if (terrainChunk.Coords.X == x
+                    && terrainChunk.Coords.Y == y) {
+                    break;
+                }
+                num = (num + 1) & CapacityMinusOne;
             }
+            m_array[num] = null;
+        }
+
+        /// <summary>
+        /// [v0.1.74] **诊断**：开地址表的一致性。
+        ///
+        /// 背景（这是"内存只增不减"的根因）：`Remove` 直接把槽位置空，而这是**线性探测**表 ——
+        /// 置空会**打断其他 key 的探测链**：原本探测经过这个槽的 key 从此 `Get` 返回 null，
+        /// 于是同一坐标会被**重复 `AllocateChunk`**（`Get != null` 的防重检查也因此失效），
+        /// 旧的 TerrainChunk 既不在 `m_allocatedChunks` 里（**永远不会被 `FreeChunk`**）、
+        /// 又占着 128 个 slice 几何与一堆 VB/IB ⇒ **僵尸区块只增不减**。
+        /// 实测：堆里 1,092 个 `TerrainChunk`，而在册只有 ~208（`notes/153`）。
+        /// </summary>
+        public virtual string Diagnose(int allocatedCount) {
+            int nonEmpty = 0;
+            var seen = new Dictionary<long, int>();
+            int duplicates = 0;
+            for (int i = 0; i < Capacity; i++) {
+                TerrainChunk chunk = m_array[i];
+                if (chunk == null) {
+                    continue;
+                }
+                nonEmpty++;
+                long key = ((long)chunk.Coords.X << 32) ^ (uint)chunk.Coords.Y;
+                if (seen.TryGetValue(key, out int n)) {
+                    seen[key] = n + 1;
+                    duplicates++;
+                }
+                else {
+                    seen[key] = 1;
+                }
+            }
+            return $"{{\"allocated\":{allocatedCount},\"arrayNonEmpty\":{nonEmpty},"
+                + $"\"distinctCoords\":{seen.Count},\"duplicates\":{duplicates},\"capacity\":{Capacity}}}";
+        }
         }
 
         public const int ContentsMask = 1023;
