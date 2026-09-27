@@ -136,6 +136,18 @@ namespace Game {
             set => SkylineAtmosphere.FogExtendEnabled = value;
         }
 
+        /// <summary>v0.1.2：视觉球"三档"开关——短球内强制全精度 / 两球之间按 d_box / 全球外占位。</summary>
+        public static bool VisualSphereEnabled {
+            get => SkylineRender.VisualSphereEnabled;
+            set => SkylineRender.VisualSphereEnabled = value;
+        }
+
+        /// <summary>短球半径系数（× 视距）。</summary>
+        public static float VisualSphereShortFactor {
+            get => SkylineRender.ShortSphereFactor;
+            set => SkylineRender.ShortSphereFactor = value;
+        }
+
         public static string LodDescribe() => SkylineLod.Describe();
 
         public static string LodSurvey() => SkylineLod.Survey();

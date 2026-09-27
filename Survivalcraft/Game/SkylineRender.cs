@@ -65,6 +65,13 @@ namespace Game {
         /// <summary>动态档位检查间隔（秒）。</summary>
         public static float TickIntervalSeconds { get; set; } = 0.5f;
 
+        // ===== v0.1.2：视觉球"三档"（用户 2026-09-27 指示的落地；默认关，保持 v0.1.1 行为）=====
+        /// <summary>开启后按"短球 / 两球之间 / 完全球之外"三档决定区块档位。</summary>
+        public static bool VisualSphereEnabled { get; set; } = false;
+
+        /// <summary>短球半径 = 视距 × 本系数（默认 0.5 ≈ 64 m @128 m 视距）。</summary>
+        public static float ShortSphereFactor { get; set; } = 0.5f;
+
         // ---------------- 统计 ----------------
 
         static int m_fullInstances;
@@ -285,7 +292,30 @@ namespace Game {
                     continue;
                 }
                 LodState desired;
-                if (distance > info.MaxDb * (1f + Hysteresis)) {
+                if (VisualSphereEnabled) {
+                    // v0.1.2：三档球——① 短球内**强制全精度**（用户口径"短球形视距内渲染"）；
+                    // ② 短球与完全球之间按 d_box(E) 三态（"不完全遮挡判据"就是 d_box 本身）；
+                    // ③ 完全球之外一律占位（地形交给 SkylineLod 的低模层）。
+                    float yMul = MathF.Max(VisualSphereYMultiplier, 0.0001f);
+                    float ellipsoid = MathF.Sqrt(horiz * horiz + (dy / yMul) * (dy / yMul));
+                    float rShort = visual * MathUtils.Clamp(ShortSphereFactor, 0.1f, 0.9f);
+                    if (ellipsoid <= rShort * (1f - Hysteresis)) {
+                        desired = LodState.Full;
+                    }
+                    else if (ellipsoid >= visual * (1f + Hysteresis)) {
+                        desired = LodState.Boxed;
+                    }
+                    else if (ellipsoid > info.MaxDb * (1f + Hysteresis)) {
+                        desired = LodState.Boxed;
+                    }
+                    else if (ellipsoid < info.MinDb * (1f - Hysteresis)) {
+                        desired = LodState.Full;
+                    }
+                    else {
+                        desired = LodState.Mixed;
+                    }
+                }
+                else if (distance > info.MaxDb * (1f + Hysteresis)) {
                     desired = LodState.Boxed;
                 }
                 else if (distance < info.MinDb * (1f - Hysteresis)) {
