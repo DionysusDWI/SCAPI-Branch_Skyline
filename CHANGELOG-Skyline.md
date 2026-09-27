@@ -3,6 +3,27 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.27] - 2026-09-27
+
+第三十七个版本：**更正 v0.1.26 的"驻留区写得到、看不到"开放问题** —— 根因是**标记块选错**：
+`contents=42` 的 `CopperIngotBlock` 属于 `IngotBlock`，而 `IngotBlock.GenerateTerrainVertices(...)`
+是**空实现**（它只做手持/物品栏模型）——写进地形的铜锭**设计上就不渲染**；换成整方块（石砖 26）后，
+同机位 before/after 立刻可见。`op:shape` 的 box/sphere/cylinder 自始渲染正常。
+
+**本版相对 v0.1.26 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **更正 A（结论）** | 撤回"驻留加载区编辑不渲染"的结论；数据 / 碰撞 / 光照 / 几何链路均无异常（`EditSettleDescribe` 每次编辑都有样本、`last≈73 ms`，区块 `State=Valid`、列顶正确） |
+| **新增 B（证据）** | `data/sessions/skyline-v0127/`：同机位 A/B（写石砖前 14:51:04 → 写 4 格石砖后 14:52:30 方块立刻出现）、box 近照（7 m）、box+cylinder 远景（16 m，被该世界浓雾洗白） |
+| **流程 C** | 视觉验证规则：标记块只用**整方块**（26 石砖 / 66 石灰岩），取样距离 <10 m，先做同机位 before/after；`IngotBlock` 系（42 铜 / 43 铁 / 44 金…）**永远不渲染**，只能用于数据侧测试 |
+
+### Verified
+
+* 同机位（4291.5,65,9096.5 / yaw 90 / pitch 0）A/B 对照成立（见上表截图）；
+* 源码级证据：`Survivalcraft/Block/IngotBlock.cs` 的 `GenerateTerrainVertices` 为空实现；
+* `op:cell` 回读、`GetTopHeight`、区块状态机与批量光照去抖计数全部正常。
+
 ## [v0.1.26] - 2026-09-27
 
 第三十六个版本：**原生形状建造 `op:shape`** —— 把命令方块 mod 的 place 家族形状变体在配套桥
