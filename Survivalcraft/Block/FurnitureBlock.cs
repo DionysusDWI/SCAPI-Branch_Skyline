@@ -52,6 +52,19 @@ namespace Game {
                 return;
             }
             FurnitureGeometry geometry2 = design.Geometry;
+            // [v0.1.63] **里程碑 1.5：逐级降分辨率的家具 LOD**（每个 design index 一组 1/2、1/4 分辨率几何）。
+            // 这一步只决定"用哪一档几何"；方盒决策仍归 `SkylineRender.ShouldBoxInstance` 管 ——
+            // 于是"全精度 → 1/2 → 1/4 → 方盒"是一条连续链，而不是"近处全精度 / 远处整块方盒"的二元跳变。
+            if (SkylineFurnitureLod.Enabled) {
+                Vector3 lodCamera = SkylineLod.CameraViewPosition();
+                float lodDistance = Vector3.Distance(lodCamera,
+                    new Vector3(x + 0.5f, y + 0.5f, z + 0.5f));
+                FurnitureGeometry coarse = SkylineFurnitureLod.GeometryFor(
+                    design, generator.SubsystemTerrain, lodDistance, out _);
+                if (coarse != null) {
+                    geometry2 = coarse;
+                }
+            }
             int mountingFacesMask = design.MountingFacesMask;
             for (int i = 0; i < 6; i++) {
                 int num = CellFace.OppositeFace(i < 4 ? (i + rotation) % 4 : i);

@@ -76,6 +76,8 @@ namespace Game {
 
         static int m_fullInstances;
         static int m_boxInstances;
+        /// <summary>[v0.1.63] "本该退方盒、但因为分级可用而改成粗几何"的次数（里程碑 1.5 的判据）。</summary>
+        static int m_boxDeferredToLod;
         static int m_rebakes;
         static int m_surveys;
         static double m_nextTick;
@@ -89,14 +91,49 @@ namespace Game {
 
         enum LodState { Mixed = 0, Full = 1, Boxed = 2 }
 
+        /// <summary>
+        /// [v0.1.63] **取证/切换用**：把所有"烘进去时用了非 0 家具 LOD 级别"的区块强制重建几何
+        /// （关掉分级开关、或想把级别归零时调用）。返回被重建的区块数。
+        /// 家具几何是烘进区块网格的，不主动重建的话关掉开关也还是粗几何。
+        /// </summary>
+        public static int InvalidateFurnitureLodChunks() {
+            SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
+            if (subsystemTerrain?.TerrainUpdater == null) {
+                return 0;
+            }
+            int n = 0;
+            foreach (KeyValuePair<long, ChunkInfo> kv in m_chunks) {
+                if (kv.Value.LodLevel == 0) {
+                    continue;
+                }
+                Point2 coords = new((int)(kv.Key >> 32), (int)(kv.Key & 0xFFFFFFFF));
+                subsystemTerrain.TerrainUpdater.DowngradeChunkNeighborhoodState(
+                    coords, 0, TerrainChunkState.InvalidVertices1, true);
+                kv.Value.LodLevel = 0;
+                n++;
+            }
+            return n;
+        }
+
         sealed class ChunkInfo {
             public LodState State = LodState.Mixed;
             public float MinDb = float.MaxValue;
             public float MaxDb;
             public int InstanceCount;
+            /// <summary>[v0.1.63] 上一次烘焙时用的**家具 LOD 级别**（0=全精度/1=1/2/2=1/4/3=方盒）。</summary>
+            public int LodLevel;
         }
 
         static readonly Dictionary<long, ChunkInfo> m_chunks = [];
+
+        /// <summary>
+        /// [v0.1.63] 家具 LOD **级别扫描**每 Tick 最多看几个区块（默认 64）。
+        /// 为什么要跟状态机的慢速轮转分开：状态机每 Tick 只处理极少数区块（还要跑曝光/重建决策），
+        /// 实测 264 个区块要几十秒才轮到某个区块 —— 那么"级别跟着距离变"就形同虚设。
+        /// 级别扫描只做一次"距离→级别"的比较，级别变了才把这个区块标脏（真正重建仍由 TerrainUpdater 按预算做）。
+        /// </summary>
+        public static int FurnitureLodLevelScanPerTick { get; set; } = 64;
+        static int m_levelScanCursor;
 
         static long Key(Point2 coords) => ((long)coords.X << 32) ^ (uint)coords.Y;
 
@@ -237,6 +274,20 @@ namespace Game {
                 case LodState.Full: boxed = false; break;
                 default: boxed = distance >= db; break;
             }
+            // [v0.1.63] 里程碑 1.5：**有分级的家具不退回方盒**（直到"最粗一级也够看"的距离之外）。
+            // 为什么必须在这里改：实测一件 res 28 的大件家具 `d_box(E) ≈ 60 m`，而分级阈值是 43.5 / 85.8 m ——
+            // 方盒在 60 m 就抢先，分级永远轮不到（这正是"家具 LOD 要么全精度、要么整块方盒"的根源）。
+            // 只对**确实有分级**的设计让位（顶点数够），小件家具的行为逐位不变。
+            if (boxed && SkylineFurnitureLod.Enabled) {
+                FurnitureDesign lodDesign = subsystemTerrain.SubsystemFurnitureBlockBehavior?.GetDesign(designIndex);
+                if (SkylineFurnitureLod.HasLevels(lodDesign)) {
+                    float coarsest = SkylineFurnitureLod.LevelDistance(SkylineFurnitureLod.MaxLevel);
+                    if (distance < coarsest * (1f + Hysteresis)) {
+                        boxed = false;
+                        m_boxDeferredToLod++;
+                    }
+                }
+            }
             if (StatsEnabled) {
                 if (boxed) {
                     m_boxInstances++;
@@ -324,6 +375,15 @@ namespace Game {
                 else {
                     desired = LodState.Mixed;
                 }
+                // [v0.1.63] 里程碑 1.5：**分级家具 LOD** —— 别让方盒抢在中间两级之前。
+                // 方盒阈值仍然按曝光算，但开启分级时它至少要等到"最粗一级也够用"的距离，
+                // 于是 全精度 → 1/2 → 1/4 → 方盒 是一条连续链（这正是"视觉无差异"的前提）。
+                if (SkylineFurnitureLod.Enabled && desired == LodState.Boxed) {
+                    float coarsest = SkylineFurnitureLod.LevelDistance(SkylineFurnitureLod.MaxLevel);
+                    if (distance < coarsest * (1f + Hysteresis)) {
+                        desired = LodState.Full;              // 还没到方盒的距离 → 交给分级（由下面的 LodLevel 决定哪一档）
+                    }
+                }
                 if (desired != info.State) {
                     info.State = desired;
                     subsystemTerrain.TerrainUpdater.DowngradeChunkNeighborhoodState(
@@ -331,6 +391,72 @@ namespace Game {
                     m_rebakes++;
                     budget--;
                 }
+                // [v0.1.63] 级别本身随距离变，也要让区块重建几何 —— 家具几何是**烘进区块网格**的，
+                // 不像 LOD 层那样每帧重画；不重建的话"级别"永远停在第一次烘焙时的距离。
+                if (SkylineFurnitureLod.Enabled && info.InstanceCount > 0) {
+                    int desiredLevel = SkylineFurnitureLod.LevelForDistance(distance);
+                    if (desiredLevel != info.LodLevel) {
+                        info.LodLevel = desiredLevel;
+                        subsystemTerrain.TerrainUpdater.DowngradeChunkNeighborhoodState(
+                            chunk.Coords, 0, TerrainChunkState.InvalidVertices1, true);
+                        m_rebakes++;
+                        budget--;
+                    }
+                }
+            }
+            // [v0.1.63] 级别的**高频扫描**（与上面那条慢速轮转分开，见 FurnitureLodLevelScanPerTick 注释）
+            TickFurnitureLodLevels(subsystemTerrain, camera, visual);
+        }
+
+        /// <summary>[v0.1.63] 家具 LOD 级别扫描：距离→级别，变了就标脏该区块（重建由 TerrainUpdater 预算）。</summary>
+        static JsonObject LevelHistogram() {
+            int l0 = 0, l1 = 0, l2 = 0;
+            foreach (ChunkInfo info in m_chunks.Values) {
+                if (info.InstanceCount == 0) {
+                    continue;
+                }
+                switch (info.LodLevel) {
+                    case 1: l1++; break;
+                    case 2: l2++; break;
+                    default: l0++; break;
+                }
+            }
+            return new JsonObject { ["level0"] = l0, ["level1"] = l1, ["level2"] = l2 };
+        }
+
+        static void TickFurnitureLodLevels(SubsystemTerrain subsystemTerrain, Vector3 camera, float visual) {
+            if (!SkylineFurnitureLod.Enabled || m_chunks.Count == 0) {
+                return;
+            }
+            var keys = new List<long>(m_chunks.Keys);
+            int budget = Math.Max(FurnitureLodLevelScanPerTick, 1);
+            for (int i = 0; i < keys.Count && budget > 0; i++) {
+                m_levelScanCursor = (m_levelScanCursor + 1) % keys.Count;
+                long key = keys[m_levelScanCursor];
+                ChunkInfo info = m_chunks[key];
+                budget--;
+                Point2 coords = new((int)(key >> 32), (int)(key & 0xFFFFFFFF));
+                TerrainChunk chunk = subsystemTerrain.Terrain.GetChunkAtCoords(coords.X, coords.Y);
+                if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
+                    continue;
+                }
+                float horiz = Vector2.Distance(
+                    camera.XZ, new Vector2(coords.X * TerrainChunk.Size + 8f,
+                                           coords.Y * TerrainChunk.Size + 8f));
+                int topY = chunk.GetTopHeightFast(TerrainChunk.Size / 2, TerrainChunk.Size / 2);
+                float dy = MathF.Max(0f, MathF.Abs(camera.Y - (topY + 1f)) - 16f);
+                float distance = MathF.Sqrt(horiz * horiz + dy * dy);
+                if (distance > visual * 1.5f) {
+                    continue;
+                }
+                int desired = SkylineFurnitureLod.LevelForDistance(distance);
+                if (desired == info.LodLevel) {
+                    continue;
+                }
+                info.LodLevel = desired;
+                subsystemTerrain.TerrainUpdater.DowngradeChunkNeighborhoodState(
+                    coords, 0, TerrainChunkState.InvalidVertices1, true);
+                m_rebakes++;
             }
         }
 
@@ -461,7 +587,11 @@ namespace Game {
                 },
                 ["furnitureLod"] = new JsonObject {
                     ["fullInstances"] = m_fullInstances, ["boxInstances"] = m_boxInstances,
-                    ["chunkRebakes"] = m_rebakes, ["trackedChunks"] = m_chunks.Count
+                    ["chunkRebakes"] = m_rebakes, ["trackedChunks"] = m_chunks.Count,
+                    // [v0.1.63] 分级：每个区块当前记着的级别直方图（0=全精度 / 1=1/2 / 2=1/4）
+                    ["levelHistogram"] = LevelHistogram(),
+                    ["levelScanPerTick"] = FurnitureLodLevelScanPerTick,
+                    ["boxDeferredToLod"] = m_boxDeferredToLod
                 },
                 ["placeholderSphere"] = new JsonObject {
                     ["columnsScanned"] = columns, ["columnsSkippedNotLoaded"] = skipped,
