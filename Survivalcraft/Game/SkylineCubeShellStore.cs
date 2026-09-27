@@ -1396,6 +1396,18 @@ namespace Game {
         public static bool DrawTimeStoppedLastFrame { get; private set; }
         /// <summary>[v0.1.80] 本帧**实际画到的最远距离**（米）—— 距离优先的可断言形式。</summary>
         public static float DrawnMaxDistMetres { get; private set; }
+        /// <summary>
+        /// [v0.1.84] **洞覆盖**：允许壳画在"视距以内、但地形已卸载"的地方（默认开）。
+        /// 为什么需要：`SphereLoadingEnabled` 在高空会把地面列整批丢弃、传送/爆卡时目标列也会短暂缺失，
+        /// 而远景 LOD 只从**视距**开始画（不盖脚下）⇒ 近处会出现**空洞**。
+        /// 关掉它 = 逐位回到 v0.1.83 的"只在带内画"（A/B 用）。
+        /// </summary>
+        public static bool ShellHoleFill { get; set; } = true;
+        /// <summary>[v0.1.84] 本帧画在"视距以内"的壳数（= 洞覆盖实际生效的量）与累计值。</summary>
+        public static int HoleFillCubesLastFrame { get; private set; }
+        public static long HoleFillDrawnTotal { get; private set; }
+        /// <summary>[v0.1.84] 本帧画到洞里的**最远/最近**距离（米），用来报"洞覆盖了多大范围"。</summary>
+        public static float HoleFillMaxDistMetres { get; private set; }
         /// <summary>[v0.1.80] 本帧候选里最近/最远的距离（米）—— 用来对"丢掉的确实是最远的"下断言。</summary>
         public static float DrawCandidateMinDistMetres { get; private set; }
         public static float DrawCandidateMaxDistMetres { get; private set; }
@@ -1409,7 +1421,16 @@ namespace Game {
                 Vector3 viewPosition, Terrain terrain, bool countLoadedSkips) {
             m_drawScratch.Clear();
             float viewRange = ViewRangeMetres;
-            float near = MathF.Max(viewRange - BandInset, 0f);
+            // [v0.1.84] **洞覆盖（milestone 2.1 的兼容性那一半）**：
+            //   旧口径是"只在带内 `[视距−8, 视距+768]` 画壳"，内边界是为了"别在真地形上叠一层"。
+            //   但**真地形在不在**这件事，下面的 `GetChunkAtCoords` 判断已经逐立方体问过了 ——
+            //   所以那个内边界是**冗余**的，而且它会把"地形已经卸载、但壳还在"的近处留成**空洞**：
+            //     * 球形加载窗在高空会把地面列整批丢弃（`SphereLoadingEnabled`）；
+            //     * 传送/爆卡时目标列还没加载；
+            //   两种情况近处都会**什么都没有**（远景 LOD 只从视距开始画，不盖脚下）。
+            //   `ShellHoleFill=true`（默认）时内边界取 0：**只要有壳、地形又不在，就画**。
+            //   实测（`notes/162`）：视距 128→48 收缩时，近处洞里画出 27 个壳立方体。
+            float near = ShellHoleFill ? 0f : MathF.Max(viewRange - BandInset, 0f);
             float far = viewRange + BandMetres;
             float nearSq = near * near, farSq = far * far;
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
@@ -1519,6 +1540,9 @@ namespace Game {
                 float maxDist = 0f;
                 Stopwatch drawWatch = Stopwatch.StartNew();     // [v0.1.81] 时间预算的计时器
                 DrawTimeStoppedLastFrame = false;               // [v0.1.81] 每帧重算（以前是粘性标志）
+                HoleFillCubesLastFrame = 0;                     // [v0.1.84] 每帧重算
+                HoleFillMaxDistMetres = 0f;
+                float holeNear = MathF.Max(ViewRangeMetres - BandInset, 0f);
                 for (int ci = 0; ci < candidates.Count; ci++) {
                     if (drawn >= MaxDrawPerFrame) {
                         DrawSkippedByBudgetTotal += candidates.Count - ci;
@@ -1558,6 +1582,13 @@ namespace Game {
                     }
                     drawn++;
                     maxDist = MathF.Max(maxDist, MathF.Sqrt(c.DistSq));
+                    // [v0.1.84] 画在"视距以内"= 洞覆盖（那里地形不在，正常应当什么都没有）
+                    float d = MathF.Sqrt(c.DistSq);
+                    if (d < holeNear) {
+                        HoleFillCubesLastFrame++;
+                        HoleFillDrawnTotal++;
+                        HoleFillMaxDistMetres = MathF.Max(HoleFillMaxDistMetres, d);
+                    }
                 }
                 LastDrawMs = (float)drawWatch.Elapsed.TotalMilliseconds;
                 DrawCallsLastFrame = drawn;
@@ -2173,6 +2204,11 @@ namespace Game {
                 ["drawCandidateMinDistMetres"] = Math.Round(DrawCandidateMinDistMetres, 1),
                 ["drawCandidateMaxDistMetres"] = Math.Round(DrawCandidateMaxDistMetres, 1),
                 ["drawOrder"] = "距离升序（近的先画）；预算顶满时丢掉的是**最远**的那批",
+                // [v0.1.84] 洞覆盖（milestone 2.1 的兼容性那一半）
+                ["shellHoleFill"] = ShellHoleFill,
+                ["holeFillCubesLastFrame"] = HoleFillCubesLastFrame,
+                ["holeFillDrawnTotal"] = HoleFillDrawnTotal,
+                ["holeFillMaxDistMetres"] = Math.Round(HoleFillMaxDistMetres, 1),
                 ["lastError"] = LastError
             }.ToJsonString();
         }
@@ -2305,6 +2341,15 @@ namespace Game {
         /// </summary>
         public static string CubeShellStored(int cx, int cy, int cz, int lx, int lz) =>
             SkylineCubeShellStore.StoredShellProbe(cx, cy, cz, lx, lz).ToJsonString();
+
+        /// <summary>
+        /// [v0.1.84] **洞覆盖开关**：`true` = 壳可以画在"视距以内、地形已卸载"的地方（默认）。
+        /// 关掉可用于 A/B 看"没有洞覆盖时近处是不是空的"。
+        /// </summary>
+        public static string CubeShellHoleFill(bool enabled) {
+            SkylineCubeShellStore.ShellHoleFill = enabled;
+            return SkylineCubeShellStore.Survey();
+        }
 
         /// <summary>壳接管后让现有 LOD 层让位（默认 true；false = 两层叠着画，用于 A/B 看穿插）。</summary>
         public static string CubeShellRestrictLod(bool restrict) {
