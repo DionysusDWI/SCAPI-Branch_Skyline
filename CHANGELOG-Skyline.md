@@ -31,6 +31,13 @@
 | **顶点格式加属性**（里程碑 1.3 的地基） | `SkylineLodVertex`（28 B：`position/texcoord/color` **偏移与语义一字不动** + `NormalizedByte4 normal` + `float materialId`）
   → 用 `TerrainVertex` 的旧 shader 照样能画同一个 buffer；`SkylineFaceShading`（CPU 面因子，**顶面恒 1** 可断言）、
   `SkylineLodVolume`（GPU 侧用同一条公式、四个可视化通道）、`skyline.LodVolumeCapture/Compare` 对拍入口 |
+| **远景 LOD 三层换用属性格式**（本轮新增） | `SkylineLodAttrs`：`skyline.LodAttrVertexAttributes`（默认 **true**，三层网格改用 28 B 属性格式）、
+  `LodAttrShader`（默认 false，绘制改走体积着色器）、`LodAttrChannel/Info/SelfCheck/Rebuild`、`LodLayerCapture(channel,size,attrShader)`；
+  自检 `LodAttrSelfCheck` 在引擎内做三次离屏回读：①属性格式+游戏 Opaque、②老格式+游戏 Opaque、③属性格式+体积着色器 |
+| **带内主动补采**（里程碑 1.2 的数据侧） | `SkylineCubeShellStore.BackfillBandShells` + `skyline.CubeShellBackfill/Rate`：
+  扫"视距 −8 −`BackfillInsideMetres`(64) … 视距 +`BackfillRelMetres`(192)"的 32 m 网格，
+  凡**还没有壳**且 2×2 区块都已 Valid 的立方体就地采好，于是地形释放时壳已就位、边界不留洞。
+  每 Tick 预算 `BackfillPerTick`(2) / `BackfillBudgetMs`(3 ms)，实测 0.10~0.16 ms/Tick |
 
 ### Verified（AgentLab）
 
@@ -75,6 +82,27 @@
 * **没做的**：远景 LOD 三层仍是列顶采样（1.6 只完成"最近一档交接带"这一半）；体素壳**不落盘**（记录仍是 12 B 坐标 +
   16,384 B 列顶壳，重启后靠预热重采）；降级策略还是"记不下就丢"；壳的**光照缺口**（采集时区块光照未算 → `light=0`
   画成黑、已算满 → 白）是**既有效应**，本轮截图里的黑白斑块属于它，不是本次改动的回归。
+
+**带内主动补采 + 远景 LOD 属性格式的实测**（AgentLab，视距 128 m；`data/sessions/skyline-v0161/`）：
+
+| 判据 | 值 |
+|---|---|
+| 静止 + 补采关（20 s 基线） | `cubes 451 / bandShellCubes 286 / bandCompleteCubes 175 / bandCoverage 0.627`（四条全平） |
+| 行走 60 s（≈840 m）+ 补采开 | `cubes 460→690`、`backfilledTotal 17`、`bandCoverage 0.591→0.667`、`lastBackfillMs 0.10~0.16 ms` |
+| **同期 `skippedNotReady`** | **3 → 1244**（+1238） |
+| LOD 属性格式契约（①vs②，均走游戏 Opaque） | `comparedPixels 5673 / onlyInA 0 / onlyInB 0 / meanAbsDiff 0` → **逐位一致** |
+| LOD 法线 / 材质 id 通道 | `LodLayerCapture(1)=5 色`（正好 5 个朝向）、`(2)=12 色`（12 种材质 id） |
+| LOD 顶点内存 | `coarseVertices 5196 / fineVertices 5792 / nearVertices 12`，`meshVertexBytes 308,000`（+40%） |
+
+* **1.2 的洞源已定位（这是本轮最有价值的一条）**：补采只捞回 **17** 个、同期 `skippedNotReady` 涨 **1238**（差 70 倍）——
+  因为**加载区最外圈（约 32 m 宽的一条立方体环）的区块永远凑不齐 2×2**（先被分配、又最先被释放，中间没有"四个都 Valid"的时刻），
+  而这一圈正好是壳体带的**内边界**。三条候选修法写在 `notes/137` §1.3（16 m 壳粒度 / 象限掩码 / 外推-不推荐）。
+* **1.2 第一版补采踩的坑（如实记）**：只扫"带内"时 `backfillMissingCubes=0`、`lastBackfillMs=0.01 ms` ——
+  **什么都没扫到**，因为区块加载半径比视距小；必须从加载半径**内侧** 64 m 起扫才扫得到"马上要被释放"的那一圈。
+* **1.3 未解决的差距（不粉饰）**：`LodAttrSelfCheck` 的 ①（CPU 烘焙面因子）与 ③（GPU 按法线算）**不是逐位一致**：
+  `meanAbsDiff 7.19 / maxAbsDiff 51 / diffPxGt8 1500/5673`。已排查：法线正确、几何一致、雾两边都关、格式契约逐位一致；
+  把"坡向明暗+自阴影"置 0 后差距仍在（7.19），恢复后升到 **10.25 / max 136**（`slopeSelfShadowGap`）——
+  说明这是**两层不同的差距**，面因子本身就没对齐。**自检保持 `ok:false`**，没有放宽阈值让它变绿。
 
 ## [v0.1.59] - 2026-09-29
 

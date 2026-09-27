@@ -263,7 +263,7 @@ void main()
         }
 
         /// <summary>设置体积着色器的全部 uniform（相机/雾/光照/通道）。返回 null = 现在不能画。</summary>
-        static Shader PrepareVolumeShader(Camera camera, float yOffset, int channel) {
+        public static Shader PrepareVolumeShader(Camera camera, float yOffset, int channel) {
             try {
                 SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
                 SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
@@ -338,6 +338,19 @@ void main()
         /// </summary>
         static Image RenderOffscreen(Camera camera, SurfaceVoxelMesh mesh, bool volume, int channel,
                                      int size, float yOffset) {
+            return RenderLayers(camera, [(mesh.VertexBuffer, mesh.IndexBuffer, mesh.IndexCount)],
+                volume, channel, size, yOffset);
+        }
+
+        /// <summary>
+        /// [v0.1.60] 把**任意一组** (顶点缓冲, 索引缓冲, 索引数) 离屏画一次并回读。
+        /// 生产层的三个 LOD 网格就是用它取证的（`skyline.LodLayerCapture`）——
+        /// 通道 1/2 直接证明远景 LOD 的**法线/材质 id 属性到了片元**。
+        /// </summary>
+        public static Image RenderLayers(
+            Camera camera,
+            IReadOnlyList<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount)> layers,
+            bool volume, int channel, int size, float yOffset) {
             RenderTarget2D previousTarget = Display.RenderTarget;
             Viewport previousViewport = Display.Viewport;
             Rectangle previousScissor = Display.ScissorRectangle;
@@ -360,8 +373,12 @@ void main()
                 if (shader == null) {
                     return null;
                 }
-                Display.DrawIndexed(PrimitiveType.TriangleList, shader, mesh.VertexBuffer, mesh.IndexBuffer,
-                    0, mesh.IndexCount);
+                foreach ((VertexBuffer layerVb, IndexBuffer layerIb, int layerIndices) in layers) {
+                    if (layerVb == null || layerIb == null || layerIndices <= 0) {
+                        continue;
+                    }
+                    Display.DrawIndexed(PrimitiveType.TriangleList, shader, layerVb, layerIb, 0, layerIndices);
+                }
                 return m_rt.GetData(new Rectangle(0, 0, size, size));
             }
             finally {
@@ -476,6 +493,122 @@ void main()
                 result["err"] = e.Message;
             }
             return result.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.60] `skyline.LodLayerCapture(channel, size, attrShader)` 的实现：
+        /// 把**生产层的三个远端 LOD 网格**（粗 16 m / 细 8 m / 近环 4 m）离屏画一遍并回读。
+        /// `attrShader=true` 要求 `LodVertexAttributes=true`（网格是属性格式），
+        /// 通道 1（法线）/ 通道 2（材质 id）若回读到非空内容，就是"属性真的到了片元"的凭证。
+        /// </summary>
+        public static string CaptureLodLayers(int channel, int size, bool attrShader) {
+            JsonObject result = new();
+            try {
+                Camera camera = SkylineLod.ActiveCamera;
+                if (camera == null) {
+                    result["ok"] = false;
+                    result["err"] = "no camera";
+                    return result.ToJsonString();
+                }
+                if (attrShader && !SkylineRuntime.LodVertexAttributes) {
+                    result["ok"] = false;
+                    result["err"] = "要求属性格式网格：先 skyline.LodVertexAttributes(true)";
+                    return result.ToJsonString();
+                }
+                size = Math.Clamp(size <= 0 ? Size : size, 64, Math.Min(Display.MaxTextureSize, 1024));
+                List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount)> layers = [
+                    (SkylineLod.CoarseVertexBuffer, SkylineLod.CoarseIndexBuffer, SkylineLod.CoarseIndexCount),
+                    (SkylineLod.FineVertexBuffer, SkylineLod.FineIndexBuffer, SkylineLod.FineIndexCount),
+                    (SkylineLod.NearVertexBuffer, SkylineLod.NearIndexBuffer, SkylineLod.NearIndexCount)
+                ];
+                int drawnIndices = 0;
+                foreach ((_, _, int n) in layers) {
+                    drawnIndices += Math.Max(0, n);
+                }
+                if (drawnIndices == 0) {
+                    result["ok"] = false;
+                    result["err"] = "三层 LOD 网格都是空的（等 LOD 建好网格再采）";
+                    return result.ToJsonString();
+                }
+                Image image = RenderLayers(camera, layers, attrShader, channel, size, 0f);
+                if (image == null) {
+                    result["ok"] = false;
+                    result["err"] = "shader not ready";
+                    return result.ToJsonString();
+                }
+                m_captures++;
+                result["ok"] = true;
+                result["attrShader"] = attrShader;
+                result["channel"] = channel;
+                result["size"] = size;
+                result["meshVersion"] = SkylineLod.MeshVersion;
+                result["coarseIndices"] = SkylineLod.CoarseIndexCount;
+                result["fineIndices"] = SkylineLod.FineIndexCount;
+                result["nearIndices"] = SkylineLod.NearIndexCount;
+                result["vertexStride"] = SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20;
+                result["stats"] = Stats(image, out int distinct);
+                result["distinctColors"] = distinct;
+                result["channelMeaning"] = "0=面明暗、1=法线可视化（去重颜色数应 ≥3）、2=材质 id 16 进制（可反解）、3=面因子灰度";
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.60] 逐像素比较两张同尺寸回读图（只在双方都不透明处比较）：
+        /// 返回覆盖像素数、平均/最大通道差、>8 的像素数。用于"属性开/关应逐位一致"与
+        /// "GPU 面明暗 == CPU 烘焙"这两条断言。
+        /// </summary>
+        public static JsonObject CompareImages(Image a, Image b) {
+            JsonObject result = new();
+            if (a == null || b == null) {
+                result["ok"] = false;
+                result["err"] = "image null";
+                return result;
+            }
+            if (a.Width != b.Width || a.Height != b.Height) {
+                result["ok"] = false;
+                result["err"] = "size mismatch";
+                return result;
+            }
+            long sum = 0, max = 0, over8 = 0, both = 0, onlyA = 0, onlyB = 0;
+            for (int y = 0; y < a.Height; y++) {
+                for (int x = 0; x < a.Width; x++) {
+                    Color ca = a.GetPixel(x, y);
+                    Color cb = b.GetPixel(x, y);
+                    if (ca.A == 0 && cb.A == 0) {
+                        continue;
+                    }
+                    if (ca.A == 0) {
+                        onlyB++;
+                        continue;
+                    }
+                    if (cb.A == 0) {
+                        onlyA++;
+                        continue;
+                    }
+                    both++;
+                    int d = Math.Max(Math.Abs(ca.R - cb.R), Math.Max(Math.Abs(ca.G - cb.G), Math.Abs(ca.B - cb.B)));
+                    sum += d;
+                    max = Math.Max(max, d);
+                    if (d > 8) {
+                        over8++;
+                    }
+                }
+            }
+            result["ok"] = true;
+            result["comparedPixels"] = both;
+            result["onlyInA"] = onlyA;
+            result["onlyInB"] = onlyB;
+            result["meanAbsDiff"] = both > 0 ? Math.Round(sum / (double)both, 3) : 0.0;
+            result["maxAbsDiff"] = max;
+            result["diffPxGt8"] = over8;
+            result["identical"] = both > 0 && max == 0 && onlyA == 0 && onlyB == 0;
+            return result;
         }
 
         static JsonObject Stats(Image image, out int distinct) {

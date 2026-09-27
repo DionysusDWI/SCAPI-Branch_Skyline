@@ -111,6 +111,9 @@ namespace Game {
         static int m_harvestedCells;
         static int m_rebuilds;
         static string m_lastError = "";
+        // [v0.1.60] 三套网格各自的**精确顶点数**（原来只有索引数，顶点字节只能靠 indexCount/3 估）。
+        // 顶点属性格式（SkylineLodVertex，28 B）与老格式（TerrainVertex，20 B）的常驻字节就靠这两个数算。
+        static int m_vertexCount, m_vertexCountFine, m_vertexCountNear;
 
         // side 编号与侧壁代码一致：0=+Z、1=-Z、2=+X、3=-X
         static readonly int[] s_sideDx = [0, 0, 1, -1];
@@ -942,15 +945,33 @@ namespace Game {
             int vertexCount = keys.Count * 4 + walls.Count * 4;
             if (vertexCount == 0) {
                 // 空网格：由外层 RebuildMesh 统一决定是否保持 dirty（v0.1.0 修复的逻辑移到外层）。
-                SetLayerMesh(layer, null, null, 0, 0);
+                SetLayerMesh(layer, null, null, 0, 0, 0);
                 return;
             }
-            var vertices = new TerrainVertex[vertexCount];
+            // [v0.1.60] 里程碑 1.3：远景 LOD 的**顶点格式**可切到 `SkylineLodVertex`（28 B，
+            // 在原 20 B 之后**追加**法线与材质 id）。前 20 B 与 `TerrainVertex` 逐位相同，
+            // 而引擎 `GLWrapper.ApplyShaderAndBuffers` 是**按语义**从"顶点缓冲自带声明"里取偏移与步长
+            // （`Shader.GetVertexAttribData`），所以游戏 `Opaque` 着色器照样能画这个 buffer ——
+            // 这正是"加属性而不是换格式"。关掉开关即逐位回到 v0.1.59 的 20 B 路径。
+            bool attr = SkylineRuntime.LodVertexAttributes;
+            TerrainVertex[] bakedVertices = attr ? null : new TerrainVertex[vertexCount];
+            SkylineLodVertex[] attrVertices = attr ? new SkylineLodVertex[vertexCount] : null;
             short[] indices = new short[indexCount];
             bool bigIndices = vertexCount > 65535;
             var indices32 = bigIndices ? new int[indexCount] : null;
             var light = new Color((byte)220, (byte)220, (byte)220);
             int vi = 0, ii = 0, built = 0;
+            // 写一个顶点：属性路径多写面法线（`face` 沿用 CellFace 编号 0=+Z 1=+X 2=-Z 3=-X 4=+Y 5=-Y）
+            // 与材质 id（方块值）。非属性路径与 v0.1.59 逐位一致。
+            void Put(int i, float px, float py, float pz, Color c, float u, float v, int face, int materialId) {
+                if (attr) {
+                    SkylineLodVertex.Setup(px, py, pz, c, u, v, SkylineLodVertex.FaceNormal(face), materialId,
+                        ref attrVertices[i]);
+                }
+                else {
+                    BlockGeometryGenerator.SetupVertex(px, py, pz, c, u, v, ref bakedVertices[i]);
+                }
+            }
             foreach (long key in keys) {
                 Cell cell = dict[key];
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
@@ -1002,10 +1023,10 @@ namespace Game {
                         cellBase.A
                     );
                 }
-                BlockGeometryGenerator.SetupVertex(x0, y, z0, cellLight, u0, v0, ref vertices[vi]);
-                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0, cellLight, u0 + du, v0, ref vertices[vi + 1]);
-                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0 + cellSize, cellLight, u0 + du, v0 + du, ref vertices[vi + 2]);
-                BlockGeometryGenerator.SetupVertex(x0, y, z0 + cellSize, cellLight, u0, v0 + du, ref vertices[vi + 3]);
+                Put(vi, x0, y, z0, cellLight, u0, v0, 4, value);
+                Put(vi + 1, x0 + cellSize, y, z0, cellLight, u0 + du, v0, 4, value);
+                Put(vi + 2, x0 + cellSize, y, z0 + cellSize, cellLight, u0 + du, v0 + du, 4, value);
+                Put(vi + 3, x0, y, z0 + cellSize, cellLight, u0, v0 + du, 4, value);
                 if (bigIndices) {
                     indices32[ii] = vi; indices32[ii + 1] = vi + 1; indices32[ii + 2] = vi + 2;
                     indices32[ii + 3] = vi; indices32[ii + 4] = vi + 2; indices32[ii + 5] = vi + 3;
@@ -1026,30 +1047,38 @@ namespace Game {
                 float wu = (wallSlot % wallSlotCount) / (float)wallSlotCount;
                 float wv = (wallSlot / wallSlotCount) / (float)wallSlotCount;
                 float wd = 1f / wallSlotCount;
+                // [v0.1.60] 侧壁的面编号（CellFace：0=+Z 1=+X 2=-Z 3=-X），用于属性路径的法线与
+                // CPU 烘焙面明暗。`side` 的顺序来自 s_sideDx/s_sideDz：0=+Z、1=-Z、2=+X、3=-X。
+                int wallFace = side switch { 0 => 0, 1 => 2, 2 => 1, _ => 3 };
+                // GPU 体积着色器会**自己**按法线算明暗 → 这条路不再把面因子烘焙进顶点色（否则明暗算两遍）。
+                bool gpuShade = attr && SkylineRuntime.LodAttrShaderOn;
+                Color wallColor = (gpuShade || !SkylineFaceShading.Enabled)
+                    ? light
+                    : SkylineFaceShading.Apply(light, wallFace);
                 switch (side) {
                     case 0:      // +Z 面（z1）: (x0,z1) (x1,z1)
-                        BlockGeometryGenerator.SetupVertex(x0, yHigh, z1, light, wu, wv, ref vertices[vi]);
-                        BlockGeometryGenerator.SetupVertex(x1, yHigh, z1, light, wu + wd, wv, ref vertices[vi + 1]);
-                        BlockGeometryGenerator.SetupVertex(x1, yLow, z1, light, wu + wd, wv + wd, ref vertices[vi + 2]);
-                        BlockGeometryGenerator.SetupVertex(x0, yLow, z1, light, wu, wv + wd, ref vertices[vi + 3]);
+                        Put(vi, x0, yHigh, z1, wallColor, wu, wv, wallFace, wallValue);
+                        Put(vi + 1, x1, yHigh, z1, wallColor, wu + wd, wv, wallFace, wallValue);
+                        Put(vi + 2, x1, yLow, z1, wallColor, wu + wd, wv + wd, wallFace, wallValue);
+                        Put(vi + 3, x0, yLow, z1, wallColor, wu, wv + wd, wallFace, wallValue);
                         break;
                     case 1:      // -Z 面（z0）
-                        BlockGeometryGenerator.SetupVertex(x1, yHigh, z0, light, wu, wv, ref vertices[vi]);
-                        BlockGeometryGenerator.SetupVertex(x0, yHigh, z0, light, wu + wd, wv, ref vertices[vi + 1]);
-                        BlockGeometryGenerator.SetupVertex(x0, yLow, z0, light, wu + wd, wv + wd, ref vertices[vi + 2]);
-                        BlockGeometryGenerator.SetupVertex(x1, yLow, z0, light, wu, wv + wd, ref vertices[vi + 3]);
+                        Put(vi, x1, yHigh, z0, wallColor, wu, wv, wallFace, wallValue);
+                        Put(vi + 1, x0, yHigh, z0, wallColor, wu + wd, wv, wallFace, wallValue);
+                        Put(vi + 2, x0, yLow, z0, wallColor, wu + wd, wv + wd, wallFace, wallValue);
+                        Put(vi + 3, x1, yLow, z0, wallColor, wu, wv + wd, wallFace, wallValue);
                         break;
                     case 2:      // +X 面（x1）
-                        BlockGeometryGenerator.SetupVertex(x1, yHigh, z0, light, wu, wv, ref vertices[vi]);
-                        BlockGeometryGenerator.SetupVertex(x1, yHigh, z1, light, wu + wd, wv, ref vertices[vi + 1]);
-                        BlockGeometryGenerator.SetupVertex(x1, yLow, z1, light, wu + wd, wv + wd, ref vertices[vi + 2]);
-                        BlockGeometryGenerator.SetupVertex(x1, yLow, z0, light, wu, wv + wd, ref vertices[vi + 3]);
+                        Put(vi, x1, yHigh, z0, wallColor, wu, wv, wallFace, wallValue);
+                        Put(vi + 1, x1, yHigh, z1, wallColor, wu + wd, wv, wallFace, wallValue);
+                        Put(vi + 2, x1, yLow, z1, wallColor, wu + wd, wv + wd, wallFace, wallValue);
+                        Put(vi + 3, x1, yLow, z0, wallColor, wu, wv + wd, wallFace, wallValue);
                         break;
                     default:     // -X 面（x0）
-                        BlockGeometryGenerator.SetupVertex(x0, yHigh, z1, light, wu, wv, ref vertices[vi]);
-                        BlockGeometryGenerator.SetupVertex(x0, yHigh, z0, light, wu + wd, wv, ref vertices[vi + 1]);
-                        BlockGeometryGenerator.SetupVertex(x0, yLow, z0, light, wu + wd, wv + wd, ref vertices[vi + 2]);
-                        BlockGeometryGenerator.SetupVertex(x0, yLow, z1, light, wu, wv + wd, ref vertices[vi + 3]);
+                        Put(vi, x0, yHigh, z1, wallColor, wu, wv, wallFace, wallValue);
+                        Put(vi + 1, x0, yHigh, z0, wallColor, wu + wd, wv, wallFace, wallValue);
+                        Put(vi + 2, x0, yLow, z0, wallColor, wu + wd, wv + wd, wallFace, wallValue);
+                        Put(vi + 3, x0, yLow, z1, wallColor, wu, wv + wd, wallFace, wallValue);
                         break;
                 }
                 // 双面：正反两个绕序（各 6 索引）
@@ -1068,8 +1097,16 @@ namespace Game {
                 vi += 4;
                 ii += 12;
             }
-            var vb = new VertexBuffer(TerrainVertex.VertexDeclaration, vertexCount);
-            vb.SetData(vertices, 0, vertexCount);
+            // 顶点缓冲用**哪一种声明**决定了 engine 侧每顶点读多少字节（步长从声明取）。
+            var vb = attr
+                ? new VertexBuffer(SkylineLodVertex.VertexDeclaration, vertexCount)
+                : new VertexBuffer(TerrainVertex.VertexDeclaration, vertexCount);
+            if (attr) {
+                vb.SetData(attrVertices, 0, vertexCount);
+            }
+            else {
+                vb.SetData(bakedVertices, 0, vertexCount);
+            }
             var ib = new IndexBuffer(bigIndices ? IndexFormat.ThirtyTwoBits : IndexFormat.SixteenBits, ii);
             if (bigIndices) {
                 ib.SetData(indices32, 0, ii);
@@ -1077,11 +1114,12 @@ namespace Game {
             else {
                 ib.SetData(indices, 0, ii);
             }
-            SetLayerMesh(layer, vb, ib, ii, built);
+            SetLayerMesh(layer, vb, ib, ii, built, vertexCount);
         }
 
         /// <summary>[v0.1.45] 把一套网格写回对应层（0=粗 16 m、1=细 8 m、2=近环 4 m）。</summary>
-        static void SetLayerMesh(int layer, VertexBuffer vb, IndexBuffer ib, int indexCount, int cellsInMesh) {
+        static void SetLayerMesh(int layer, VertexBuffer vb, IndexBuffer ib, int indexCount, int cellsInMesh,
+                                 int vertexCount) {
             switch (layer) {
                 case 2:
                     Utilities.Dispose(ref m_vbNear);
@@ -1090,6 +1128,7 @@ namespace Game {
                     m_ibNear = ib;
                     m_indexCountNear = indexCount;
                     m_cellsInMeshNear = cellsInMesh;
+                    m_vertexCountNear = vertexCount;
                     break;
                 case 1:
                     Utilities.Dispose(ref m_vbFine);
@@ -1098,6 +1137,7 @@ namespace Game {
                     m_ibFine = ib;
                     m_indexCountFine = indexCount;
                     m_cellsInMeshFine = cellsInMesh;
+                    m_vertexCountFine = vertexCount;
                     break;
                 default:
                     Utilities.Dispose(ref m_vb);
@@ -1106,6 +1146,7 @@ namespace Game {
                     m_ib = ib;
                     m_indexCount = indexCount;
                     m_cellsInMesh = cellsInMesh;
+                    m_vertexCount = vertexCount;
                     break;
             }
         }
@@ -1142,6 +1183,12 @@ namespace Game {
                     m_lastError = e.Message;
                     Log.Warning($"SkylineLod.CustomDraw: {e.Message}");
                 }
+                return;
+            }
+            // [v0.1.60] 里程碑 1.3：属性着色器路径 —— 三层网格都带**面法线 + 材质 id**，
+            // 明暗改成在 GPU 上按法线算（`SkylineLodVolume`，与 CPU 烘焙面因子同一条公式）。
+            if (SkylineRuntime.LodAttrShaderOn && SkylineRuntime.LodVertexAttributes) {
+                DrawWithAttributeShader(camera);
                 return;
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
@@ -1324,6 +1371,13 @@ namespace Game {
                 ["nearBandMetres"] = Math.Round(NearBandMetres, 1),
                 ["nearMarkedCells"] = NearMarkedCells,
                 ["nearLayerEnabled"] = SkylineRuntime.LodNearLayerEnabled,
+                // [v0.1.60] 顶点格式与字节：属性格式（SkylineLodVertex，28 B）还是老格式（TerrainVertex，20 B）
+                ["vertexAttributes"] = SkylineRuntime.LodVertexAttributes,
+                ["vertexStride"] = SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20,
+                ["attrShader"] = SkylineRuntime.LodAttrShaderOn,
+                ["meshVertices"] = m_vertexCount + m_vertexCountFine + m_vertexCountNear,
+                ["meshVertexBytes"] = (long)(m_vertexCount + m_vertexCountFine + m_vertexCountNear)
+                    * (SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20),
                 ["nearLayerSwitch"] = "skyline.LodNearLayerEnabled / skyline.LodNearBandMark() 立刻铺满",
                 ["refreshedOnUnload"] = m_refreshedOnUnload,
                 ["radiusMetres"] = RadiusMetres,

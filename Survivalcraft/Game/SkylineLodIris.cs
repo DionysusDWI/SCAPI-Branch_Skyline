@@ -84,10 +84,29 @@ namespace Game {
 
         /// <summary>
         /// 顶点格式说明（给外部 shader 分配输入布局用）：位置 Vector3 @0、纹理坐标 NormalizedShort2 @12、
-        /// 颜色 NormalizedByte4 @16（共 20 字节）。
+        /// 颜色 NormalizedByte4 @16（共 20 字节）；[v0.1.60] 属性格式在**后面追加**
+        /// 法线 NormalizedByte4 @20 与材质 id Single @24（共 28 字节）—— 前 20 B 逐位兼容。
         /// </summary>
-        public static string VertexLayout =>
-            "TerrainVertex: Position(float3)@0 TexCoord(normalizedShort2)@12 Color(normalizedByte4)@16 stride=20";
+        public static string VertexLayout => SkylineRuntime.LodVertexAttributes
+            ? "SkylineLodVertex: Position(float3)@0 TexCoord(normalizedShort2)@12 Color(normalizedByte4)@16 "
+                + "Normal(normalizedByte4)@20 MaterialId(float)@24 stride=28"
+            : "TerrainVertex: Position(float3)@0 TexCoord(normalizedShort2)@12 Color(normalizedByte4)@16 stride=20";
+
+        /// <summary>[v0.1.60] 顶点步长（字节）——光影包按它算 UV/attribute 偏移。</summary>
+        public static int VertexStride => SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20;
+
+        /// <summary>[v0.1.60] 三层网格的**精确顶点数**（粗/细/近环）。</summary>
+        public static int CoarseVertexCount => m_vertexCount;
+
+        /// <summary>[v0.1.60] 细层顶点数。</summary>
+        public static int FineVertexCount => m_vertexCountFine;
+
+        /// <summary>[v0.1.60] 近环顶点数。</summary>
+        public static int NearVertexCount => m_vertexCountNear;
+
+        /// <summary>[v0.1.60] 三层合计的顶点常驻字节（按当前顶点格式）。</summary>
+        public static long VertexBytes =>
+            (long)(m_vertexCount + m_vertexCountFine + m_vertexCountNear) * VertexStride;
 
         // ---------------- 元数据（shader 侧的"该画什么/多远"信息） ----------------
 
@@ -106,10 +125,19 @@ namespace Game {
                 ["fineRangeMetres"] = RadiusMetres * FineRangeFactor,
                 ["coarseCells"] = m_cellsInMesh,
                 ["coarseIndices"] = m_indexCount,
-                ["coarseVertexBytes"] = (long)(m_indexCount / 3) * 20,   // 每单元 4 顶点 / 12 索引
+                ["coarseVertices"] = m_vertexCount,
+                ["coarseVertexBytes"] = (long)m_vertexCount * VertexStride,
                 ["fineCells"] = m_cellsInMeshFine,
                 ["fineIndices"] = m_indexCountFine,
-                ["fineVertexBytes"] = (long)(m_indexCountFine / 3) * 20,
+                ["fineVertices"] = m_vertexCountFine,
+                ["fineVertexBytes"] = (long)m_vertexCountFine * VertexStride,
+                ["nearIndices"] = m_indexCountNear,
+                ["nearVertices"] = m_vertexCountNear,
+                ["nearVertexBytes"] = (long)m_vertexCountNear * VertexStride,
+                ["vertexBytes"] = VertexBytes,
+                ["vertexStride"] = VertexStride,
+                ["attributes"] = SkylineRuntime.LodVertexAttributes
+                    ? "normal@20(normalizedByte4), materialId@24(float)" : "none (TerrainVertex)",
                 ["vertexLayout"] = VertexLayout,
                 ["primitive"] = "TriangleList",
                 ["externalHooked"] = ExternalShaderHooked,

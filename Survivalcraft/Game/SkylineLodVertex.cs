@@ -75,6 +75,51 @@ namespace Game {
         /// <summary>六面法线（索引沿用 <see cref="SkylineFaceShading.FaceNames"/>：0=+Z、1=+X、2=-Z、3=-X、4=+Y、5=-Y）。</summary>
         public static Vector3 FaceNormal(int face) => CellFace.FaceToVector3(face < 0 || face > 5 ? 4 : face);
 
+        /// <summary>
+        /// [v0.1.60] **字节级契约自检**：同一组输入分别写一个 `TerrainVertex`（老格式）与一个
+        /// `SkylineLodVertex`（属性格式），逐字节比较**前 20 B**（位置 0..11 / 图集坐标 12..15 / 顶点色 16..19）。
+        /// 一致 ⇒ 游戏 `Opaque` 着色器画属性缓冲时拿到的数据与老格式**逐位相同**，
+        /// 这既是"加属性而不是换格式"的证明，也是"属性开/关像素应完全一致"这条 A/B 判据的前提。
+        /// 同时断言本体大小 = 声明步长 = 28 B。
+        /// </summary>
+        public static JsonObject ByteContractCheck() {
+            JsonObject result = new();
+            try {
+                Color color = new((byte)17, (byte)34, (byte)51, (byte)68);
+                TerrainVertex baked = default;
+                BlockGeometryGenerator.SetupVertex(1.5f, 300.25f, -7.75f, color, 0.3125f, 0.4375f, ref baked);
+                SkylineLodVertex attr = default;
+                Setup(1.5f, 300.25f, -7.75f, color, 0.3125f, 0.4375f, Vector3.UnitY, 1234f, ref attr);
+                ReadOnlySpan<byte> oldBytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref baked, 1));
+                ReadOnlySpan<byte> newBytes = MemoryMarshal.AsBytes(MemoryMarshal.CreateReadOnlySpan(ref attr, 1));
+                int firstDiff = -1;
+                int diffCount = 0;
+                for (int i = 0; i < 20; i++) {
+                    if (oldBytes[i] != newBytes[i]) {
+                        firstDiff = firstDiff < 0 ? i : firstDiff;
+                        diffCount++;
+                    }
+                }
+                int marshal = Marshal.SizeOf<SkylineLodVertex>();
+                int marshalOld = Marshal.SizeOf<TerrainVertex>();
+                result["ok"] = diffCount == 0 && marshal == Stride && marshalOld == 20;
+                result["first20BytesEqual"] = diffCount == 0;
+                result["firstDiffOffset"] = firstDiff;
+                result["diffBytesInFirst20"] = diffCount;
+                result["oldSize"] = marshalOld;
+                result["newSize"] = marshal;
+                result["stride"] = VertexDeclaration.VertexStride;
+                result["sampleOldHex"] = Convert.ToHexString(oldBytes[..20]);
+                result["sampleNewHex"] = Convert.ToHexString(newBytes[..20]);
+                result["note"] = "前 20 B 逐字节相同 ⇒ 引擎按语义取偏移/步长，游戏 Opaque 着色器照画属性缓冲";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result;
+        }
+
         public static JsonObject Describe() {
             int stride = VertexDeclaration.VertexStride;
             int marshal = Marshal.SizeOf<SkylineLodVertex>();
@@ -94,6 +139,7 @@ namespace Game {
                 )
             };
             result["oldShaderStillWorks"] = true;
+            result["byteContract"] = ByteContractCheck();
             result["note"] = "前 20 B 与 TerrainVertex 逐位兼容 → 游戏 Opaque 着色器可直接画这个 buffer（多出的属性被忽略）；"
                 + "新增两个属性由 SkylineLodVolume 消费（法线→面明暗、材质 id→材质通道）。"
                 + "材质 id 是**方块值**（contents+light），32³ 壳路径没有 data 位（家具已按 v0.1.56 规则塌缩成主材质）。";

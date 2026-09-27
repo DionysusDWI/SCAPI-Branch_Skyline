@@ -89,6 +89,36 @@ namespace Game {
         /// <summary>[v0.1.60] 体素壳的采集半径（米，相对视距）：`rel ≤ 此值` 才采（默认 48 = `TierMetres[0]`）。</summary>
         public static float SurfaceVoxelRelMetres { get; set; } = 48f;
 
+        // ---------------- 带内主动补采（v0.1.61，里程碑 1.2「无缝转换」的数据侧） ----------------
+        /// <summary>
+        /// [v0.1.61] **在地形还在的时候就把它所属的 32³ 壳采好**，这样地形释放的那一刻壳已经就位。
+        ///
+        /// 为什么必须主动采：壳只在"离开加载范围"这一个时刻采（那时要 2×2 区块都还 Valid），
+        /// 一旦某个兄弟区块当时没就绪，这个立方体就**永远不会有壳**（`skippedNotReady`），
+        /// 除非玩家再走回来一次。于是"已加载区块 / 壳"的边界上就留下洞 —— 这就是用户说的
+        /// "区块加载边界与 LOD 显示边界存在区隔"里，**数据侧**那一半。
+        /// </summary>
+        public static bool BackfillEnabled { get; set; } = true;
+        /// <summary>[v0.1.61] 从"视距 − `BandInset`"往外扫多宽（米）。默认 192 m ≈ 6 个立方体环，覆盖交界最显眼的一段。</summary>
+        public static float BackfillRelMetres { get; set; } = 192f;
+        /// <summary>
+        /// [v0.1.61] **从加载半径内侧多少米就开始扫**（默认 64 m）。
+        /// 必须往内扫的原因（实测踩到）：游戏的**区块加载半径比视距小**（视距 128 m 时，
+        /// 壳体带 [120, 896] m 里只有个位数立方体是"地形还在"），所以"只扫带内"会**什么都扫不到**
+        /// （第一次实测 `backfillMissingCubes=0`、`lastBackfillMs=0.01 ms`）。
+        /// 而真正需要预先采的，正是"现在还在、马上要被释放"的那一圈。
+        /// </summary>
+        public static float BackfillInsideMetres { get; set; } = 64f;
+        /// <summary>[v0.1.61] 每 Tick 最多补采几个立方体（冷启动/走动时的一次性成本，补完就停）。</summary>
+        public static int BackfillPerTick { get; set; } = 2;
+        /// <summary>[v0.1.61] 每 Tick 补采的时间预算（毫秒）。</summary>
+        public static float BackfillBudgetMs { get; set; } = 3f;
+        public static long BackfilledTotal { get; private set; }
+        public static int BackfillScanned { get; private set; }
+        public static int BackfillMissingCubes { get; private set; }
+        public static int BackfillReadyCubes { get; private set; }
+        public static double LastBackfillMs { get; private set; }
+
         // ---------------- 存档 P4（v0.1.53） ----------------
         /// <summary>存档开关。</summary>
         public static bool PersistenceEnabled { get; set; } = true;
@@ -336,6 +366,108 @@ namespace Game {
                 }
             }
             return true;
+        }
+
+        /// <summary>
+        /// [v0.1.61] **带内主动补采**（里程碑 1.2 无缝转换的数据侧）：扫"视距 − `BandInset`"外
+        /// `BackfillRelMetres` 米的一圈 32 m 网格，凡是**还没有壳**、且它的 2×2 区块**都已 Valid** 的立方体，
+        /// 就地采一张壳（顺带按 `SurfaceVoxelRelMetres` 采体素壳）。
+        ///
+        /// 语义上与"卸载即采"完全一致（同一条 `CubeSurface32.Extract` + 同一套材质替换规则），区别只是
+        /// **时机提前到"地形还在"的时候** —— 于是地形释放的那一刻壳已经在仓里，
+        /// `OnChunksLeavingRange` 会把它当重复条目跳过（不会覆盖成旧的），边界上不再出现"该有壳却没有"的洞。
+        ///
+        /// **它治的是"将来"的洞，不是"过去"的洞**：地形已经释放、当时又没采到的立方体，
+        /// 这里 `ChunksAllValid` 为假、只能等玩家再走近一次 —— 这一点如实记在 `backfillMissingCubes` 里。
+        /// </summary>
+        static void BackfillBandShells(Terrain terrain) {
+            if (!BackfillEnabled || terrain == null || BackfillPerTick <= 0) {
+                return;
+            }
+            Stopwatch watch = Stopwatch.StartNew();
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float viewRange = ViewRangeMetres;
+            // 从"带内侧"起扫（默认 视距−8−64 m），一直到 视距+BackfillRelMetres：
+            // 内侧那一段正是"地形还在、马上要被释放"的立方体 —— 预先采好它们，边界就不会有洞。
+            float near = MathF.Max(MathF.Max(viewRange - BandInset, 0f) - BackfillInsideMetres, 0f);
+            float far = MathF.Min(viewRange + BandMetres, viewRange + BackfillRelMetres);
+            float nearSq = near * near, farSq = far * far;
+            int cx0 = (int)MathF.Floor((camera.X - far) / CubeSize);
+            int cx1 = (int)MathF.Floor((camera.X + far) / CubeSize);
+            int cz0 = (int)MathF.Floor((camera.Z - far) / CubeSize);
+            int cz1 = (int)MathF.Floor((camera.Z + far) / CubeSize);
+            int budget = BackfillPerTick;
+            int scanned = 0, missing = 0, added = 0;
+            for (int cx = cx0; cx <= cx1; cx++) {
+                for (int cz = cz0; cz <= cz1; cz++) {
+                    float wx = cx * CubeSize + CubeSize * 0.5f;
+                    float wz = cz * CubeSize + CubeSize * 0.5f;
+                    float dx = wx - camera.X, dz = wz - camera.Z;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 < nearSq || d2 > farSq) {
+                        continue;
+                    }
+                    scanned++;
+                    // 2×2 区块的顶面范围（与"卸载前预扫"同一口径）
+                    int minTop = int.MaxValue, maxTop = int.MinValue;
+                    bool ok = true;
+                    for (int sx = 0; sx < 2 && ok; sx++) {
+                        for (int sz = 0; sz < 2 && ok; sz++) {
+                            TerrainChunk chunk = terrain.GetChunkAtCoords(cx * 2 + sx, cz * 2 + sz);
+                            if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
+                                ok = false;
+                                break;
+                            }
+                            for (int x = 0; x < TerrainChunk.Size; x++) {
+                                for (int z = 0; z < TerrainChunk.Size; z++) {
+                                    int top = chunk.GetTopHeightFast(x, z);
+                                    if (top > maxTop) {
+                                        maxTop = top;
+                                    }
+                                    if (top < minTop) {
+                                        minTop = top;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!ok || maxTop < TerrainChunk.MinHeight) {
+                        continue;
+                    }
+                    for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                        (int Cx, int Cy, int Cz) key = (cx, cy, cz);
+                        if (m_entries.ContainsKey(key)) {
+                            continue;
+                        }
+                        missing++;
+                        if (budget <= 0 || watch.Elapsed.TotalMilliseconds > BackfillBudgetMs
+                            || m_entries.Count >= MaxCubes) {
+                            continue;                        // 预算用完：只如实计数，下一 Tick 再来
+                        }
+                        CubeSurface32 shell = CubeSurface32.Extract(terrain, cx, cy, cz);
+                        if (shell.QuadCount == 0) {
+                            continue;
+                        }
+                        Entry entry = new() { Shell = shell, LastUsed = Time.RealTime };
+                        m_entries[key] = entry;
+                        TryHarvestVoxelShell(entry, terrain, cx, cy, cz);
+                        added++;
+                        budget--;
+                        BackfilledTotal++;
+                        MarkCubeDirty(key);
+                        if (m_queued.Add(key)) {
+                            m_meshQueue.Enqueue(key);
+                        }
+                    }
+                }
+            }
+            BackfillScanned = scanned;
+            BackfillMissingCubes = missing;
+            BackfillReadyCubes = added;
+            LastBackfillMs = watch.Elapsed.TotalMilliseconds;
+            if (added > 0) {
+                SkylineLod.RequestRebuild();      // 壳接管的那片变了 → 让 LOD 立刻重排（让位）
+            }
         }
 
         /// <summary>
@@ -730,6 +862,7 @@ namespace Game {
                     SaveTick();
                 }
                 HarvestPending();      // [v0.1.55] 更宽口径：区块 Valid 就采（更新线程只入队）
+                BackfillBandShells(Terrain);   // [v0.1.61] 带内主动补采：地形还在就先采好（无缝转换的数据侧）
                 PrewarmVoxelShells(Terrain);   // [v0.1.60] 最近档补采/刷新表面体素壳（升级迁移 + 地形改动）
                 EvictIfNeeded();
                 BuildMeshes();
@@ -1480,6 +1613,16 @@ namespace Game {
                 ["lastVoxelHarvestMs"] = Math.Round(LastVoxelHarvestMs, 3),
                 ["lastPrewarmMs"] = Math.Round(LastPrewarmMs, 3),
                 ["voxelPrewarmPerTick"] = VoxelPrewarmPerTick,
+                // [v0.1.61] 带内主动补采（里程碑 1.2 无缝转换的数据侧）
+                ["backfillEnabled"] = BackfillEnabled,
+                ["backfillRelMetres"] = BackfillRelMetres,
+                ["backfillInsideMetres"] = BackfillInsideMetres,
+                ["backfillPerTick"] = BackfillPerTick,
+                ["backfilledTotal"] = BackfilledTotal,
+                ["backfillScanned"] = BackfillScanned,
+                ["backfillMissingCubes"] = BackfillMissingCubes,
+                ["backfillReadyCubes"] = BackfillReadyCubes,
+                ["lastBackfillMs"] = Math.Round(LastBackfillMs, 3),
                 ["meshedCubes"] = MeshedTotal,
                 ["harvestedTotal"] = HarvestedTotal,
                 ["evictedTotal"] = EvictedTotal,
@@ -1585,6 +1728,24 @@ namespace Game {
             SkylineCubeShellStore.VoxelPrewarmPerTick = Math.Max(0, perTick);
             if (budgetMs >= 0f) {
                 SkylineCubeShellStore.VoxelPrewarmBudgetMs = budgetMs;
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.61] **带内主动补采开关**（里程碑 1.2 无缝转换的数据侧）：开 = 地形还在时就把 32³ 壳采好，
+        /// 于是地形释放的那一刻壳已经就位、边界不留洞；关 = 逐位回到"只在卸载那一刻采"（v0.1.60 行为）。
+        /// </summary>
+        public static string CubeShellBackfill(bool enabled) {
+            SkylineCubeShellStore.BackfillEnabled = enabled;
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>[v0.1.61] 补采节流参数：每 Tick 几个、从"视距−带内缩"往外扫多宽（米）。`relMetres &lt; 0` = 不改宽度。</summary>
+        public static string CubeShellBackfillRate(int perTick, float relMetres = -1f) {
+            SkylineCubeShellStore.BackfillPerTick = Math.Max(0, perTick);
+            if (relMetres >= 0f) {
+                SkylineCubeShellStore.BackfillRelMetres = relMetres;
             }
             return SkylineCubeShellStore.Survey();
         }
