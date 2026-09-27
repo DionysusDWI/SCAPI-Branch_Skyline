@@ -109,6 +109,65 @@ namespace Game {
 
         static long Key(int cx, int cz) => ((long)cx << 32) ^ (uint)cz;
 
+        // ===== [v0.1.46] 交接带"主动铺满" =====
+
+        static Vector3 m_lastNearMarkCenter;
+        static bool m_hasNearMarkCenter;
+        /// <summary>相机移动超过这个距离（米）就把交接带重新标脏一次。</summary>
+        public static float NearMarkMoveThreshold { get; set; } = 24f;
+        public static long NearMarkedCells { get; private set; }
+
+        /// <summary>[v0.1.46] 交接带（近环层覆盖的那一圈）里所有 16 m 单元主动标脏，让它们立刻重采。
+        /// 返回标记的单元数；开关关掉时返回 0。</summary>
+        public static int MarkNearBandDirty() {
+            if (!SkylineRuntime.LodNearLayerEnabled) {
+                return 0;
+            }
+            Vector3 camera = CameraViewPosition();
+            float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            float bandStart = MathF.Max(viewRange + FineSize * 0.5f - 8f - CellSize, 0f);
+            float bandEnd = viewRange + FineSize * 0.5f + NearBandMetres + 16f + CellSize;
+            int cellSize = CellSize;
+            int cx0 = (int)MathF.Floor((camera.X - bandEnd) / cellSize);
+            int cx1 = (int)MathF.Floor((camera.X + bandEnd) / cellSize);
+            int cz0 = (int)MathF.Floor((camera.Z - bandEnd) / cellSize);
+            int cz1 = (int)MathF.Floor((camera.Z + bandEnd) / cellSize);
+            float startSq = bandStart * bandStart;
+            float endSq = bandEnd * bandEnd;
+            int marked = 0;
+            for (int cx = cx0; cx <= cx1; cx++) {
+                for (int cz = cz0; cz <= cz1; cz++) {
+                    float dx = (cx << CellShift) + CellSize * 0.5f - camera.X;
+                    float dz = (cz << CellShift) + CellSize * 0.5f - camera.Z;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 < startSq || d2 > endSq) {
+                        continue;
+                    }
+                    MarkDirty(Key(cx, cz));      // 同 partial 类（SkylineLodRefresh.cs）
+                    marked++;
+                }
+            }
+            NearMarkedCells += marked;
+            return marked;
+        }
+
+        /// <summary>相机移动够了就重标一次（由 Tick 调用）。</summary>
+        static void NearBandTick() {
+            if (!SkylineRuntime.LodNearLayerEnabled) {
+                return;
+            }
+            Vector3 camera = CameraViewPosition();
+            if (m_hasNearMarkCenter
+                && Vector3.DistanceSquared(camera, m_lastNearMarkCenter)
+                    < NearMarkMoveThreshold * NearMarkMoveThreshold) {
+                return;
+            }
+            MarkNearBandDirty();
+            m_lastNearMarkCenter = camera;
+            m_hasNearMarkCenter = true;
+        }
+
         public static int CellCount => m_cells.Count;
 
         public static void Reset() {
@@ -145,6 +204,9 @@ namespace Game {
                 // 内存数据会被带到新世界（无 bin 时 Load 还不清空，见下），并可能被写进
                 // 新世界的 SkylineLod.bin（实测 World 的 bin 被污染成 1873 个 AgentLab 坐标）。
                 FilePath();
+                // [v0.1.46] 近环层"立刻铺满"：相机移动一定距离就把交接带里的单元主动标脏，
+                // 否则近环只覆盖"恰好被轮转采样到"的区块（v0.1.45 实测 20 s 窗口只有 53% 覆盖）。
+                NearBandTick();
                 Harvest();
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();
@@ -1059,6 +1121,9 @@ namespace Game {
                 ["nearCellsInMesh"] = m_cellsInMeshNear,
                 ["nearMeshIndices"] = m_indexCountNear,
                 ["nearBandMetres"] = Math.Round(NearBandMetres, 1),
+                ["nearMarkedCells"] = NearMarkedCells,
+                ["nearLayerEnabled"] = SkylineRuntime.LodNearLayerEnabled,
+                ["nearLayerSwitch"] = "skyline.LodNearLayerEnabled / skyline.LodNearBandMark() 立刻铺满",
                 ["radiusMetres"] = RadiusMetres,
                 ["cellSizeBlocks"] = CellSize,
                 ["fineCellSizeBlocks"] = FineSize,

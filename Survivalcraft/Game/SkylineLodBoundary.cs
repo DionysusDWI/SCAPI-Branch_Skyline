@@ -11,6 +11,12 @@ namespace Game {
         /// 关掉后 `LodReset()` 会清掉近环数据。</summary>
         public static bool LodNearLayerEnabled { get; set; } = true;
 
+        /// <summary>[v0.1.46] 手动把交接带标脏（立刻重采近环层）；返回标记的单元数。</summary>
+        public static string LodNearBandMark() {
+            int marked = SkylineLod.MarkNearBandDirty();
+            return $"{{\"ok\":true,\"marked\":{marked},\"totalMarked\":{SkylineLod.NearMarkedCells}}}";
+        }
+
         /// <summary>`skyline.LodBoundaryAudit(inner, outer, samples)` —— 默认环带 128~384 m、4000 样本。</summary>
         public static string LodBoundaryAudit(int inner = 128, int outer = 384, int samples = 4000) {
             Camera camera = GetCamera();
