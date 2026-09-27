@@ -56,6 +56,60 @@ namespace Game {
         /// <summary>[v0.1.74] 采样戳表上限（条）。到顶整表清空（代价：下一轮全量重采一次）。</summary>
         public static int MaxStamps { get; set; } = 200000;
 
+        /// <summary>[v0.1.75] 采样戳的**距离裁剪半径**（米）。超过它的采样戳会被丢掉
+        /// （丢了不影响正确性：下次遇到该单元走 `FirstSeen` 重采一次）。
+        /// 为什么要它：`m_stamps` 是"按走过的地方"增长的（每条 ~24 B），
+        /// v0.1.74 只给了"到顶清空"这种粗办法；按距离裁剪才是与区域仓/壳滑窗同一口径的**有界**做法。</summary>
+        public static float StampKeepMetres { get; set; } = 4096f;
+
+        /// <summary>单次裁剪最多检查多少条（防"走远后一次裁几万条"卡一帧）。</summary>
+        public static int StampPruneScanPerCall { get; set; } = 20000;
+
+        static double m_stampPruneNext;
+        static long m_stampsPruned;
+
+        public static long StampsPrunedTotal => m_stampsPruned;
+
+        /// <summary>
+        /// [v0.1.75] 每隔几秒扫一部分采样戳，把超出 `StampKeepMetres` 的丢掉。
+        /// 用**游标**分批（每次最多 `StampPruneScanPerCall` 条），所以单帧代价有界。
+        /// </summary>
+        internal static void PruneStamps() {
+            if (m_stamps.Count == 0) {
+                return;
+            }
+            if (Time.RealTime < m_stampPruneNext) {
+                return;
+            }
+            m_stampPruneNext = Time.RealTime + 5.0;
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            if (camera == Vector3.Zero) {
+                return;
+            }
+            float keepSq = StampKeepMetres * StampKeepMetres;
+            List<long> remove = null;
+            int scanned = 0;
+            foreach (long key in m_stamps.Keys) {
+                if (++scanned > StampPruneScanPerCall) {
+                    break;
+                }
+                int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
+                float dx = (cx << CellShift) + CellSize * 0.5f - camera.X;
+                float dz = (cz << CellShift) + CellSize * 0.5f - camera.Z;
+                if (dx * dx + dz * dz > keepSq) {
+                    (remove ??= []).Add(key);
+                }
+            }
+            if (remove == null) {
+                return;
+            }
+            foreach (long key in remove) {
+                if (m_stamps.Remove(key)) {
+                    m_stampsPruned++;
+                }
+            }
+        }
+
         /// <summary>
         /// 编辑后的**沉降期**（秒）：LOD 的采样数据源是 `TerrainChunk.GetTopHeightFast`（区块的
         /// "顶面高度"字段），它由地形更新器的光照阶段重算——而光照阶段是**排队**跑的（实测编辑后
@@ -382,6 +436,8 @@ namespace Game {
             ["resampledSweep"] = m_resampledSweep,
             ["lastDirtyLatencyMs"] = Math.Round(m_lastDirtyLatencyMs, 1),
             ["stamps"] = m_stamps.Count,
+            ["stampsPrunedTotal"] = m_stampsPruned,
+            ["stampKeepMetres"] = (double)StampKeepMetres,
             ["dirtySettleSeconds"] = Math.Round(DirtySettleSeconds, 2),
             ["dirtyVerifySeconds"] = Math.Round(DirtyVerifySeconds, 2),
             ["dirtyChunksMaxPerTick"] = DirtyChunksMaxPerTick,

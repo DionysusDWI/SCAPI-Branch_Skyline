@@ -470,6 +470,9 @@ namespace Game {
                 SkylineLodManualBuild.Tick();
                 // [v0.1.73] 里程碑 2.2 收官：区域仓每 0.5 s 做一次"按需回读 + 超出半径的写盘移除"
                 RegionStoreTick();
+                // [v0.1.75] 采样戳按距离裁剪（`m_stamps` 是"按走过的地方"增长的表）——
+                // 它在 `SkylineLodRefresh.cs` 里，但那个文件也是 `partial class SkylineLod`，所以直接调。
+                PruneStamps();
                 Harvest();
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();
