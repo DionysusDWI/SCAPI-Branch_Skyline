@@ -79,6 +79,7 @@ void main(
 	out float2 v_texcoord : TEXCOORD,
 	out float3 v_normal : TEXCOORD2,
 	out float v_matid : TEXCOORD3,
+	out float v_slopeTop : TEXCOORD4,
 	out float v_fog : FOG,
 	out float4 sv_position: SV_POSITION
 )
@@ -87,6 +88,7 @@ void main(
 	v_texcoord = a_texcoord;
 	v_normal = a_normal.xyz * 2.0 - 1.0;
 	v_matid = a_matid;
+	v_slopeTop = a_normal.w;
 	v_fog = calculateFog(a_position);
 	sv_position = mul(float4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0), u_viewProjectionMatrix);
 }
@@ -119,6 +121,7 @@ varying vec4 v_color;
 varying vec2 v_texcoord;
 varying vec3 v_normal;
 varying float v_matid;
+varying float v_slopeTop;
 varying float v_fog;
 
 float fogIntegral(float y)
@@ -141,6 +144,7 @@ void main()
 	v_texcoord = a_texcoord;
 	v_normal = a_normal.xyz * 2.0 - 1.0;
 	v_matid = a_matid;
+	v_slopeTop = a_normal.w;
 	v_fog = calculateFog(a_position);
 	gl_Position = u_viewProjectionMatrix * vec4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0);
 	OPENGL_POSITION_FIX;
@@ -155,6 +159,8 @@ SamplerState u_samplerState;
 float3 u_light1;
 float3 u_light2;
 float u_topLight;
+float u_slopeStrength;
+float u_sunAmount;
 float u_channel;
 float3 u_fogColor;
 
@@ -163,14 +169,28 @@ void main(
 	in float2 v_texcoord: TEXCOORD,
 	in float3 v_normal : TEXCOORD2,
 	in float v_matid : TEXCOORD3,
+	in float v_slopeTop : TEXCOORD4,
 	in float v_fog: FOG,
 	out float4 svTarget: SV_TARGET
 )
 {
 	float4 albedo = v_color * u_texture.Sample(u_samplerState, v_texcoord);
 	float3 n = normalize(v_normal);
-	float lit = 0.5 + max(dot(n, u_light1), 0.0) + max(dot(n, u_light2), 0.0);
-	lit = saturate(lit / max(u_topLight, 0.0001));
+	float lit;
+	if (v_slopeTop > 0.5)
+	{
+		// [v0.1.77] 顶面：**坡向明暗**（单盏太阳；与 SkylineLod.SlopeGainFromNormal 逐字同式）
+		float3 sun = normalize(u_light1);
+		float slopeDot = dot(n, sun) / max(dot(float3(0.0, 1.0, 0.0), sun), 0.0001);
+		float slopeGain = lerp(1.0, clamp(slopeDot, 0.35, 1.0), u_slopeStrength);
+		lit = lerp(1.0, slopeGain, u_sunAmount);
+	}
+	else
+	{
+		// 立面：**六面因子**（环境 0.5 + 两盏镜像方向光，再按顶面归一化）
+		lit = 0.5 + max(dot(n, u_light1), 0.0) + max(dot(n, u_light2), 0.0);
+		lit = saturate(lit / max(u_topLight, 0.0001));
+	}
 	if (u_channel > 1.5 && u_channel < 2.5)
 	{
 		int mid = int(v_matid + 0.5);
@@ -204,6 +224,8 @@ uniform sampler2D u_texture;
 uniform vec3 u_light1;
 uniform vec3 u_light2;
 uniform float u_topLight;
+uniform float u_slopeStrength;
+uniform float u_sunAmount;
 uniform float u_channel;
 uniform vec3 u_fogColor;
 
@@ -211,14 +233,28 @@ varying vec4 v_color;
 varying vec2 v_texcoord;
 varying vec3 v_normal;
 varying float v_matid;
+varying float v_slopeTop;
 varying float v_fog;
 
 void main()
 {
 	vec4 albedo = v_color * texture2D(u_texture, v_texcoord);
 	vec3 n = normalize(v_normal);
-	float lit = 0.5 + max(dot(n, u_light1), 0.0) + max(dot(n, u_light2), 0.0);
-	lit = clamp(lit / max(u_topLight, 0.0001), 0.0, 1.0);
+	float lit;
+	if (v_slopeTop > 0.5)
+	{
+		// [v0.1.77] top face: slope shading, single sun, same formula as SkylineLod.SlopeGainFromNormal
+		vec3 sun = normalize(u_light1);
+		float slopeDot = dot(n, sun) / max(dot(vec3(0.0, 1.0, 0.0), sun), 0.0001);
+		float slopeGain = mix(1.0, clamp(slopeDot, 0.35, 1.0), u_slopeStrength);
+		lit = mix(1.0, slopeGain, u_sunAmount);
+	}
+	else
+	{
+		// wall face: six-face factor from the game's own lighting formula
+		lit = 0.5 + max(dot(n, u_light1), 0.0) + max(dot(n, u_light2), 0.0);
+		lit = clamp(lit / max(u_topLight, 0.0001), 0.0, 1.0);
+	}
 	if (u_channel > 1.5 && u_channel < 2.5)
 	{
 		int mid = int(v_matid + 0.5);
@@ -290,6 +326,10 @@ void main()
                 shader.GetParameter("u_light1", true).SetValue(LightingManager.DirectionToLight1);
                 shader.GetParameter("u_light2", true).SetValue(LightingManager.DirectionToLight2);
                 shader.GetParameter("u_topLight", true).SetValue(SkylineFaceShading.TopFactor);
+                // [v0.1.77] 坡向明暗的两个 uniform：强度与日照量 —— 与 CPU 侧 `SlopeGainFromNormal` 同源，
+                // 所以两条路径算的必然是同一个数（这就是"坡向明暗迁到 GPU"能断言到量化误差的前提）。
+                shader.GetParameter("u_slopeStrength", true).SetValue(SkylineLod.SlopeShadingStrength);
+                shader.GetParameter("u_sunAmount", true).SetValue(SkylineLod.SunAmount);
                 shader.GetParameter("u_channel", true).SetValue((float)channel);
                 shader.GetParameter("u_fogYMultiplier", true).SetValue(sky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor", true).SetValue(new Vector3(sky.ViewFogColor));
@@ -506,6 +546,8 @@ void main()
         /// </summary>
         public static string CaptureLodLayers(int channel, int size, bool attrShader) {
             JsonObject result = new();
+            bool savedShader = SkylineRuntime.LodAttrShaderOn;
+            bool flip = savedShader != attrShader;
             try {
                 Camera camera = SkylineLod.ActiveCamera;
                 if (camera == null) {
@@ -519,6 +561,13 @@ void main()
                     return result.ToJsonString();
                 }
                 size = Math.Clamp(size <= 0 ? Size : size, 64, Math.Min(Display.MaxTextureSize, 1024));
+                // [v0.1.77] **网格口径必须跟着着色器走**：体积着色器自己会乘明暗，所以它要画"未烘焙"的网格。
+                // 以前没做 → `LodLayerCapture(..., attrShader: true)` 画的是"已烘焙"的网格 →
+                // 立面被暗化两遍（实测 meanLuma 87 对 125），看起来像"GPU 面明暗算错了"。
+                if (flip) {
+                    SkylineRuntime.LodAttrShaderOn = attrShader;
+                    SkylineLod.RebuildNow();          // 重建后再取缓冲引用（下面的 layers 必须用新缓冲）
+                }
                 List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount)> layers = [
                     (SkylineLod.CoarseVertexBuffer, SkylineLod.CoarseIndexBuffer, SkylineLod.CoarseIndexCount),
                     (SkylineLod.FineVertexBuffer, SkylineLod.FineIndexBuffer, SkylineLod.FineIndexCount),
@@ -557,6 +606,12 @@ void main()
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;
+            }
+            finally {
+                if (flip) {
+                    SkylineRuntime.LodAttrShaderOn = savedShader;
+                    SkylineLod.RebuildNow();
+                }
             }
             return result.ToJsonString();
         }

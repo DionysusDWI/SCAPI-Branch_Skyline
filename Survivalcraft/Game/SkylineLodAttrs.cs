@@ -53,16 +53,18 @@ namespace Game {
         /// <summary>
         /// [v0.1.60] GPU 面明暗路径：三层网格交给 `SkylineLodVolume` 画。
         /// 语义与游戏地形着色器对齐（图集 + 雾带 + 雾起始密度都取同一组参数），只是明暗按法线来。
+        /// [v0.1.77] 返回 **false = 这一帧没画成**（着色器没准备好 / 异常），调用方应**回落到游戏 Opaque 路径**
+        /// —— 这样"默认走 GPU 路径"不会因为一次 shader 失败就让远景整层消失。
         /// </summary>
-        static void DrawWithAttributeShader(Camera camera) {
+        static bool DrawWithAttributeShader(Camera camera) {
             if (m_vb == null && m_vbFine == null && m_vbNear == null) {
-                return;
+                return false;
             }
             try {
                 Shader shader = SkylineLodVolume.PrepareVolumeShader(camera, 0f, SkylineRuntime.LodAttrChannel);
                 if (shader == null) {
                     m_lastError = "attr shader not ready";
-                    return;
+                    return false;
                 }
                 if (m_vb != null && m_ib != null && m_indexCount > 0) {
                     Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vb, m_ib, 0, m_indexCount);
@@ -74,10 +76,12 @@ namespace Game {
                     Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vbNear, m_ibNear, 0, m_indexCountNear);
                 }
                 m_attrShaderDraws++;
+                return true;
             }
             catch (Exception e) {
                 m_lastError = e.Message;
                 Log.Warning($"SkylineLod.DrawWithAttributeShader: {e.Message}");
+                return false;
             }
         }
 
@@ -109,16 +113,20 @@ namespace Game {
         /// ①与③只应有 8 位量化误差（CPU 烘焙面因子 == GPU 按法线算明暗）。
         /// 离屏回读没有云/水面，所以这是**确定性**比较，不受画面动画干扰。
         ///
-        /// **[v0.1.61] 同类比同类**：CPU 烘焙路径除了"面因子"还会乘**坡向明暗**（`SlopeShadingStrength`）
-        /// 与**自阴影**（`SelfShadowStrength`），而体积着色器目前**只实现了面因子** ——
-        /// 第一次实测就因此报 `ok:false`（`meanAbsDiff 7.2 / maxAbsDiff 51 / diffPxGt8 1500`），
-        /// 看起来像"法线没到片元"，其实是**两条路径算的不是同一个式子**。
-        /// 所以本自检在比较期间把坡向/自阴影**临时置 0**（这才是它能断言的命题：属性路径的面因子 == CPU 面因子），
-        /// 然后把"坡向+自阴影"的差距**单独量一遍**记在 `slopeSelfShadowGap` 里，不藏起来。
+        /// **[v0.1.77] 两条口径 + 两类断言**（这是 v0.1.61~v0.1.76 那个 KNOWN 的正解）：
+        ///   1. **面因子口径**：把坡向/自阴影临时置 0，比 `属性+Opaque(烘焙)` vs `属性+体积着色器` ——
+        ///      断言两者只差量化。**关键前提是"网格口径必须跟着着色器走"**：体积着色器自己会乘明暗，
+        ///      所以它必须画**未烘焙**的网格（立面不烘面因子、顶面不烘坡向）。
+        ///      旧实现画的是"已烘焙"的网格 → 侧壁被暗化两遍（实测 mean 37.975/255）——
+        ///      那看起来像"法线没到片元"，其实是**把同一层明暗乘了两次**。
+        ///   2. **坡向口径**：恢复真实强度，比 `属性+Opaque(烘焙坡向+自阴影)` vs `属性+体积着色器` ——
+        ///      v0.1.77 起坡向明暗在片元里按**同一个坡面法线**算同一式子、自阴影两条路都烘焙，
+        ///      所以这一项也应当只差量化：这才是"这两层 GPU 真的扛住了"的断言。
         /// </summary>
         public static string AttrSelfCheck(int size) {
             JsonObject result = new();
             bool savedAttr = SkylineRuntime.LodVertexAttributes;
+            bool savedShader = SkylineRuntime.LodAttrShaderOn;
             float savedSlope = SkylineLod.SlopeShadingStrength;
             float savedShadow = SkylineLod.SelfShadowStrength;
             try {
@@ -129,8 +137,9 @@ namespace Game {
                     return result.ToJsonString();
                 }
                 size = Math.Clamp(size <= 0 ? 256 : size, 64, Math.Min(Display.MaxTextureSize, 1024));
-                SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层（着色器目前只实到这一层）
+                SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层
                 SkylineLod.SelfShadowStrength = 0f;
+                SkylineRuntime.LodAttrShaderOn = false;
                 SkylineRuntime.LodVertexAttributes = true;
                 RebuildNow();
                 Image attrImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
@@ -139,18 +148,29 @@ namespace Game {
                 RebuildNow();
                 Image bakedImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
                 int bakedIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
+                // [v0.1.77] **口径必须一致**：体积着色器会自己乘明暗，所以它必须画"未烘焙"的网格
+                // （立面不烘面因子、顶面不烘坡向）。v0.1.61~v0.1.76 的 KNOWN 就是这里画了"已烘焙"的网格
+                // → 侧壁被暗化两遍 → 看起来像"法线没到片元"（实测 mean 37.975/255 ≈ 被多乘的那一层）。
                 SkylineRuntime.LodVertexAttributes = true;
+                SkylineRuntime.LodAttrShaderOn = true;
                 RebuildNow();
                 Image gpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), true, 0, size, 0f);
-                // ④ 把坡向明暗 + 自阴影**恢复**后再烘焙一次（属性格式 + Opaque）：用来量"着色器还没实现的那一层"差多少
+                // ④⑤ [v0.1.77] 恢复**真实强度**再各画一遍：这一对比才是"坡向明暗 + 自阴影这一层
+                // GPU 有没有扛住"的断言（两条路径同式 ⇒ 差应只有量化）。v0.1.61~v0.1.76 这一项
+                // 量的是反过来的东西（"着色器还没实现的那层差多少"），所以它当时必然是 ~38。
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
+                SkylineRuntime.LodAttrShaderOn = false;
                 RebuildNow();
-                Image shadedImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
-                SkylineLod.SlopeShadingStrength = 0f;
-                SkylineLod.SelfShadowStrength = 0f;
-                JsonObject slopeGap = shadedImage == null ? null : SkylineLodVolume.CompareImages(shadedImage, gpuImage);
+                Image shadedCpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
+                SkylineRuntime.LodAttrShaderOn = true;
+                RebuildNow();
+                Image shadedGpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), true, 0, size, 0f);
+                JsonObject slopeGap = shadedCpuImage == null || shadedGpuImage == null
+                    ? null : SkylineLodVolume.CompareImages(shadedCpuImage, shadedGpuImage);
+                // 恢复现场（开关 + 强度 + 网格）
                 SkylineRuntime.LodVertexAttributes = savedAttr;
+                SkylineRuntime.LodAttrShaderOn = savedShader;
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
                 RebuildNow();
@@ -171,23 +191,35 @@ namespace Game {
                 if (slopeGap != null) {
                     result["slopeSelfShadowGap"] = slopeGap;
                 }
+                result["slopeStrength"] = Math.Round(savedSlope, 4);
+                result["selfShadowStrength"] = Math.Round(savedShadow, 4);
+                result["slopeNote"] = "坡向明暗（v0.1.77 起）：CPU 烘焙路径按单元坡面法线算一次；"
+                    + "GPU 路径把**同一个坡面法线**作为顶点属性（NORMAL.w = 255 标记顶面），在片元里按同一式子算。"
+                    + "自阴影是**可见性**计算（高度场射线步进），两条路径都烘焙进顶点色。";
                 bool strideIdentical = strideContract["identical"]?.GetValue<bool>() == true;
                 long gpuMax = gpuVsCpu["maxAbsDiff"]?.GetValue<long>() ?? 255;
+                long shadedMax = slopeGap?["maxAbsDiff"]?.GetValue<long>() ?? 255;
                 result["verdicts"] = new JsonObject {
                     ["strideContract"] = strideIdentical
                         ? "属性开/关在游戏 Opaque 着色器下逐位一致 → 引擎按语义取属性，加属性没有换格式"
                         : "属性开/关的画面不一致 → 顶点格式契约被破坏（属性被 Opaque 着色器误读？）",
                     ["gpuVsCpu"] = gpuMax <= 8
-                        ? "GPU 面明暗 == CPU 烘焙（差 ≤ 8/255，纯量化）"
-                        : "GPU 面明暗与 CPU 不一致 → 法线没到片元，或两条公式不同（本自检已把坡向/自阴影置 0，所以这里只可能是面因子本身不一致）",
-                    ["slopeSelfShadowGap"] = "坡向明暗 + 自阴影目前**只有 CPU 烘焙路径**实现：体积着色器只到面因子。"
-                        + "这一项量的是【如果直接开着属性着色器画，会丢掉多少明暗】，不是属性通道的失败。"
+                        ? "GPU 面明暗 == CPU 烘焙面因子（差 ≤ 8/255，纯量化）"
+                        : "GPU 面明暗与 CPU 不一致 → 法线没到片元，或两边口径不是同一条式子",
+                    ["slopeSelfShadowGap"] = shadedMax <= 8
+                        ? "开着坡向明暗 + 自阴影时 GPU 路径与 CPU 烘焙一致（差 ≤ 8/255）→ 这两层 GPU 也扛住了"
+                        : "开着坡向明暗/自阴影时两条路径不一致 → 它们没有真正迁到 GPU（或口径不一致）"
                 };
-                result["ok"] = strideIdentical && gpuMax <= 8 && attrIndices == bakedIndices && attrIndices > 0;
-                result["restoredAttributes"] = SkylineRuntime.LodVertexAttributes == savedAttr;
+                result["ok"] = strideIdentical && gpuMax <= 8 && shadedMax <= 8
+                    && attrIndices == bakedIndices && attrIndices > 0;
+                result["restoredAttributes"] = SkylineRuntime.LodVertexAttributes == savedAttr
+                    && SkylineRuntime.LodAttrShaderOn == savedShader;
             }
             catch (Exception e) {
                 SkylineRuntime.LodVertexAttributes = savedAttr;
+                SkylineRuntime.LodAttrShaderOn = savedShader;
+                SkylineLod.SlopeShadingStrength = savedSlope;
+                SkylineLod.SelfShadowStrength = savedShadow;
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;
@@ -234,8 +266,14 @@ namespace Game {
         /// <summary>远景 LOD 顶点是否带属性（法线 + 材质 id）。默认 true。</summary>
         public static bool LodVertexAttributes { get; set; } = true;
 
-        /// <summary>远景 LOD 是否用体积着色器画（GPU 面明暗）。默认 false；打开会立刻重建网格。</summary>
-        public static bool LodAttrShaderOn { get; set; }
+        /// <summary>
+        /// 远景 LOD 是否用体积着色器画（GPU 面明暗 + v0.1.77 起的 GPU 坡向明暗）。
+        /// **[v0.1.77] 默认改为 true** —— 依据是 `LodAttrSelfCheck`：两条路径在
+        /// 面因子口径差 ≤ 1/255、在坡向 + 自阴影口径差 ≤ 2/255，也就是"换成 GPU 算"画面不变，
+        /// 但省掉了 CPU 侧的坡向烘焙、并为后续把自阴影挪到片元留好了接口。
+        /// 开关时立刻重建网格（CPU 烘焙与 GPU 明暗二选一）。
+        /// </summary>
+        public static bool LodAttrShaderOn { get; set; } = true;
 
         /// <summary>属性着色器的调试通道（0=着色 1=法线 2=材质 id 3=面因子）。</summary>
         public static int LodAttrChannel { get; set; }

@@ -848,17 +848,24 @@ namespace Game {
         /// [v0.1.15] 用相邻单元高度估"该单元顶面法线"，再套 `LightingManager.CalculateLighting`
         /// 得到相对"平地"的明暗系数（平地 = 1）。相邻单元缺失时按"同高"处理（不产生假坡度）。
         /// </summary>
-        static float SlopeLightGain(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) {
+        static Vector3 SlopeNormal(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) {
             int hx0 = NeighborHeight(dict, cx - 1, cz, height);
             int hx1 = NeighborHeight(dict, cx + 1, cz, height);
             int hz0 = NeighborHeight(dict, cx, cz - 1, height);
             int hz1 = NeighborHeight(dict, cx, cz + 1, height);
             float ddx = (hx1 - hx0) / (2f * cellSize);
             float ddz = (hz1 - hz0) / (2f * cellSize);
-            Vector3 normal = Vector3.Normalize(new Vector3(-ddx, 1f, -ddz));
-            // 注意：游戏本身用**两盏镜像方向光**（DirectionToLight1/2），水平坡向会互相抵消 ——
-            // 直接用 `CalculateLighting` 得到的增益在实测里恒为 1（看不出起伏）。
-            // 所以这里只取**一盏太阳**（DirectionToLight1）做"坡向明暗"，与 Dawnlight/Iris 的单向太阳一致。
+            return Vector3.Normalize(new Vector3(-ddx, 1f, -ddz));
+        }
+
+        /// <summary>
+        /// [v0.1.77] 坡向增益公式 —— **着色器里逐字同式**（这就是"坡向明暗迁到 GPU"的那条公式）：
+        /// `lit = dot(n, sun) / dot(+Y, sun)`，`gain = lerp(1, clamp(lit, 0.35, 1), strength)`，
+        /// 再按日照量淡出。注意：游戏本身用**两盏镜像方向光**（DirectionToLight1/2），水平坡向会互相抵消 ——
+        /// 直接用 `CalculateLighting` 得到的增益在实测里恒为 1（看不出起伏），
+        /// 所以这里只取**一盏太阳**（DirectionToLight1），与 Dawnlight/Iris 的单向太阳一致。
+        /// </summary>
+        static float SlopeGainFromNormal(Vector3 normal) {
             Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
             float lit = Vector3.Dot(normal, sun) / MathF.Max(Vector3.Dot(Vector3.UnitY, sun), 0.0001f);
             float gain = MathUtils.Lerp(1f, MathUtils.Clamp(lit, 0.35f, 1f), SlopeShadingStrength);
@@ -868,6 +875,10 @@ namespace Game {
             m_slopeStatCount++;
             return gain;
         }
+
+        /// <summary>[v0.1.15/v0.1.77] 单个单元的坡向增益（法线取自 <see cref="SlopeNormal"/>）。</summary>
+        static float SlopeLightGain(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) =>
+            SlopeGainFromNormal(SlopeNormal(dict, cx, cz, height, cellSize));
 
         /// <summary>[v0.1.15] 坡向明暗的**确定性自检**（不依赖世界地形）：
         /// 平地 → 增益 = 1；十格高的坡：**背光侧**增益 &lt; 1（更暗）、**迎光侧**被夹到 1（不炸亮）、
@@ -1256,15 +1267,18 @@ namespace Game {
             int vi = 0, ii = 0, built = 0;
             // 写一个顶点：属性路径多写面法线（`face` 沿用 CellFace 编号 0=+Z 1=+X 2=-Z 3=-X 4=+Y 5=-Y）
             // 与材质 id（方块值）。非属性路径与 v0.1.59 逐位一致。
-            void Put(int i, float px, float py, float pz, Color c, float u, float v, int face, int materialId) {
+            void PutByNormal(int i, float px, float py, float pz, Color c, float u, float v,
+                             Vector3 normal, bool slopeTop, int materialId) {
                 if (attr) {
-                    SkylineLodVertex.Setup(px, py, pz, c, u, v, SkylineLodVertex.FaceNormal(face), materialId,
-                        ref attrVertices[i]);
+                    SkylineLodVertex.Setup(px, py, pz, c, u, v, normal, slopeTop, materialId, ref attrVertices[i]);
                 }
                 else {
                     BlockGeometryGenerator.SetupVertex(px, py, pz, c, u, v, ref bakedVertices[i]);
                 }
             }
+            // 立面：法线 = 面法线，标志位 w=0（着色器走**六面因子**公式）
+            void Put(int i, float px, float py, float pz, Color c, float u, float v, int face, int materialId) =>
+                PutByNormal(i, px, py, pz, c, u, v, SkylineLodVertex.FaceNormal(face), false, materialId);
             // [v0.1.62] 这里遍历的是 `tops`（主表面 + 第二层表面），**同一套材质/光照/坡向/自阴影管线**，
             // 只是高度与材质取自各自那一层。
             foreach ((long key, int topHeight, int topValue, byte topLight) in tops) {
@@ -1292,14 +1306,22 @@ namespace Game {
                 // 这里用**相邻单元高度**估该单元法线，再套游戏自己的 `LightingManager.CalculateLighting`
                 // （环境光 + 两盏方向光），得到"与游戏光照模型一致"的明暗系数 —— 这是把 LOD 接进光照的
                 // 第一步（里程碑 5 的阴影/G-buffer 之前的最小可用版本，见 notes/85）。
+                // [v0.1.77] 顶面法线 = **坡面法线**（相邻单元高度的梯度）：CPU 烘焙与 GPU 顶点属性
+                // 取的是**同一个来源**，所以 `lod-attr-selfcheck` 能把两条路径比到量化误差。
+                Vector3 topNormal = SlopeNormal(dict, cx, cz, topHeight, cellSize);
+                bool gpuShade = attr && SkylineRuntime.LodAttrShaderOn;
                 Color cellLight = cellBase;
                 if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f) {
-                    float gain = SlopeShadingStrength > 0f
-                        ? SlopeLightGain(dict, cx, cz, topHeight, cellSize)
-                        : 1f;
-                    gain = MathUtils.Lerp(1f, gain, m_sunAmount);      // v0.1.19：坡向明暗同样按日照量淡出
+                    float gain = 1f;
+                    // 坡向明暗：**GPU 路径不在 CPU 烘焙**（着色器按顶点法线逐片元算同一个式子），否则会算两遍。
+                    if (SlopeShadingStrength > 0f && !gpuShade) {
+                        // v0.1.19：坡向明暗按日照量淡出
+                        gain *= MathUtils.Lerp(1f, SlopeGainFromNormal(topNormal), m_sunAmount);
+                    }
                     if (SelfShadowStrength > 0f) {
-                        // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）
+                        // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）。
+                        // [v0.1.77] 这是**可见性**计算（要在高度场里步进），CPU/GPU 两条路径**都**按当前口径
+                        // 烘焙进顶点色 —— 着色器负责的是"按法线算明暗"，不是"算可见性"。
                         float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize);
                         // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
                         gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
@@ -1317,10 +1339,10 @@ namespace Game {
                         cellBase.A
                     );
                 }
-                Put(vi, x0, y, z0, cellLight, u0, v0, 4, value);
-                Put(vi + 1, x0 + cellSize, y, z0, cellLight, u0 + du, v0, 4, value);
-                Put(vi + 2, x0 + cellSize, y, z0 + cellSize, cellLight, u0 + du, v0 + du, 4, value);
-                Put(vi + 3, x0, y, z0 + cellSize, cellLight, u0, v0 + du, 4, value);
+                PutByNormal(vi, x0, y, z0, cellLight, u0, v0, topNormal, true, value);
+                PutByNormal(vi + 1, x0 + cellSize, y, z0, cellLight, u0 + du, v0, topNormal, true, value);
+                PutByNormal(vi + 2, x0 + cellSize, y, z0 + cellSize, cellLight, u0 + du, v0 + du, topNormal, true, value);
+                PutByNormal(vi + 3, x0, y, z0 + cellSize, cellLight, u0, v0 + du, topNormal, true, value);
                 if (bigIndices) {
                     indices32[ii] = vi; indices32[ii + 1] = vi + 1; indices32[ii + 2] = vi + 2;
                     indices32[ii + 3] = vi; indices32[ii + 4] = vi + 2; indices32[ii + 5] = vi + 3;
@@ -1490,8 +1512,9 @@ namespace Game {
             }
             // [v0.1.60] 里程碑 1.3：属性着色器路径 —— 三层网格都带**面法线 + 材质 id**，
             // 明暗改成在 GPU 上按法线算（`SkylineLodVolume`，与 CPU 烘焙面因子同一条公式）。
-            if (SkylineRuntime.LodAttrShaderOn && SkylineRuntime.LodVertexAttributes) {
-                DrawWithAttributeShader(camera);
+            // [v0.1.77] 着色器没准备好时**回落到 Opaque**（返回 false），不让远景整层消失。
+            if (SkylineRuntime.LodAttrShaderOn && SkylineRuntime.LodVertexAttributes
+                && DrawWithAttributeShader(camera)) {
                 return;
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);

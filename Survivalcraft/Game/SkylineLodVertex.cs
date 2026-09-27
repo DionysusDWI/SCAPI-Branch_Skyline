@@ -50,10 +50,21 @@ namespace Game {
         /// <summary>顶点步长（字节）。着色器侧与内存布局必须一致，`Info()` 会断言这一点。</summary>
         public const int Stride = 28;
 
-        /// <summary>把单位法线编成 `NormalizedByte4` 的 xyz（0..255）+ w=255。</summary>
-        public static Color EncodeNormal(Vector3 normal) {
+        /// <summary>把单位法线编成 `NormalizedByte4` 的 xyz（0..255）；w 默认 0 = **立面/普通面**。</summary>
+        public static Color EncodeNormal(Vector3 normal) => EncodeNormal(normal, false);
+
+        /// <summary>
+        /// [v0.1.77] 把单位法线编成 `NormalizedByte4` 的 xyz（0..255）；**w 位是"面类型"标志**：
+        ///   * `slopeTop = true`（w = 255）—— 顶面，法线是**坡面法线**（由相邻单元高度估的梯度），
+        ///     着色器走**坡向明暗**公式（单盏太阳，与 `SkylineLod.SlopeLightGain` 同式）；
+        ///   * `slopeTop = false`（w = 0）—— 立面，法线是面法线，着色器走**六面因子**公式。
+        /// 为什么塞在 w 而不是加一个属性：`NormalizedByte4` 本来就有第 4 个通道，
+        /// **顶点格式不变（仍 28 B）**，游戏 `Opaque` 着色器照旧忽略 NORMAL 整个属性。
+        /// 默认值取"立面"（w=0）是为了让**旧调用方**（32³ 壳 / 表面体素壳）行为逐位不变。
+        /// </summary>
+        public static Color EncodeNormal(Vector3 normal, bool slopeTop) {
             byte enc(float v) => (byte)MathUtils.Clamp(MathF.Round((v * 0.5f + 0.5f) * 255f), 0f, 255f);
-            return new Color(enc(normal.X), enc(normal.Y), enc(normal.Z), (byte)255);
+            return new Color(enc(normal.X), enc(normal.Y), enc(normal.Z), slopeTop ? (byte)255 : (byte)0);
         }
 
         /// <summary>
@@ -62,13 +73,19 @@ namespace Game {
         /// </summary>
         public static void Setup(float x, float y, float z, Color color, float tx, float ty,
                                  Vector3 normal, float materialId, ref SkylineLodVertex vertex) {
+            Setup(x, y, z, color, tx, ty, normal, false, materialId, ref vertex);
+        }
+
+        /// <summary>[v0.1.77] 与上面同口径，多一个"这是顶面（坡面法线）"的标志。</summary>
+        public static void Setup(float x, float y, float z, Color color, float tx, float ty,
+                                 Vector3 normal, bool slopeTop, float materialId, ref SkylineLodVertex vertex) {
             vertex.X = x;
             vertex.Y = y;
             vertex.Z = z;
             vertex.Tx = (short)(tx * 32767f);
             vertex.Ty = (short)(ty * 32767f);
             vertex.Color = color;
-            vertex.Normal = EncodeNormal(normal);
+            vertex.Normal = EncodeNormal(normal, slopeTop);
             vertex.MaterialId = materialId;
         }
 

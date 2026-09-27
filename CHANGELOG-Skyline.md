@@ -7,6 +7,65 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.77] - 2026-09-28
+
+第八十七个版本：**里程碑 1.3 的 GPU 侧补齐 —— 坡向明暗迁到片元**，并打掉回归清单里
+**唯一剩下的 KNOWN**（门禁从 `PASS 16 / KNOWN 1` 变成 **`PASS 17 / FAIL 0 / SKIP 0 / KNOWN 0`**）。
+
+### 那个 KNOWN 的真根因：**自检自己的口径错**，不是"法线没到片元"
+
+`lod-attr-selfcheck` 长期报 `gpuVsCpu mean=37.975 max=51`，v0.1.61 记的是"两条公式不同 / 法线没到片元"。
+本轮**不写代码**先用已有通道定位：三层 LOD 离屏各画一遍 →
+CPU 路径 `meanLuma 124.89`、GPU 路径 `87.47`、`lit` 通道均值 `0.6995` 且**只有 3 个去重值**
+（= 顶面 1.00 / ±Z 0.84 / ±X 0.62，正是六面因子）。
+`87.47 / 124.89 = 0.7003 ≈ lit 均值` ⇒ **差值就是"又乘了一遍 lit"**。
+
+真因：`RebuildMesh` 用 `gpuShade = attr && LodAttrShaderOn` 决定要不要把面因子烘进顶点色，
+而旧自检**只切了顶点格式、没切 `LodAttrShaderOn`** ⇒ 那一张 GPU 图用的是**已烘焙**的网格 ⇒
+立面被暗化**两遍**。法线一直是好的。
+
+### 实现：坡向明暗真的搬到片元里
+
+| 项 | 做法 |
+|---|---|
+| 传"坡向"的方式 | **不加属性**：`NORMAL` 的 **w 位**当面类型标志（255 = 顶面/坡面法线，0 = 立面/面法线）。顶点格式**仍是 28 B** |
+| 坡面法线 | 抽出 `SkylineLod.SlopeNormal(...)`（相邻单元高度中心差分）；CPU 烘焙与 GPU 顶点属性**取同一个来源** |
+| 片元公式 | 顶面：单盏太阳 `dot(n,sun)/dot(+Y,sun)` → `lerp(1,clamp(·,0.35,1),strength)` → 按日照量淡出；立面：六面因子。GLSL/HLSL 两份逐字同式 |
+| 自阴影 | **仍是 CPU 算的**（可见性是高度场射线步进），两条路径都烘焙进顶点色、由着色器消费 —— 如实写在这里，不冒充"已迁到 GPU" |
+| 默认值 | `LodAttrShaderOn` 从 false 改 **true**（依据是下面两条断言"画面不变"）；`DrawWithAttributeShader` 改成返回 bool，**着色器没准备好就回落到游戏 Opaque**，不让远景整层消失 |
+
+### 验收
+
+确定性（`skyline.LodAttrSelfCheck(256)`，1,548 个覆盖像素，引擎内离屏回读、不受云/水面动画干扰）：
+
+| 断言 | 实测 | 阈值 |
+|---|---|---|
+| `strideContract`（属性开/关都走 Opaque） | **identical=True** | 逐位一致 |
+| `gpuVsCpu`（坡向/自阴影置 0，只比面因子） | **mean 0.798 / max 1** | ≤ 8/255 |
+| `slopeSelfShadowGap`（**真实强度** 0.45/0.35） | **mean 0.807 / max 2** | ≤ 8/255 |
+
+生产级 A/B（真实画面 1280×720，裁掉上部 35% 云带）：同设置连拍噪声底 **0.0% 变化 / maxΔ 8**，
+**关掉 GPU 路径**同样只有 **0.0% 变化 / maxΔ 7** ⇒ 换 GPU 算**画面不变**。
+
+回归门禁：**PASS 17 / FAIL 0 / SKIP 0 / KNOWN 0**。`lod-attr-selfcheck` 从 **KNOWN 升为普通检查**；
+`defaults` 门新增 `vertexAttributes=True` / `attrShader=True` / `vertexStride=28` 三条断言。
+
+### 没做 / 风险（如实）
+
+* **自阴影仍在 CPU**（片元版可见性未做，那是接 `SkylineGpuShadow` 的位置）；
+* 坡向用的太阳是 `LightingManager.DirectionToLight1`（游戏本体的**固定**方向光，与 v0.1.15 的 CPU 口径一致），
+  **不是** v0.1.65 的**真太阳** `TrackedLightDirection()` —— "坡向跟着真太阳走"是下一步；
+* 顶面法线是**逐单元**的（一个单元 4 个顶点同法线），坡向仍是单元粒度，
+  这是为了让 CPU/GPU 能逐位比对而做的选择；
+* `LodLayerCapture` 有同一个口径坑（把已烘焙的网格画给体积着色器），本轮一并修好
+  （`attrShader=true` 时临时切口径并重建，`finally` 还原）。
+
+证据：`data/sessions/skyline-v0177/`（`lod-gpu-shading.json`、`regression.json`、三张生产截图）、
+`notes/155`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+源码包内含本版补丁 `height-v0177.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.76] - 2026-09-28
 
 第八十六个版本：**`ChunkInfo` 追踪表的距离裁剪**（"按走过的地方增长"的第三张表）+ **把堆指纹接进发版流程**。
