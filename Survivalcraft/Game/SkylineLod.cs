@@ -123,6 +123,139 @@ namespace Game {
         public static long RefreshedOnUnload => m_refreshedOnUnload;
 
         /// <summary>
+        /// [v0.1.48] LOD 单元的**材质贴图槽**（4.4：门/栅栏等非完整方块按材质表现，而不是按碰撞箱/建模）：
+        ///   * 完整方块（`CubeBlock`，含树叶这类 alpha-tested 立方体）→ **顶面**（保持原来的地貌观感）；
+        ///   * 非完整方块（门/栅栏/栅栏门/植物/火把…）→ **侧面**（那才是它渲染用的材质面）；
+        ///   * 取槽失败时回退顶面。
+        /// 关掉 `skyline.LodMaterialAware` 即回到 v0.1.47 的"一律顶面"。
+        /// </summary>
+        public static int MaterialTextureSlot(Block block, int value) {
+            try {
+                if (block is CubeBlock) {
+                    return block.GetFaceTextureSlot(4, value);
+                }
+                int side = block.GetFaceTextureSlot(0, value);
+                return side >= 0 ? side : block.GetFaceTextureSlot(4, value);
+            }
+            catch {
+                try {
+                    return block.GetFaceTextureSlot(4, value);
+                }
+                catch {
+                    return 0;
+                }
+            }
+        }
+
+        /// <summary>[v0.1.48] 材质选择诊断：给一个 contents，报它是不是完整方块、顶面/侧面槽、
+        /// 以及当前开关下**实际会选**哪一个（4.4 的判据）。</summary>
+        public static string MaterialProbe(int contents) {
+            JsonObject result = new();
+            try {
+                if (contents < 0 || contents >= BlocksManager.Blocks.Length || BlocksManager.Blocks[contents] == null) {
+                    result["ok"] = false;
+                    result["err"] = $"bad contents {contents}";
+                    return result.ToJsonString();
+                }
+                Block block = BlocksManager.Blocks[contents];
+                int value = Terrain.MakeBlockValue(contents, 15, 0);
+                result["ok"] = true;
+                result["contents"] = contents;
+                result["block"] = block.GetType().Name;
+                result["isCubeBlock"] = block is CubeBlock;
+                result["slotCount"] = block.GetTextureSlotCount(value);
+                foreach (int face in new[] { 0, 4 }) {
+                    try {
+                        result[face == 4 ? "topSlot" : "sideSlot"] = block.GetFaceTextureSlot(face, value);
+                    }
+                    catch (Exception e) {
+                        result[face == 4 ? "topSlot" : "sideSlot"] = "err:" + e.GetType().Name;
+                    }
+                }
+                result["chosenSlot"] = MaterialTextureSlot(block, value);
+                result["materialAware"] = SkylineRuntime.LodMaterialAware;
+                result["note"] = "完整方块取顶面；非完整方块取侧面（= 它的材质面）";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result.ToJsonString();
+        }
+
+        /// <summary>[v0.1.48] **4.4 全方块材质审计**：扫一遍所有 contents，统计
+        /// 非完整方块（非 `CubeBlock`）里"顶面槽 ≠ 侧面槽"的个数与样例、以及槽位异常（&lt;=0）的个数。
+        /// 这是"非完整方块在 LOD 里该用哪个材质槽"的**数据依据**（不是拍脑袋）。</summary>
+        public static string MaterialAudit() {
+            JsonObject result = new();
+            try {
+                int total = 0, cubeBlocks = 0, nonCubeBlocks = 0, slotMismatch = 0, badSlot = 0;
+                JsonArray examples = [];
+                JsonArray badExamples = [];
+                for (int contents = 1; contents < BlocksManager.Blocks.Length; contents++) {
+                    Block block = BlocksManager.Blocks[contents];
+                    if (block == null || block is AirBlock) {
+                        continue;
+                    }
+                    total++;
+                    bool cube = block is CubeBlock;
+                    if (cube) {
+                        cubeBlocks++;
+                        continue;
+                    }
+                    nonCubeBlocks++;
+                    int value = Terrain.MakeBlockValue(contents, 15, 0);
+                    int top, side;
+                    try {
+                        top = block.GetFaceTextureSlot(4, value);
+                        side = block.GetFaceTextureSlot(0, value);
+                    }
+                    catch {
+                        badSlot++;
+                        continue;
+                    }
+                    if (top <= 0 || side <= 0) {
+                        badSlot++;
+                        if (badExamples.Count < 12) {
+                            badExamples.Add(new JsonObject {
+                                ["contents"] = contents,
+                                ["block"] = block.GetType().Name,
+                                ["topSlot"] = top,
+                                ["sideSlot"] = side
+                            });
+                        }
+                    }
+                    if (top != side) {
+                        slotMismatch++;
+                        if (examples.Count < 12) {
+                            examples.Add(new JsonObject {
+                                ["contents"] = contents,
+                                ["block"] = block.GetType().Name,
+                                ["topSlot"] = top,
+                                ["sideSlot"] = side
+                            });
+                        }
+                    }
+                }
+                result["ok"] = true;
+                result["totalBlocks"] = total;
+                result["cubeBlocks"] = cubeBlocks;
+                result["nonCubeBlocks"] = nonCubeBlocks;
+                result["nonCubeTopDiffersFromSide"] = slotMismatch;
+                result["badSlotCount"] = badSlot;
+                result["examples"] = examples;
+                result["badExamples"] = badExamples;
+                result["materialAware"] = SkylineRuntime.LodMaterialAware;
+                result["note"] = "非完整方块若顶面槽≠侧面槽，则 LOD 的材质选择会真的改变观感；相等则规则等价";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result.ToJsonString();
+        }
+
+        /// <summary>
         /// [v0.1.47] 区块**即将被卸载**（离开加载范围）时先把它采进 LOD —— 4.2 的要求：
         /// "让玩家进入→离开区块加载范围的过程中刷新一次 LOD 区块状态"，避免"改完走远，LOD 还是旧的"。
         /// 调用点：`TerrainUpdater.AllocateAndFreeChunks`（**主线程**，与 LOD 的采集/重建同线程，无并发风险）。
@@ -806,7 +939,11 @@ namespace Game {
                 int value = cell.Value;
                 Block block = BlocksManager.Blocks[contents];
                 int slotCount = Math.Max(block.GetTextureSlotCount(value), 1);
-                int slot = block.GetFaceTextureSlot(4, value);      // 顶面
+                // [v0.1.48] 4.4：非完整方块（门/栅栏/栅栏门…）在 LOD 里按**材质**表现，
+                // 而不是按碰撞箱/建模取"顶面"（顶面会把它们画成细边/怪条）。
+                int slot = SkylineRuntime.LodMaterialAware
+                    ? MaterialTextureSlot(block, value)
+                    : block.GetFaceTextureSlot(4, value);
                 float u0 = (slot % slotCount) / (float)slotCount;
                 float v0 = (slot / slotCount) / (float)slotCount;
                 float du = 1f / slotCount;

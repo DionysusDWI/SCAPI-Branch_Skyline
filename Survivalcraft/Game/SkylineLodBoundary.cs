@@ -17,6 +17,16 @@ namespace Game {
             return $"{{\"ok\":true,\"marked\":{marked},\"totalMarked\":{SkylineLod.NearMarkedCells}}}";
         }
 
+        /// <summary>[v0.1.48] 4.4：LOD 材质按"完整方块取顶面 / 非完整方块取侧面"（默认 true；
+        /// false = 回到 v0.1.47 的"一律顶面"）。改后需 `LodReset()` 或等下一次网格重建生效。</summary>
+        public static bool LodMaterialAware { get; set; } = true;
+
+        /// <summary>[v0.1.48] 材质选择诊断：`skyline.LodMaterialProbe(contents)`。</summary>
+        public static string LodMaterialProbe(int contents) => SkylineLod.MaterialProbe(contents);
+
+        /// <summary>[v0.1.48] 4.4 全方块材质审计：`skyline.LodMaterialAudit()`。</summary>
+        public static string LodMaterialAudit() => SkylineLod.MaterialAudit();
+
         /// <summary>`skyline.LodBoundaryAudit(inner, outer, samples)` —— 默认环带 128~384 m、4000 样本。</summary>
         public static string LodBoundaryAudit(int inner = 128, int outer = 384, int samples = 4000) {
             Camera camera = GetCamera();
