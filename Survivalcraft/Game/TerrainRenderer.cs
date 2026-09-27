@@ -131,19 +131,22 @@ namespace Game {
             Display.BlendState = BlendState.Opaque;
             Display.DepthStencilState = DepthStencilState.Default;
             Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
-            m_opaqueShader.GetParameter("u_origin", true).SetValue(v.XZ);
-            m_opaqueShader.GetParameter("u_viewProjectionMatrix", true).SetValue(value);
-            m_opaqueShader.GetParameter("u_viewPosition", true).SetValue(viewPosition);
-            m_opaqueShader.GetParameter("u_samplerState", true).SetValue(SettingsManager.TerrainMipmapsEnabled ? m_samplerStateMips : m_samplerState);
-            m_opaqueShader.GetParameter("u_fogYMultiplier", true).SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
-            m_opaqueShader.GetParameter("u_fogColor", true).SetValue(new Vector3(m_subsystemSky.ViewFogColor));
-            m_opaqueShader.GetParameter("u_fogBottomTopDensity")
+            // [v0.1.34] 阴影采样：启用且已有深度图时改用"地形 shader + 阴影采样"变体；
+            // 否则返回原 m_opaqueShader（默认路径行为逐位不变，见 SkylineGpuShadowSample.cs）。
+            Shader opaqueShader = SkylineRuntime.ResolveOpaqueShader(m_opaqueShader);
+            opaqueShader.GetParameter("u_origin", true).SetValue(v.XZ);
+            opaqueShader.GetParameter("u_viewProjectionMatrix", true).SetValue(value);
+            opaqueShader.GetParameter("u_viewPosition", true).SetValue(viewPosition);
+            opaqueShader.GetParameter("u_samplerState", true).SetValue(SettingsManager.TerrainMipmapsEnabled ? m_samplerStateMips : m_samplerState);
+            opaqueShader.GetParameter("u_fogYMultiplier", true).SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
+            opaqueShader.GetParameter("u_fogColor", true).SetValue(new Vector3(m_subsystemSky.ViewFogColor));
+            opaqueShader.GetParameter("u_fogBottomTopDensity")
                 .SetValue(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity));
-            ShaderParameter parameter = m_opaqueShader.GetParameter("u_hazeStartDensity");
+            ShaderParameter parameter = opaqueShader.GetParameter("u_hazeStartDensity");
             ModsManager.HookAction(
                 "SetShaderParameter",
                 modLoader => {
-                    modLoader.SetShaderParameter(m_opaqueShader, camera);
+                    modLoader.SetShaderParameter(opaqueShader, camera);
                     return true;
                 }
             );
@@ -167,7 +170,7 @@ namespace Game {
                 if (viewPosition.X < terrainChunk.BoundingBox.Max.X) {
                     num3 |= 8;
                 }
-                DrawTerrainChunkGeometrySubsets(m_opaqueShader, terrainChunk, num3);
+                DrawTerrainChunkGeometrySubsets(opaqueShader, terrainChunk, num3);
                 ChunksDrawn++;
             }
         }

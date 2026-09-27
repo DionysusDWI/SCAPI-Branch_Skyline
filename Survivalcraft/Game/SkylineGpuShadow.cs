@@ -120,6 +120,14 @@ void main()
         static string m_gpuShadowLast = "(never captured)";
         static int m_gpuShadowCaptures;
 
+        // [v0.1.34] 深度图相机参数（采样侧用；每次 Capture 刷新）
+        static Matrix m_gpuShadowViewProjection;
+        static Vector2 m_gpuShadowOrigin;
+        static Vector3 m_gpuShadowEye;
+        static Vector3 m_gpuShadowSun = Vector3.UnitY;
+        static float m_gpuShadowDepthMax = 4096f;
+        static bool m_gpuShadowHasMap;
+
         public static string GpuShadowDescribe() =>
             $"gpuShadow enabled={GpuShadowEnabled} size={GpuShadowSize} radius={GpuShadowRadius:0} "
             + $"captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
@@ -176,6 +184,12 @@ void main()
                 Vector3 origin3 = new(MathF.Floor(center.X), 0f, MathF.Floor(center.Z));
                 Matrix viewShifted = Matrix.CreateTranslation(origin3) * view;
                 Matrix viewProjectionShifted = viewShifted * projection;
+                m_gpuShadowViewProjection = viewProjectionShifted;
+                m_gpuShadowOrigin = new Vector2(origin3.X, origin3.Z);
+                m_gpuShadowEye = eye;
+                m_gpuShadowSun = sun;
+                m_gpuShadowDepthMax = depthMax;
+                m_gpuShadowHasMap = true;
                 shader.GetParameter("u_origin", true).SetValue(new Vector2(origin3.X, origin3.Z));
                 shader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
                 shader.GetParameter("u_eye", true).SetValue(eye);

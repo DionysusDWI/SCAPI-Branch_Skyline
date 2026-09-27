@@ -3,6 +3,33 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.34] - 2026-09-27
+
+第四十四个版本：**阴影贴图采样收口** —— 不透明 pass 改用"地形 shader + 阴影采样"变体，
+**真实地形**从此吃到 v0.1.32/33 生成的 GPU 太阳深度图阴影。
+
+**本版相对 v0.1.33 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（采样变体）** | `SkylineGpuShadowSample.cs`：与游戏 `Opaque.vsh/psh` **同结构**（雾/顶点色/贴图一致），顶点多输出 `v_world`，像素按 `mapDepth + bias < fragDepth` 压暗 `×(1−strength)`；开关 `skyline.GpuShadowSampleEnabled / Strength(0.45) / Bias(0.0002) / FlipY / DebugMode`；诊断 `GpuShadowSampleDescribe()` |
+| **新增 B（接入不透明 pass）** | `TerrainRenderer.DrawOpaque`：`Shader opaqueShader = SkylineRuntime.ResolveOpaqueShader(m_opaqueShader);`（未启用/无深度图时原样回退 → **默认行为逐位不变**），其余参数设置与绘制流程完全一致；`GpuShadowTick` 在"启用采样但无深度图"时自动补一次 `GpuShadowCapture()`（并自动打开捕获开关） |
+| **修复 C（三处实测坑）** | ① GLSL 片元必须显式 `#ifdef GL_ES precision mediump float; #endif`；② 采样侧必须减**捕获时记录的**太阳原点（`u_sunOrigin`）——否则原点被加两次、UV 全在图外（与 notes/88 "CreateLookAt 自带平移"同源）；③ bias 0.004（≈16 m）会把 16 m 高墙的投影抹掉 → 默认改 **0.0002**（≈0.8 m） |
+| **诊断 D** | `GpuShadowDebugMode=1` 把"采样到的深度"直接画到地形颜色上（UV/绑定对齐取证）；`Describe` 增加 resolved/fallbacks/lastReason |
+
+### Verified（AgentLab；相机固定 yaw80/pitch12；测试墙 8×16×8 石砖）
+
+| 项 | 值 |
+|---|---|
+| 采样变体真实生效 | `resolved=184`、`err=''`、fps 30 |
+| 调试模式 | 地形显示"采样到的深度"（地面中点灰 ≈0.5 = 深度中值）→ **UV/绑定正确** |
+| **最终 A/B**（默认参数，off → on） | **193,830 px 变化（>8）**、全帧平均亮度 **173.8 → 152.6**；墙向相机一侧出现**大片连续投影**、其余地面保持明亮 |
+
+边界（如实）：阴影为硬边（1024²/1024 m ≈ 1 m/px）+ 8 bit 深度（≈16 m/步）；目前只接入**不透明** pass；
+深度图按需生成（太阳方向为常量，无需每帧重画）。下一步：16 bit 深度、CPU/GPU 阴影统一口径、alpha-tested 接入。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.33] - 2026-09-27
 
 第四十三个版本：**太阳深度图加入真实区块几何**（补上 v0.1.32 的近景空洞）。

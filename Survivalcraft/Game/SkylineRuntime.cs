@@ -445,6 +445,8 @@ namespace Game {
             TickDeferredLight();
             // [v0.1.31] 地形顶点阴影的"随太阳重烘焙"（默认随 TerrainShadowEnabled 生效；见 SkylineTerrainShadow.cs）
             TerrainShadowTick();
+            // [v0.1.34] GPU 阴影采样：启用但还没有深度图时自动补一次捕获（见 SkylineGpuShadowSample.cs）
+            GpuShadowTick();
             if (Regions.Count == 0) {
                 return;
             }
