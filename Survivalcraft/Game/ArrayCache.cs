@@ -98,6 +98,16 @@ namespace Game {
             return m_usedCount / (float)(m_usedCount + m_cachedCount);
         }
 
+        /// <summary>[v0.1.73] **诊断只读**：池里缓存了多少元素、外面租用了多少元素。
+        /// 为什么要暴露：`ClearCache` 的触发条件是"缓存占比**低于**阈值"，也就是**几乎不会清**；
+        /// 只靠 GC 堆总量无法区分"池里囤着"与"真的泄漏"（见 `notes/152`）。</summary>
+        public long CachedCount => m_cachedCount;
+
+        public long UsedCount => m_usedCount;
+
+        /// <summary>[v0.1.73] 清空缓存池（诊断/内存压力时手动调用）。</summary>
+        public void Clear() => ClearCache();
+
         object m_lock = new();
 
         Bucket[] m_buckets;

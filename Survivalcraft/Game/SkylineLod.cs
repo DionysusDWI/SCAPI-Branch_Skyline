@@ -441,6 +441,8 @@ namespace Game {
                 SkylineCubeShellStore.Tick();
                 // [v0.1.60] 手动生成 LOD：分帧推进任务表（默认没有任务时是空操作）
                 SkylineLodManualBuild.Tick();
+                // [v0.1.73] 里程碑 2.2 收官：区域仓每 0.5 s 做一次"按需回读 + 超出半径的写盘移除"
+                RegionStoreTick();
                 Harvest();
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();
@@ -643,6 +645,7 @@ namespace Game {
                     };
                     m_harvestedCells++;
                     m_dirty = true;
+                    MarkCoarseRegionDirty(key);      // [v0.1.73] 该区域标脏（保存时按区域整块写出）
                 }
                 else if (RemoveEmptiedCells && m_cells.Remove(key)) {
                     m_dirty = true;                       // 整格被清空（默认关；见 SkylineLodRefresh.RemoveEmptiedCells）
@@ -664,6 +667,7 @@ namespace Game {
                                     && fineTop[k] - fineTop2[k] >= SecondMinDrop
                     };
                     m_dirty = true;
+                    MarkFineRegionDirty(fkey);       // [v0.1.73] 精细层同样按区域标脏
                 }
                 // [v0.1.45] 近环细层：16 个 4 m 子单元，各自取中位（样本数 ≤16）
                 if (fillNear) {
@@ -1517,6 +1521,11 @@ namespace Game {
             if (path == null) {
                 return;
             }
+            // [v0.1.73] 区域仓模式：只写**变脏的区域**（每个区域整块重写），不重写整表。
+            if (RegionStoreEnabled) {
+                SaveDirtyRegions();
+                return;
+            }
             try {
                 using (var stream = Storage.OpenFile(path, OpenFileMode.Create)) {
                     var writer = new BinaryWriter(stream);
@@ -1549,6 +1558,17 @@ namespace Game {
             m_cells.Clear();
             m_cellsFine.Clear();
             ResetRefreshState();          // v0.1.8：切世界/重载时不带旧采样戳与脏集合
+            // [v0.1.73] 区域仓模式：只把**相机附近**的区域读进内存（远处留在盘上、按需回读）。
+            ResetRegionState();
+            if (RegionStoreEnabled) {
+                ScanKnownRegions();
+                MigrateLegacyFile();
+                LoadNearbyRegions();
+                m_dirty = true;
+                Log.Information($"SkylineLod: region store loaded {m_cells.Count} cells (+{m_cellsFine.Count} fine)"
+                    + $" residentRegions={m_residentRegions.Count} knownRegions={m_knownRegions.Count}");
+                return;
+            }
             if (path == null || !Storage.FileExists(path)) {
                 m_dirty = true;
                 return;
@@ -1656,6 +1676,17 @@ namespace Game {
                 ["cellsReleasedFine"] = m_lodCellsReleasedFine,
                 ["cellsReleasedLastCoarse"] = m_lodCellsReleasedLastCoarse,
                 ["cellsReleasedLastFine"] = m_lodCellsReleasedLastFine,
+                // [v0.1.73] 区域仓（LOD 单元落盘 + 按需回读）
+                ["regionStoreEnabled"] = RegionStoreEnabled,
+                ["regionMetres"] = Math.Round(RegionMetres, 1),
+                ["regionKeepMetres"] = (double)RegionKeepMetres,
+                ["regionsResident"] = RegionsResident,
+                ["regionsKnown"] = RegionsKnown,
+                ["regionsDirty"] = RegionsDirty,
+                ["regionsLoadedTotal"] = RegionsLoadedTotal,
+                ["regionsSavedTotal"] = RegionsSavedTotal,
+                ["regionsEvictedTotal"] = RegionsEvictedTotal,
+                ["regionLastError"] = m_regionLastError,
                 ["loadedChunks"] = loadedColumns,
                 ["refresh"] = RefreshSurveyJson(),
                 ["lastError"] = m_lastError

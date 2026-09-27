@@ -229,6 +229,9 @@ namespace Game {
         /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>
         public static string LodMeshMetadata() => SkylineLod.MeshMetadata();
 
+        /// <summary>[v0.1.73] LOD 单元区域仓（落盘 + 按需回读）的账本。</summary>
+        public static string LodRegionStore() => SkylineLod.RegionStoreDescribe();
+
         /// <summary>[v0.1.15] LOD 坡向明暗强度（0 = 关闭；默认 0.45）。改动后需重建网格才生效：
         /// `skyline.LodReset()` 或等下一次 `MeshRebuildSeconds`。</summary>
         public static float LodSlopeShadingStrength {
