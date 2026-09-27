@@ -533,10 +533,18 @@ namespace Game {
             Display.RasterizerState = RasterizerState.CullNoneScissor;
             float num = CalculateSkyFog(camera.ViewPosition);
             Display.BlendState = BlendState.Opaque;
-            m_shaderFlat.Transforms.World[0] = Matrix.CreateTranslation(camera.ViewPosition) * camera.ViewProjectionMatrix;
-            m_shaderFlat.Color = new Vector4(1f - num);
-            m_shaderFlat.AdditiveColor = num * new Vector4(ViewFogColor);
-            Display.DrawIndexed(PrimitiveType.TriangleList, m_shaderFlat, value.VertexBuffer, value.IndexBuffer, 0, value.IndexBuffer.IndicesCount);
+            // [v0.1.67] 天空穹顶的 shader 交给 Skyline：启用体积云时换成自研变体（`color + additiveColor`
+            // 语义一字不动，额外在穹顶片元里沿视线步进云层带）。穹顶开深度读 → 云天然被地形遮挡。
+            // 关闭时 `ResolveSkyDomeShader` 原样返回 `m_shaderFlat`，行为与 v0.1.66 逐位一致。
+            Vector4 skyColor = new(1f - num);
+            Vector4 skyAdditive = num * new Vector4(ViewFogColor);
+            Shader skyShader = SkylineRuntime.ResolveSkyDomeShader(m_shaderFlat, camera, skyColor, skyAdditive);
+            if (ReferenceEquals(skyShader, m_shaderFlat)) {
+                m_shaderFlat.Transforms.World[0] = Matrix.CreateTranslation(camera.ViewPosition) * camera.ViewProjectionMatrix;
+                m_shaderFlat.Color = skyColor;
+                m_shaderFlat.AdditiveColor = skyAdditive;
+            }
+            Display.DrawIndexed(PrimitiveType.TriangleList, skyShader, value.VertexBuffer, value.IndexBuffer, 0, value.IndexBuffer.IndicesCount);
         }
 
         public virtual void DrawStars(Camera camera) {
@@ -674,6 +682,12 @@ namespace Game {
 
         public virtual void DrawClouds(Camera camera) {
             if (SettingsManager.SkyRenderingMode == SkyRenderingMode.NoClouds) {
+                return;
+            }
+            // [v0.1.67] 里程碑 3.3：**弃用静态云层**。用户口径："原有的云层只是一层静态贴图所以直接弃用"。
+            // 静态云（4 层平面 + 一张 Clouds 贴图）由天空穹顶上的自研体积云接管；
+            // 关掉 `skyline.ReplaceStaticClouds` 就回到原版静态云（逐位不变），两者可以 A/B。
+            if (SkylineRuntime.ReplaceStaticClouds && SkylineRuntime.VolumetricCloudsEnabled) {
                 return;
             }
             float f = CalculateHazeFactor();
