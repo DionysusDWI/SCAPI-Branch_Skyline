@@ -26,6 +26,20 @@ namespace Game {
         public static int Size { get; set; } = 512;
         /// <summary>调试直显：把 G-buffer 画到屏幕（A/B 用；默认关）。</summary>
         public static bool DebugDraw { get; set; }
+        /// <summary>
+        /// [v0.1.61] **把 32³ 壳网格也画进 G-buffer**（里程碑 1.4）。
+        /// 默认开；关掉 = 逐位回到 v0.1.60 的"G-buffer 只含三层远景 LOD"。
+        /// 判定与主画面的壳层**完全同一套**（`SkylineCubeShellStore.CollectDrawableMeshes`），
+        /// 并用同一个 `BandLift` 偏移，所以 G-buffer 里的壳与主画面里的壳是同一批几何、同一个位置。
+        /// </summary>
+        public static bool IncludeShells { get; set; } = true;
+        /// <summary>
+        /// [v0.1.61] 取证用的**分层模式**：`0` = 两层都画（正常）、`1` = 只画三层远景 LOD、`2` = **只画 32³ 壳层**。
+        /// 为什么需要它：壳层与 LOD 在屏幕上大量重叠，而 G-buffer 的深度只由这个 pass 自己产生
+        /// （主画面里 LOD 会在有壳的地方**让位**，离屏 pass 里做不到"按单元跳过"），
+        /// 所以"两层一起画"的覆盖率**量不出壳层自己盖了多少** —— 模式 2 才是壳层的独立判据。
+        /// </summary>
+        public static int CaptureMode { get; set; }
         /// <summary>调试时叠加一个棋盘格（看清 uv/覆盖范围）。</summary>
         public static bool DebugChecker { get; set; } = true;
 
@@ -230,6 +244,33 @@ void main()
             return m_sampler;
         }
 
+        /// <summary>
+        /// [v0.1.61] **给离屏 pass 一个够远的远平面**（只换远平面，近平/FOV/宽高比全不动）。
+        ///
+        /// 为什么必须：CPU 侧 NDC 探针（`shells.ndcProbe`）实测壳体在 x/y 上**是在视锥里**的
+        /// （NDC ≈ `-0.01 / -0.64`），但 **z 恒等于 1.0** —— 落在远平面处/之外，被裁掉了。
+        /// 相机投影的远平面是给**近景**设的，而壳体带最远到 `视距 + BandMetres`（默认 896 m）、
+        /// LOD 到 `RadiusMetres`（1024 m），于是离屏 pass 里这些几何**一个像素都画不出来**
+        /// （实测：只画壳层时覆盖率 0，提交了 165 个网格 / 93,594 个索引）。
+        ///
+        /// 推导：透视矩阵 `M33 = f/(n−f)`、`M43 = n·f/(n−f)` → `n = M43/M33`、`f = M43/(1+M33)`。
+        /// 非标准透视（正交等）直接原样返回，不硬改。
+        /// </summary>
+        static Matrix ExtendFarPlane(Matrix projection, float farPlane) {
+            float a = projection.M33, b = projection.M43;
+            if (MathF.Abs(a) < 1e-6f || MathF.Abs(1f + a) < 1e-6f) {
+                return projection;
+            }
+            float near = b / a;
+            float currentFar = b / (1f + a);
+            if (near <= 0f || farPlane <= currentFar) {
+                return projection;                       // 远平面已经够远 → 不动
+            }
+            projection.M33 = farPlane / (near - farPlane);
+            projection.M43 = near * farPlane / (near - farPlane);
+            return projection;
+        }
+
         static void DrawLodLayers(Shader shader) {
             if (SkylineLod.CoarseVertexBuffer != null && SkylineLod.CoarseIndexCount > 0) {
                 Display.DrawIndexed(PrimitiveType.TriangleList, shader, SkylineLod.CoarseVertexBuffer,
@@ -286,15 +327,66 @@ void main()
 
                 Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
                 Vector3 v = new(MathF.Floor(viewPosition.X), 0f, MathF.Floor(viewPosition.Z));
+                // [v0.1.61] 远平面要盖住"壳带 + LOD 半径"，否则离屏 pass 里远景几何全被裁掉（见 ExtendFarPlane 注释）
+                Matrix projection = ExtendFarPlane(camera.ProjectionMatrix,
+                    MathF.Max(SkylineLod.RadiusMetres, SkylineCubeShellStore.BandMetres) + 256f);
                 Matrix matrix = Matrix.CreateTranslation(v - viewPosition)
-                    * camera.ViewMatrix.OrientationMatrix * camera.ProjectionMatrix;
+                    * camera.ViewMatrix.OrientationMatrix * projection;
                 Shader shader = EnsureShader();
                 shader.GetParameter("u_origin", true).SetValue(new Vector2(v.X, v.Z));
                 shader.GetParameter("u_viewProjectionMatrix", true).SetValue(matrix);
                 shader.GetParameter("u_texture", true)
                     .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
                 shader.GetParameter("u_samplerState", true).SetValue(EnsureSampler());
-                DrawLodLayers(shader);
+                bool drawLod = CaptureMode != 2;
+                bool drawShells = IncludeShells && CaptureMode != 1;
+                if (drawLod) {
+                    DrawLodLayers(shader);
+                }
+                // [v0.1.61] 里程碑 1.4：把 32³ 壳网格也画进来（几何与主画面壳层同一批）
+                int shellMeshes = 0, shellIndices = 0, shellVoxelMeshes = 0;
+                JsonArray ndcProbe = [];
+                if (drawShells) {
+                    List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel, Vector3 Center)> shells =
+                        SkylineCubeShellStore.CollectDrawableMeshes(camera);
+                    // [v0.1.61] **CPU 侧 NDC 探针**：把前几个壳的中心用同一个矩阵投一遍。
+                    // 为什么需要：壳层在离屏 pass 里"提交了 165 个网格却一个像素都没有"，
+                    // 只有把"投到哪去了"量出来，才能分清是"不在视锥内"还是"被深度挡住"。
+                    // NDC 判据：|x|≤1 且 |y|≤1 且 0<z≤1 才算真的在视锥里。
+                    foreach ((VertexBuffer _, IndexBuffer _, int _, bool _, Vector3 center) in shells) {
+                        if (ndcProbe.Count >= 4) {
+                            break;
+                        }
+                        Vector4 clip = Vector4.Transform(
+                            new Vector4(center.X - v.X, center.Y, center.Z - v.Z, 1f), matrix);
+                        ndcProbe.Add(new JsonObject {
+                            ["center"] = new JsonArray(Math.Round(center.X, 1), Math.Round(center.Y, 1), Math.Round(center.Z, 1)),
+                            ["w"] = Math.Round(clip.W, 2),
+                            ["ndc"] = new JsonArray(Math.Round(clip.X / clip.W, 3), Math.Round(clip.Y / clip.W, 3),
+                                Math.Round(clip.Z / clip.W, 3))
+                        });
+                    }
+                    if (shells.Count > 0) {
+                        // **用主画面同一个 shader 与同一个矩阵**（`PrepareTerrainShader` 已经把 `BandLift` 包进矩阵里）：
+                        // 这样 G-buffer 里的壳就是玩家在主画面里真正看到的那批几何、那个位置，逐像素对拍才有意义。
+                        //
+                        // 为什么不用上面那个自编译的 G-buffer shader 画壳：实测（v0.1.61）那样**一个像素都不光栅化**
+                        // （把壳整体抬 ±40 m 画面也毫无变化）—— 同一个 VB/IB 在主画面里画得好好的，
+                        // 说明问题出在"自编译 shader + 壳顶点声明"这个组合上，具体根因未定位，如实记在 notes/140。
+                        Shader shellShader = SkylineCubeSurfaceDemo.PrepareTerrainShader(
+                            camera, SkylineCubeShellStore.BandLift);
+                        if (shellShader != null) {
+                            foreach ((VertexBuffer vb, IndexBuffer ib, int count, bool isVoxel, Vector3 center) in shells) {
+                                Display.DrawIndexed(PrimitiveType.TriangleList, shellShader, vb, ib, 0, count);
+                                shellMeshes++;
+                                shellIndices += count;
+                                if (isVoxel) {
+                                    shellVoxelMeshes++;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 Engine.Media.Image image = m_rt.GetData(new Rectangle(0, 0, size, size));
                 int covered = 0;
@@ -323,8 +415,19 @@ void main()
                     ["fineIndices"] = SkylineLod.FineIndexCount,
                     ["nearIndices"] = SkylineLod.NearIndexCount
                 };
-                result["note"] = "G-buffer v1：RGB=albedo（图集采样×顶点色），A=1 表示画到了几何；"
-                    + "尚无 normal / materialId（LOD 顶点格式还没有这两个属性）";
+                result["shells"] = new JsonObject {
+                    ["includeShells"] = IncludeShells,
+                    ["captureMode"] = CaptureMode,
+                    ["drewLod"] = drawLod,
+                    ["drewShells"] = drawShells,
+                    ["meshes"] = shellMeshes,
+                    ["indices"] = shellIndices,
+                    ["voxelMeshes"] = shellVoxelMeshes,
+                    ["bandLift"] = SkylineCubeShellStore.BandLift,
+                    ["ndcProbe"] = ndcProbe
+                };
+                result["note"] = "G-buffer：RGB=albedo（图集采样×顶点色），A=1 表示画到了几何；"
+                    + "几何源 = 三层远景 LOD" + (IncludeShells ? " + 32³ 壳网格（里程碑 1.4）" : "（壳层已关）");
             }
             catch (Exception e) {
                 m_lastError = e.Message;
@@ -399,6 +502,8 @@ void main()
                 ["enabled"] = Enabled,
                 ["size"] = Size,
                 ["debugDraw"] = DebugDraw,
+                ["includeShells"] = IncludeShells,
+                ["captureMode"] = CaptureMode,
                 ["hasTarget"] = HasTarget,
                 ["hookTouches"] = m_hookTouches,
                 ["layers"] = new JsonObject {
@@ -426,6 +531,24 @@ void main()
         }
 
         public static string GBufferCapture() => SkylineGBuffer.Capture();
+
+        /// <summary>
+        /// [v0.1.61] **壳网格进 G-buffer 的开关**（里程碑 1.4）：关掉 = G-buffer 只含三层远景 LOD（v0.1.60 行为）。
+        /// 用来做 A/B：开着 `GBufferCapture` 的覆盖率/几何数应当**不低于**关着的时候（壳层只会往里加几何）。
+        /// </summary>
+        public static string GBufferShells(bool enabled) {
+            SkylineGBuffer.IncludeShells = enabled;
+            return SkylineGBuffer.Info();
+        }
+
+        /// <summary>
+        /// [v0.1.61] G-buffer 分层取证模式：`0`=两层都画、`1`=只画 LOD、**`2`=只画 32³ 壳层**。
+        /// 壳层的独立覆盖率只看模式 2（两层一起画时壳被 LOD 压住，量不出自己的贡献）。
+        /// </summary>
+        public static string GBufferMode(int mode) {
+            SkylineGBuffer.CaptureMode = Math.Clamp(mode, 0, 2);
+            return SkylineGBuffer.Info();
+        }
 
         public static string GBufferInfo() => SkylineGBuffer.Info();
     }

@@ -1282,6 +1282,64 @@ namespace Game {
             LastMeshMs = watch.Elapsed.TotalMilliseconds;
         }
 
+        /// <summary>
+        /// [v0.1.61] **只读**：列出"这一帧真会被画出来"的壳网格（里程碑 1.4 的入口）。
+        ///
+        /// 判定与 `Draw` **完全同一套**（带内 `[视距−BandInset, 视距+BandMetres]` + 地形已释放 + 四邻齐全），
+        /// 所以"G-buffer 里有的 == 主画面壳层里有的"，不会出现两套口径。
+        /// **不修改任何状态**（不刷 `LastUsed`、不动统计、不建网格）—— 因此离屏渲染可以安全调用。
+        /// </summary>
+        public static List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel, Vector3 Center)>
+            CollectDrawableMeshes(Camera camera) {
+            List<(VertexBuffer, IndexBuffer, int, bool, Vector3)> list = [];
+            if (!Enabled || !RenderEnabled || m_entries.Count == 0 || camera == null) {
+                return list;
+            }
+            Terrain terrain = Terrain;
+            if (terrain == null) {
+                return list;
+            }
+            Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
+            float viewRange = ViewRangeMetres;
+            float near = MathF.Max(viewRange - BandInset, 0f);
+            float far = viewRange + BandMetres;
+            float nearSq = near * near, farSq = far * far;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                if (list.Count >= MaxDrawPerFrame) {
+                    break;
+                }
+                int cx = kv.Key.Cx, cz = kv.Key.Cz;
+                float wx = cx * CubeSize + CubeSize * 0.5f;
+                float wz = cz * CubeSize + CubeSize * 0.5f;
+                float dx = wx - viewPosition.X, dz = wz - viewPosition.Z;
+                float distSq = dx * dx + dz * dz;
+                if (distSq < nearSq || distSq > farSq) {
+                    continue;
+                }
+                if (terrain.GetChunkAtCoords(cx * 2, cz * 2) != null
+                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2) != null
+                    || terrain.GetChunkAtCoords(cx * 2, cz * 2 + 1) != null
+                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2 + 1) != null) {
+                    continue;                                // 真实地形还在 → 不画壳（与 Draw 同口径）
+                }
+                Entry entry = kv.Value;
+                VertexBuffer vb = entry.MeshIsVoxel ? entry.VoxelMesh?.VertexBuffer : entry.Mesh?.VertexBuffer;
+                IndexBuffer ib = entry.MeshIsVoxel ? entry.VoxelMesh?.IndexBuffer : entry.Mesh?.IndexBuffer;
+                int indexCount = entry.MeshIsVoxel
+                    ? (entry.VoxelMesh?.IndexCount ?? 0)
+                    : (entry.Mesh?.IndexCount ?? 0);
+                if (vb == null || ib == null || indexCount == 0) {
+                    continue;
+                }
+                if (!NeighborhoodComplete(cx, kv.Key.Cy, cz)) {
+                    continue;
+                }
+                Vector3 center = new(wx, kv.Key.Cy * CubeSize + CubeSize * 0.5f, wz);
+                list.Add((vb, ib, indexCount, entry.MeshIsVoxel, center));
+            }
+            return list;
+        }
+
         /// <summary>由 `SubsystemTerrain.Draw` 调用（紧跟现有 LOD 层之后）。</summary>
         public static void Draw(Camera camera) {
             DrawnLastFrame = 0;

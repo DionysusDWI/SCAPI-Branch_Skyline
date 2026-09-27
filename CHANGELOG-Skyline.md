@@ -7,6 +7,22 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+### 32³ 壳网格进 G-buffer（里程碑 1.4，**部分完成**）
+
+| 类别 | 内容 |
+|---|---|
+| **壳仓只读走访入口** | `SkylineCubeShellStore.CollectDrawableMeshes(Camera)` —— 判定与主画面 `Draw` **完全同一套**（带内 + 地形已释放 + 四邻齐全 + 上限），返回 `(VB, IB, IndexCount, IsVoxel, Center)`；**不修改任何状态**，离屏 pass / 光影包可安全调用。实测与主画面 `drawnLastFrame=165` **逐一对上** |
+| **G-buffer 画壳层** | `SkylineGBuffer.IncludeShells`（默认 true）：离屏 pass 在 LOD 之后用**主画面同一个 shader 与矩阵**画壳层（含同一个 `BandLift`）；`skyline.GBufferShells(bool)` 开关 |
+| **分层取证** | `skyline.GBufferMode(0\|1\|2)`：`0` 两层、`1` 只 LOD、**`2` 只壳层** —— 两层在屏幕大量重叠，只有模式 2 能量出壳层自己的贡献 |
+| **远平面扩展** | `SkylineGBuffer.ExtendFarPlane`：由透视矩阵反解 `n=M43/M33`、`f=M43/(1+M33)` 后按新 `f'` 重算 `M33/M43`（非标准透视原样返回） |
+| **NDC 探针（诊断）** | `shells.ndcProbe`：把前几个壳的中心用同一个矩阵投一遍，输出 `w` 与 `ndc` —— 用它把"在不在视锥里"从猜测变成数字 |
+
+**未完成（如实记）**：壳层在**离屏 pass 里一个像素都不光栅化**（模式 2 提交 165 个网格 / 93,594 索引，覆盖率 **0**），
+而同一批 VB/IB 在主画面里画得出来。已排除：几何位置（NDC 在 x/y 视锥内，`w≈783`）、
+被 LOD 深度遮挡（`BandLift` ±40 m + 清空 LOD 层都无变化）、主画面口径不一致（同一个 shader）。
+`ndcProbe` 显示 z 恰好压在远平面处，但把远平面 1000→1280 m 后无变化 → **远平面不是已证实的根因**。
+下一步取证手段（模式 2 改画 LOD 的 VB / 对比顶点声明与索引格式 / 给 `DrawIndexed` 加计数）已写在 `notes/140` §2。
+
 ## [v0.1.60] - 2026-09-27
 
 第七十个版本：**表面体素壳接生产路径 + 部分壳/壳滑动窗口 + 顶点属性接入面 + 发版回归清单**
