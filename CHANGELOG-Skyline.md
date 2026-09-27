@@ -126,6 +126,15 @@
   而**上一轮未开窗时**同长度行走是 **460→690（净增 230）**。释放**不写墓碑**，磁盘记录保留。
 * 现场：`cubes 406`、列顶壳 6.34 MiB、体素壳 6.34 MiB、网格 1.96 MiB、`fps 30.3`、内存 27.3/63.2 GB。
 
+**发版前回归清单（里程碑 4）**：新增 `heightlab/regression-skyline.py`（**只读**、`--only/--json/--timeout`、
+有 FAIL 则退出码非 0、`--json` 存每项的**原始返回**当证据）。覆盖 16 项：
+桥/默认值漂移门、`CheckChunkAddressing`、`CubeInvariantsCheck`、`CubeShellSurvey`（**断言必需字段存在**）、
+`CubeShellTierProbe`（档位单调）、`CubeShellMeshTiers`（玩家附近真立方体的四边形数单调不增且首档 >0）、
+`CubeShellPersistence`、`CubeShellColumn`（壳材质 == 地形材质）、`ShaderHookInfo`（五阶段 + 异常 0）、
+`GBufferCapture`（覆盖率 >0）、`LodManualStatus`、`FaceShadingSelfCheck`、`LodVertexInfo`、`LodAttrInfo`、
+以及 **`LodAttrSelfCheck` 标为 KNOWN**（今天实测失败：`mean 5.55 / max 51`；**不放宽阈值**，列入"已知未通过项"、
+发版说明必须写明）。本轮实跑：**PASS 15 / FAIL 0 / SKIP 0 / KNOWN 1**，退出码 0。
+
 ## [v0.1.59] - 2026-09-29
 
 第六十九个版本：**"体积感"第一步 —— 数清裸露在外的体素 + LOD 结构材质规则**（新目标 1.6，也是 1.3 的根）。
