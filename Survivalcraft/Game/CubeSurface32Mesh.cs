@@ -32,8 +32,16 @@ namespace Game {
 
         public int Cx0, Cy, Cz0;            // 组内第一个立方体的立方体坐标
         public int NX, NZ;                  // 立方体个数
+        /// <summary>
+        /// [v0.1.52] **最小体素 / 最小材质分片**的边长（米）。1 = 逐格（完整 32³ 精度）、
+        /// 2 = 16³、4 = 8³、8 = 4³、16 = 2³、32 = 整块。
+        /// 壳始终按 1 m 采集（16 KiB），**降精度是建网格时聚合出来的**，所以同一张壳可以按距离选不同档。
+        /// </summary>
+        public int Step = 1;
         public int Width => NX * Pad;
         public int Depth => NZ * Pad;
+        /// <summary>本档的网格边长（= 32/Step 格/立方体）。</summary>
+        public int GridSide => Pad / Step;
 
         // ---- 统计（判据都从这里出） ----
         public int NaiveQuads;              // 朴素壳口径（= Σ 壳格数），只为对照
@@ -70,11 +78,13 @@ namespace Game {
         /// 由一组壳（`shells[ix + iz*NX]`）建一层网格。
         /// `greedy` = 是否做 2D 贪心合并；`withBuffers` = 是否创建 GPU 缓冲（只算数时省内存）。
         /// </summary>
-        public static CubeSurfaceMesh32 Build(CubeSurface32[] shells, int nx, int nz, bool greedy, bool withBuffers) {
+        public static CubeSurfaceMesh32 Build(CubeSurface32[] shells, int nx, int nz, bool greedy, bool withBuffers, int step = 1) {
             Stopwatch watch = Stopwatch.StartNew();
+            step = step switch { <= 1 => 1, 2 => 2, 4 => 4, 8 => 8, 16 => 16, _ => Pad };
             CubeSurfaceMesh32 mesh = new() {
                 NX = nx,
                 NZ = nz,
+                Step = step,
                 MinSurfaceY = int.MaxValue,
                 MaxSurfaceY = int.MinValue
             };
@@ -95,30 +105,22 @@ namespace Game {
                 }
             }
 
-            int w = nx * Pad, d = nz * Pad;
+            int gside = Pad / step;                  // 每个立方体在本档下的网格边长
+            int w = nx * gside, d = nz * gside;
             int[] surfaceY = new int[w * d];        // 方块顶面 y（= 高度 + 1）；-1 = 空列
             int[] surfaceValue = new int[w * d];
             Array.Fill(surfaceY, -1);
-            for (int iz = 0; iz < nz; iz++) {
-                for (int ix = 0; ix < nx; ix++) {
-                    CubeSurface32 shell = shells[ix + iz * nx];
-                    if (shell == null) {
+            for (int gz = 0; gz < d; gz++) {
+                for (int gx = 0; gx < w; gx++) {
+                    int gi = gx + gz * w;
+                    if (!Aggregate(shells, nx, step, gx, gz, out int y, out int value)) {
                         continue;
                     }
-                    for (int lz = 0; lz < Pad; lz++) {
-                        for (int lx = 0; lx < Pad; lx++) {
-                            int si = lx + lz * Pad;
-                            if (shell.TopContents[si] == 0) {
-                                continue;
-                            }
-                            int gi = (ix * Pad + lx) + (iz * Pad + lz) * w;
-                            surfaceY[gi] = shell.TopHeight[si] + 1;
-                            surfaceValue[gi] = shell.TopContents[si];
-                            mesh.NonEmptyCells++;
-                            mesh.MinSurfaceY = Math.Min(mesh.MinSurfaceY, surfaceY[gi]);
-                            mesh.MaxSurfaceY = Math.Max(mesh.MaxSurfaceY, surfaceY[gi]);
-                        }
-                    }
+                    surfaceY[gi] = y;
+                    surfaceValue[gi] = value;
+                    mesh.NonEmptyCells++;
+                    mesh.MinSurfaceY = Math.Min(mesh.MinSurfaceY, y);
+                    mesh.MaxSurfaceY = Math.Max(mesh.MaxSurfaceY, y);
                 }
             }
             if (mesh.NonEmptyCells == 0) {
@@ -221,6 +223,105 @@ namespace Game {
             return mesh;
         }
 
+        // 聚合用的复用容器（content ≤ 1023 → 直接计数数组，免分配）
+        static readonly int[] m_contentCount = new int[1024];
+        static readonly List<int> m_contentTouched = new(64);
+        static readonly List<int> m_heightScratch = new(1024);
+
+        /// <summary>
+        /// 把一个 `step×step` 的方块块聚合成**一格**（这就是"降精度"的实现）：
+        ///   高度 = 该块内**主流材质**那些列的高度**中位**（与现有 LOD 的"材质取众数、高度取中位"同口径）；
+        ///   材质 = 该块内**出现次数最多**的壳格（含它的 light）。
+        /// 全空 → false。
+        /// </summary>
+        static bool Aggregate(CubeSurface32[] shells, int nx, int step, int gx, int gz,
+                              out int surfaceY, out int surfaceValue) {
+            int x0 = gx * step, z0 = gz * step;
+            m_contentTouched.Clear();
+            int bestContents = -1, bestCount = 0;
+            for (int dz = 0; dz < step; dz++) {
+                int zz = z0 + dz;
+                int iz = zz / Pad;
+                int lz = zz % Pad;
+                int ixBase = 0;
+                for (int dx = 0; dx < step; dx++) {
+                    int xx = x0 + dx;
+                    int ix = xx / Pad;
+                    if (ix != ixBase) {
+                        ixBase = ix;
+                    }
+                    CubeSurface32 shell = shells[ix + iz * nx];
+                    if (shell == null) {
+                        continue;
+                    }
+                    int value = shell.TopContents[xx % Pad + lz * Pad];
+                    if (value == 0) {
+                        continue;
+                    }
+                    int contents = value & 0x3FF;
+                    if (m_contentCount[contents] == 0) {
+                        m_contentTouched.Add(contents);
+                    }
+                    m_contentCount[contents]++;
+                    if (m_contentCount[contents] > bestCount) {
+                        bestCount = m_contentCount[contents];
+                        bestContents = contents;
+                    }
+                }
+            }
+            foreach (int c in m_contentTouched) {
+                m_contentCount[c] = 0;                       // 复位（只清动过的）
+            }
+            if (bestContents < 0) {
+                surfaceY = -1;
+                surfaceValue = 0;
+                return false;
+            }
+            // 取"主流材质"那些列的高度中位
+            m_heightScratch.Clear();
+            for (int dz = 0; dz < step; dz++) {
+                int zz = z0 + dz;
+                int iz = zz / Pad, lz = zz % Pad;
+                for (int dx = 0; dx < step; dx++) {
+                    int xx = x0 + dx;
+                    CubeSurface32 shell = shells[xx / Pad + iz * nx];
+                    if (shell == null) {
+                        continue;
+                    }
+                    int value = shell.TopContents[xx % Pad + lz * Pad];
+                    if (value != 0 && (value & 0x3FF) == bestContents) {
+                        m_heightScratch.Add(shell.TopHeight[xx % Pad + lz * Pad] + 1);
+                    }
+                }
+            }
+            if (m_heightScratch.Count == 0) {
+                surfaceY = -1;
+                surfaceValue = 0;
+                return false;
+            }
+            m_heightScratch.Sort();
+            surfaceY = m_heightScratch[m_heightScratch.Count / 2];
+            // 材质取该高度上的一格（contents + 它自己的 light）
+            for (int dz = 0; dz < step; dz++) {
+                int zz = z0 + dz;
+                int iz = zz / Pad, lz = zz % Pad;
+                for (int dx = 0; dx < step; dx++) {
+                    int xx = x0 + dx;
+                    CubeSurface32 shell = shells[xx / Pad + iz * nx];
+                    if (shell == null) {
+                        continue;
+                    }
+                    int si = xx % Pad + lz * Pad;
+                    if (shell.TopContents[si] != 0 && (shell.TopContents[si] & 0x3FF) == bestContents) {
+                        surfaceValue = shell.TopContents[si];
+                        return true;
+                    }
+                }
+            }
+            surfaceValue = bestContents;
+            return true;
+        }
+
         /// <summary>
         /// 沿一条边找"连续等高邻居"，与当前顶面高度有落差的段落生成裙边。
         /// `along` = 沿边走的起点（X 或 Z），`len` = 边长，`neighbor` = 邻居行/列坐标（越界 = 组外）。
@@ -275,8 +376,8 @@ namespace Game {
             float u0 = (slot % slotCount) / (float)slotCount;
             float v0 = (slot / slotCount) / (float)slotCount;
             float du = 1f / slotCount;
-            float x0 = (Cx0 * Pad + q.X), z0 = (Cz0 * Pad + q.Z);
-            float x1 = x0 + q.W, z1 = z0 + q.D;
+            float x0 = Cx0 * Pad + q.X * Step, z0 = Cz0 * Pad + q.Z * Step;
+            float x1 = x0 + q.W * Step, z1 = z0 + q.D * Step;
             float y = q.Y;
             int v = Reserve(4);
             BlockGeometryGenerator.SetupVertex(x0, y, z0, color, u0, v0, ref m_vertexData[v]);
@@ -298,8 +399,8 @@ namespace Game {
             int v = Reserve(4);
             switch (wall.Side) {
                 case 0: {                                                            // +Z 面
-                    float x0 = Cx0 * Pad + wall.X, z1 = Cz0 * Pad + wall.Z;
-                    float x1 = x0 + wall.Len;
+                    float x0 = Cx0 * Pad + wall.X * Step, z1 = Cz0 * Pad + wall.Z * Step;
+                    float x1 = x0 + wall.Len * Step;
                     BlockGeometryGenerator.SetupVertex(x0, yHigh, z1, color, u0, v0, ref m_vertexData[v]);
                     BlockGeometryGenerator.SetupVertex(x1, yHigh, z1, color, u0 + du, v0, ref m_vertexData[v + 1]);
                     BlockGeometryGenerator.SetupVertex(x1, yLow, z1, color, u0 + du, v0 + du, ref m_vertexData[v + 2]);
@@ -307,8 +408,8 @@ namespace Game {
                     break;
                 }
                 case 1: {                                                            // -Z 面
-                    float x0 = Cx0 * Pad + wall.X, z0 = Cz0 * Pad + wall.Z;
-                    float x1 = x0 + wall.Len;
+                    float x0 = Cx0 * Pad + wall.X * Step, z0 = Cz0 * Pad + wall.Z * Step;
+                    float x1 = x0 + wall.Len * Step;
                     BlockGeometryGenerator.SetupVertex(x1, yHigh, z0, color, u0, v0, ref m_vertexData[v]);
                     BlockGeometryGenerator.SetupVertex(x0, yHigh, z0, color, u0 + du, v0, ref m_vertexData[v + 1]);
                     BlockGeometryGenerator.SetupVertex(x0, yLow, z0, color, u0 + du, v0 + du, ref m_vertexData[v + 2]);
@@ -316,8 +417,8 @@ namespace Game {
                     break;
                 }
                 case 2: {                                                            // +X 面
-                    float x1 = Cx0 * Pad + wall.X, z0 = Cz0 * Pad + wall.Z;
-                    float z1 = z0 + wall.Len;
+                    float x1 = Cx0 * Pad + wall.X * Step, z0 = Cz0 * Pad + wall.Z * Step;
+                    float z1 = z0 + wall.Len * Step;
                     BlockGeometryGenerator.SetupVertex(x1, yHigh, z0, color, u0, v0, ref m_vertexData[v]);
                     BlockGeometryGenerator.SetupVertex(x1, yHigh, z1, color, u0 + du, v0, ref m_vertexData[v + 1]);
                     BlockGeometryGenerator.SetupVertex(x1, yLow, z1, color, u0 + du, v0 + du, ref m_vertexData[v + 2]);
@@ -325,8 +426,8 @@ namespace Game {
                     break;
                 }
                 default: {                                                           // -X 面
-                    float x0 = Cx0 * Pad + wall.X, z0 = Cz0 * Pad + wall.Z;
-                    float z1 = z0 + wall.Len;
+                    float x0 = Cx0 * Pad + wall.X * Step, z0 = Cz0 * Pad + wall.Z * Step;
+                    float z1 = z0 + wall.Len * Step;
                     BlockGeometryGenerator.SetupVertex(x0, yHigh, z1, color, u0, v0, ref m_vertexData[v]);
                     BlockGeometryGenerator.SetupVertex(x0, yHigh, z0, color, u0 + du, v0, ref m_vertexData[v + 1]);
                     BlockGeometryGenerator.SetupVertex(x0, yLow, z0, color, u0 + du, v0 + du, ref m_vertexData[v + 2]);
@@ -408,12 +509,16 @@ namespace Game {
                 ["cubes"] = new JsonArray(NX, NZ),
                 ["cubeOrigin"] = new JsonArray(Cx0, Cy, Cz0),
                 ["spanMetres"] = new JsonArray(Width, Depth),
+                ["step"] = Step,                               // 1=32³ 完整精度 … 32=整块
+                ["voxelMetres"] = Step,
+                ["gridSide"] = GridSide,
                 ["nonEmptyCells"] = NonEmptyCells,
                 ["naiveQuads"] = NaiveQuads,
                 ["topQuads"] = TopQuads,
                 ["wallQuads"] = WallQuads,
                 ["quads"] = Quads,
                 ["coveredCells"] = CoveredCells,
+                ["coveredAreaM2"] = CoveredCells * Step * Step,
                 ["mergeViolations"] = MergeViolations,
                 ["vertices"] = Vertices,
                 ["indices"] = IndexCount,

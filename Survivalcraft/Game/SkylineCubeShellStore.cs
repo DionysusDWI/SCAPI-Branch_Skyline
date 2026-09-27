@@ -43,8 +43,20 @@ namespace Game {
         public static int InlineHarvestPerCall { get; set; } = 64;
         /// <summary>每 Tick 建网格的时间预算（毫秒）。</summary>
         public static float MeshBudgetMs { get; set; } = 4f;
-        /// <summary>交接带宽度（米）：从 `视距 - BandInset` 到 `视距 + BandMetres`。</summary>
-        public static float BandMetres { get; set; } = 96f;
+        /// <summary>
+        /// [v0.1.52] **分距离精度阶梯**（毫秒级的"最小体素 / 最小材质分片"边长）。
+        /// 语义：`rel = 距离 − 视距`；`rel ≤ TierMetres[0]` → 1 m（完整 32³），
+        /// 再往下依次 2 m（16³）、4 m（8³）、8 m（4³）、16 m（2³）、最后 32 m（**整块**）。
+        /// 壳本身**始终按 1 m 采集**（16 KiB 不变），降精度在**建网格时聚合**出来
+        /// （高度取主流材质列的中位、材质取众数 —— 与现有 LOD 同口径），所以同一张壳可以按距离换档。
+        /// </summary>
+        public static float[] TierMetres { get; set; } = [48f, 96f, 192f, 384f, 768f];
+
+        /// <summary>
+        /// 交接带外边界（米，相对视距）。**与 `TierMetres` 解耦**：档位表只决定"哪一档"，
+        /// 带宽独立（否则把档位表调小会把绘制范围一起缩没 —— v0.1.52 实测踩过）。
+        /// </summary>
+        public static float BandMetres { get; set; } = 768f;
         public static float BandInset { get; set; } = 8f;
         /// <summary>带内抬高（米）：让真高在带内压过 16 m 平滑面（0 = 不抬，用于 A/B）。</summary>
         public static float BandLift { get; set; } = 0.35f;
@@ -52,6 +64,11 @@ namespace Game {
         public static int MaxDrawPerFrame { get; set; } = 192;
         /// <summary>网格口径：true = 贪心合并（四边形最少）、false = 逐格（纹理精确）。</summary>
         public static bool UseMergedMesh { get; set; } = true;
+
+        /// <summary>[v0.1.52] 网格滑动窗口：距离超过 `BandMetres × MeshReleaseFactor` 或地形已加载时**释放网格**（壳留着）。</summary>
+        public static float MeshReleaseFactor { get; set; } = 1f;
+        /// <summary>[v0.1.52] 网格滑动窗口开关（关掉 = 网格一直常驻，相当于 v0.1.51 的行为）。</summary>
+        public static bool MeshSlidingWindow { get; set; } = true;
         /// <summary>壳接管后让现有 LOD 层让位（默认开；false = 两层叠着画，用于 A/B 看穿插）。</summary>
         public static bool RestrictLod { get; set; } = true;
         /// <summary>
@@ -67,6 +84,7 @@ namespace Game {
         sealed class Entry {
             public CubeSurface32 Shell;
             public CubeSurfaceMesh32 Mesh;
+            public int MeshStep;                 // [v0.1.52] 当前网格是按哪一档建的
             public double LastUsed;
         }
 
@@ -85,6 +103,10 @@ namespace Game {
         public static long EvictedTotal { get; private set; }
         public static long MeshedTotal { get; private set; }
         public static long SkippedOverBudget { get; private set; }
+        public static long MeshRebuiltTotal { get; private set; }
+        public static long MeshReleasedTotal { get; private set; }
+        public static int MeshResident { get; private set; }
+        public static string StepHistogram { get; private set; } = "";
         public static long DrawnLastFrame { get; private set; }
         public static long SkippedBecauseLoaded { get; private set; }
         public static long SkippedIsolated { get; private set; }
@@ -101,6 +123,27 @@ namespace Game {
             }
             return m_entries.ContainsKey((cx - 1, cy, cz)) && m_entries.ContainsKey((cx + 1, cy, cz))
                 && m_entries.ContainsKey((cx, cy, cz - 1)) && m_entries.ContainsKey((cx, cy, cz + 1));
+        }
+
+        /// <summary>[v0.1.52] 距离（米）→ 本档的**最小体素边长**（1/2/4/8/16/32 m）。</summary>
+        public static int StepForDistance(float distance, float viewRange) {
+            float[] tiers = TierMetres;
+            float rel = distance - viewRange;
+            int step = 1;
+            for (int i = 0; i < tiers.Length; i++) {
+                if (rel <= tiers[i]) {
+                    return step;
+                }
+                step *= 2;
+            }
+            return Math.Min(step, CubeSize);
+        }
+
+        static float CubeDistance(int cx, int cz, in Vector3 camera) {
+            float wx = cx * CubeSize + CubeSize * 0.5f;
+            float wz = cz * CubeSize + CubeSize * 0.5f;
+            float dx = wx - camera.X, dz = wz - camera.Z;
+            return MathF.Sqrt(dx * dx + dz * dz);
         }
 
         /// <summary>
@@ -259,28 +302,67 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.52] **按距离分档建网格 + 滑动窗口**（每 Tick 受 `MeshBudgetMs` 限制）：
+        ///   * 每立方体算出它该用的档（`StepForDistance`），与当前网格档不同就**重建**；
+        ///   * 地形已加载、或距离超过 `BandMetres × MeshReleaseFactor` 的立方体**释放网格**（壳留着）；
+        ///   * 于是内存占用随"玩家附近需要画多少"滑动，而不是一直常驻 4096 份网格。
+        /// </summary>
         static void BuildMeshes() {
             Stopwatch watch = Stopwatch.StartNew();
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            float releaseRange = viewRange + BandMetres * MathF.Max(MeshReleaseFactor, 1f);
+            Terrain terrain = Terrain;
             MeshVertexBytes = 0;
+            MeshResident = 0;
+            int s1 = 0, s2 = 0, s4 = 0, s8 = 0, s16 = 0, s32 = 0;
+            bool budgetHit = false;
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
-                if (kv.Value.Mesh != null) {
-                    MeshVertexBytes += kv.Value.Mesh.VertexBytes;
-                }
-            }
-            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
-                if (watch.Elapsed.TotalMilliseconds > MeshBudgetMs) {
-                    return;
-                }
                 Entry entry = kv.Value;
-                if (entry.Mesh != null) {
-                    continue;
+                float dist = CubeDistance(kv.Key.Cx, kv.Key.Cz, camera);
+                if (MeshSlidingWindow) {
+                    bool terrainLoaded = terrain != null
+                        && (terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2) != null
+                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2) != null
+                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2 + 1) != null
+                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2 + 1) != null);
+                    if (dist > releaseRange || terrainLoaded) {
+                        if (entry.Mesh != null) {
+                            entry.Mesh.Dispose();
+                            entry.Mesh = null;
+                            MeshReleasedTotal++;
+                        }
+                        continue;
+                    }
                 }
-                CubeSurface32[] one = [entry.Shell];
-                CubeSurfaceMesh32 mesh = CubeSurfaceMesh32.Build(one, 1, 1, UseMergedMesh, true);
-                entry.Mesh = mesh;
-                MeshVertexBytes += mesh.VertexBytes;
-                MeshedTotal++;
+                int step = StepForDistance(dist, viewRange);
+                if (!budgetHit && watch.Elapsed.TotalMilliseconds > MeshBudgetMs) {
+                    budgetHit = true;                    // 本 Tick 预算用完：已有的继续统计，新的下帧再说
+                }
+                if (!budgetHit && (entry.Mesh == null || entry.MeshStep != step)) {
+                    entry.Mesh?.Dispose();
+                    CubeSurface32[] one = [entry.Shell];
+                    entry.Mesh = CubeSurfaceMesh32.Build(one, 1, 1, UseMergedMesh, true, step);
+                    entry.MeshStep = step;
+                    MeshRebuiltTotal++;
+                    MeshedTotal++;
+                }
+                if (entry.Mesh != null) {
+                    MeshVertexBytes += entry.Mesh.VertexBytes;
+                    MeshResident++;
+                    switch (entry.MeshStep) {
+                        case 1: s1++; break;
+                        case 2: s2++; break;
+                        case 4: s4++; break;
+                        case 8: s8++; break;
+                        case 16: s16++; break;
+                        default: s32++; break;
+                    }
+                }
             }
+            StepHistogram = $"step1={s1} step2={s2} step4={s4} step8={s8} step16={s16} step32={s32}";
             LastMeshMs = watch.Elapsed.TotalMilliseconds;
         }
 
@@ -358,6 +440,84 @@ namespace Game {
             MeshVertexBytes = 0;
         }
 
+        /// <summary>[v0.1.52] 逐条清单（最多 `limit` 条）：立方体坐标、距相机、本档体素边长、是否有网格、四边形数。</summary>
+        public static string List(int limit) {
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            JsonArray items = [];
+            int n = 0;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                if (n >= Math.Max(1, limit)) {
+                    break;
+                }
+                float dist = CubeDistance(kv.Key.Cx, kv.Key.Cz, camera);
+                items.Add(new JsonObject {
+                    ["cube"] = new JsonArray(kv.Key.Cx, kv.Key.Cy, kv.Key.Cz),
+                    ["distanceMetres"] = Math.Round(dist, 1),
+                    ["stepMetres"] = StepForDistance(dist, viewRange),
+                    ["meshStep"] = kv.Value.MeshStep,
+                    ["hasMesh"] = kv.Value.Mesh != null,
+                    ["quads"] = kv.Value.Mesh?.Quads ?? 0
+                });
+                n++;
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["viewRange"] = viewRange,
+                ["total"] = m_entries.Count,
+                ["listed"] = n,
+                ["items"] = items
+            }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.52] **同一张壳在各档下的网格代价表**（判据）：取一个立方体，按 step=1/2/4/8/16/32 各建一次网格，
+        /// 报四边形/顶点/字节/耗时。这是"精度 ↔ 代价"最直接的证据（不需要跑很远）。
+        /// </summary>
+        public static string MeshTiers(int cx, int cy, int cz) {
+            JsonObject root = new();
+            try {
+                Terrain terrain = Terrain;
+                if (terrain == null) {
+                    root["ok"] = false;
+                    root["err"] = "no terrain";
+                    return root.ToJsonString();
+                }
+                CubeSurface32 shell = CubeSurface32.Extract(terrain, cx, cy, cz);
+                root["ok"] = true;
+                root["cube"] = new JsonArray(cx, cy, cz);
+                root["shellBytes"] = ShellBytesPerCube;
+                root["shellQuadCountNaive"] = shell.QuadCount;
+                JsonArray rows = [];
+                foreach (int step in new[] { 1, 2, 4, 8, 16, 32 }) {
+                    Stopwatch watch = Stopwatch.StartNew();
+                    CubeSurfaceMesh32 mesh = CubeSurfaceMesh32.Build([shell], 1, 1, true, false, step);
+                    watch.Stop();
+                    rows.Add(new JsonObject {
+                        ["stepMetres"] = step,
+                        ["voxelCubeSide"] = CubeSize / step,
+                        ["gridSide"] = mesh.GridSide,
+                        ["quads"] = mesh.Quads,
+                        ["topQuads"] = mesh.TopQuads,
+                        ["wallQuads"] = mesh.WallQuads,
+                        ["coveredCells"] = mesh.CoveredCells,
+                        ["nonEmptyCells"] = mesh.NonEmptyCells,
+                        ["mergeViolations"] = mesh.MergeViolations,
+                        ["buildMs"] = Math.Round(mesh.BuildMs, 3),
+                        ["wallMs"] = Math.Round(watch.Elapsed.TotalMilliseconds, 3)
+                    });
+                }
+                root["tiers"] = rows;
+                root["note"] = "四边形/耗时随 step 增大按 ~1/step² 下降（聚合发生在建网格时，壳本身不变）";
+            }
+            catch (Exception e) {
+                root["ok"] = false;
+                root["err"] = e.Message;
+            }
+            return root.ToJsonString();
+        }
+
         public static string Survey() {
             return new JsonObject {
                 ["ok"] = true,
@@ -370,6 +530,10 @@ namespace Game {
                 ["shellMiB"] = Math.Round(ShellBytes / 1048576.0, 2),
                 ["meshVertexBytes"] = MeshVertexBytes,
                 ["meshMiB"] = Math.Round(MeshVertexBytes / 1048576.0, 2),
+                ["meshResident"] = MeshResident,
+                ["meshRebuiltTotal"] = MeshRebuiltTotal,
+                ["meshReleasedTotal"] = MeshReleasedTotal,
+                ["stepHistogram"] = StepHistogram,
                 ["meshedCubes"] = MeshedTotal,
                 ["harvestedTotal"] = HarvestedTotal,
                 ["evictedTotal"] = EvictedTotal,
@@ -382,6 +546,9 @@ namespace Game {
                 ["lastHarvestMs"] = Math.Round(LastHarvestMs, 3),
                 ["lastMeshMs"] = Math.Round(LastMeshMs, 3),
                 ["bandMetres"] = BandMetres,
+                ["tierMetres"] = new JsonArray([.. TierMetres]),
+                ["slidingWindow"] = MeshSlidingWindow,
+                ["meshReleaseFactor"] = MeshReleaseFactor,
                 ["bandInset"] = BandInset,
                 ["bandLift"] = BandLift,
                 ["greedy"] = UseMergedMesh,
@@ -426,6 +593,58 @@ namespace Game {
         public static string CubeShellRequireNeighbors(bool require) {
             SkylineCubeShellStore.RequireNeighbors = require;
             SkylineLod.RequestRebuild();
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>[v0.1.52] 判据：给一串"相对视距的距离（米）"，报各自落在**哪一档**（最小体素边长）。</summary>
+        public static string CubeShellTierProbe(string relList) {
+            float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            JsonArray items = [];
+            foreach (string part in (relList ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries)) {
+                if (float.TryParse(part.Trim(), out float rel)) {
+                    float distance = viewRange + rel;
+                    items.Add(new JsonObject {
+                        ["relMetres"] = rel,
+                        ["distanceMetres"] = distance,
+                        ["stepMetres"] = SkylineCubeShellStore.StepForDistance(distance, viewRange),
+                        ["voxelCube"] = new JsonObject {
+                            ["side"] = CubeSurface32.Size / SkylineCubeShellStore.StepForDistance(distance, viewRange)
+                        }
+                    });
+                }
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["viewRange"] = viewRange,
+                ["tiersRelToView"] = new JsonArray([.. SkylineCubeShellStore.TierMetres]),
+                ["probes"] = items,
+                ["note"] = "stepMetres = 最小体素 / 最小材质分片的边长；1=完整 32³、2=16³、4=8³、8=4³、16=2³、32=整块"
+            }.ToJsonString();
+        }
+
+        /// <summary>[v0.1.52] 桥：逐条清单（见 `SkylineCubeShellStore.List`）。</summary>
+        public static string CubeShellList(int limit) => SkylineCubeShellStore.List(limit);
+
+        /// <summary>[v0.1.52] 桥：同一张壳在各档下的网格代价表。</summary>
+        public static string CubeShellMeshTiers(int cx, int cy, int cz) =>
+            SkylineCubeShellStore.MeshTiers(cx, cy, cz);
+
+        /// <summary>
+        /// [v0.1.52] 设档位表（相对视距的米数，最多 5 段，逗号分隔）。
+        /// 默认 `48,96,192,384,768` → step 1/2/4/8/16/32。传 `0,0,0,0,0` 可强制全部"整块"（取证用）。
+        /// </summary>
+        public static string CubeShellTiers(string list) {
+            List<float> tiers = [];
+            foreach (string part in (list ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries)) {
+                if (float.TryParse(part.Trim(), out float v) && v >= 0f) {
+                    tiers.Add(v);
+                }
+            }
+            if (tiers.Count == 0) {
+                tiers = [48f, 96f, 192f, 384f, 768f];
+            }
+            SkylineCubeShellStore.TierMetres = [.. tiers];
             return SkylineCubeShellStore.Survey();
         }
     }

@@ -1118,7 +1118,8 @@ namespace Game {
 
         // ---------------- 渲染 ----------------
 
-        static Vector3 CameraViewPosition() {
+        /// <summary>当前相机视点（壳仓的距离分档也用它，保证两边同一基准）。</summary>
+        public static Vector3 CameraViewPosition() {
             SubsystemPlayers players = GameManager.Project?.FindSubsystem<SubsystemPlayers>(true);
             ComponentPlayer player = players != null && players.ComponentPlayers.Count > 0
                 ? players.ComponentPlayers[0] : null;
