@@ -475,6 +475,8 @@ namespace Game {
                     TerrainUpdater.PrepareForDrawing(camera);
                     TerrainRenderer.PrepareForDrawing(camera);
                     TerrainRenderer.DrawOpaque(camera);
+                    // [v0.1.0] 超视距 LOD 层：在视距之外补一层粗网格（见 Game/SkylineLod.cs）
+                    SkylineLod.Draw(camera);
                     TerrainRenderer.DrawAlphaTested(camera);
                 }
                 else if (drawOrder == m_drawOrders[1]) {

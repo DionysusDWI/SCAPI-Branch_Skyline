@@ -48,7 +48,7 @@ namespace Game {
         public static string Describe() =>
             $"Skyline build=[{BuildMinY},{BuildMaxY}] survival=[{SurvivalMinY},{SurvivalMaxY}] freeView={FreeViewMode} "
             + $"residency={ChunkResidencyMode} regions={Regions.Count} v={m_residencyVersion} "
-            + SkylineFurniture.Describe();
+            + SkylineFurniture.Describe() + " " + SkylineRender.Describe() + " " + SkylineLod.Describe();
 
         // ==========================================================================================
         // v0.0.9：高复杂度家具的几何预算（实现在 Game/SkylineFurniture.cs，这里只做转发，
@@ -70,9 +70,72 @@ namespace Game {
             set => SkylineFurniture.FallbackBox = value;
         }
 
+        /// <summary>A/B 调试：强制所有家具渲染成方盒占位（默认关）。</summary>
+        public static bool FurnitureForceBox {
+            get => SkylineFurniture.ForceBox;
+            set => SkylineFurniture.ForceBox = value;
+        }
+
+        /// <summary>A/B 调试：只把指定设计索引的家具强制成方盒（-1 = 关）。</summary>
+        public static int FurnitureForceBoxDesign {
+            get => SkylineFurniture.ForceBoxDesign;
+            set => SkylineFurniture.ForceBoxDesign = value;
+        }
+
         public static string FurnitureDescribe() => SkylineFurniture.Describe();
 
         public static void FurnitureResetStats() => SkylineFurniture.ResetStats();
+
+        // ==========================================================================================
+        // v0.0.9 探索：三层球形渲染原型（实现在 Game/SkylineRender.cs）
+        //   * RenderEnabled 默认 **false**：关着时只有只读统计，渲染逐位等于现状
+        //   * 三层球 = 占位球（MBD/占替距） + 视觉球（视距，二维→三维） + 加载球（被波及的区块都要加载）
+        // ==========================================================================================
+
+        /// <summary>是否真的按三层球把远处被埋藏家具替换成占位方盒（默认关）。</summary>
+        public static bool RenderEnabled {
+            get => SkylineRender.Enabled;
+            set => SkylineRender.Enabled = value;
+        }
+
+        /// <summary>只读勘察：三层球在当前相机下的规模与占位球能省多少顶点（不改变渲染）。</summary>
+        public static string RenderSurvey() => SkylineRender.Survey();
+
+        public static string RenderSurvey(int radiusColumns) => SkylineRender.Survey(radiusColumns);
+
+        public static string RenderDescribe() => SkylineRender.Describe();
+
+        /// <summary>每个 tick 允许的 LOD 区块重建数（默认 1，防跨档重建风暴）。</summary>
+        public static int RenderMaxRebakesPerTick {
+            get => SkylineRender.MaxRebakesPerTick;
+            set => SkylineRender.MaxRebakesPerTick = value;
+        }
+
+        public static void RenderResetStats() => SkylineRender.ResetStats();
+
+        public static void RenderResetChunkLod() => SkylineRender.ResetChunkLod();
+
+        // ==========================================================================================
+        // v0.1.0：超视距 LOD 层（实现在 Game/SkylineLod.cs，学习 Distant Horizons 的"加载即采样 + 持久化 + 视距外渲染"）
+        // ==========================================================================================
+
+        public static bool LodEnabled {
+            get => SkylineLod.Enabled;
+            set => SkylineLod.Enabled = value;
+        }
+
+        public static float LodRadiusMetres {
+            get => SkylineLod.RadiusMetres;
+            set => SkylineLod.RadiusMetres = value;
+        }
+
+        public static string LodDescribe() => SkylineLod.Describe();
+
+        public static string LodSurvey() => SkylineLod.Survey();
+
+        public static void LodReset() => SkylineLod.Reset();
+
+        public static void LodSaveNow() => SkylineLod.Save();
 
         // ==========================================================================================
         // v0.0.5：区块列驻留（Chunk Residency）
@@ -238,6 +301,10 @@ namespace Game {
 
         /// <summary>临时驻留区是否已过期（由 TerrainUpdater 每帧调用，开销极小）。</summary>
         public static void Tick() {
+            // [v0.1.0] 家具 LOD 的动态档位检查（内部自带限频，见 SkylineRender.Tick）
+            SkylineRender.Tick();
+            // [v0.1.0] 超视距 LOD：采集粗网格 + 定时重建网格/落盘（见 SkylineLod.Tick）
+            SkylineLod.Tick();
             if (Regions.Count == 0) {
                 return;
             }

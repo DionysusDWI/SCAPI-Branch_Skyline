@@ -3,6 +3,49 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.0] - 2026-09-27
+
+第十个版本、**第二个小版本号**：三层渲染路线的第一轮完整落地——**多层家具 LOD（占位球）实装到渲染**
+与**超视距 LOD（Distant Horizons 式加载即采样）**，外加 40 GB 硬指标验证与 32³ 决策报告。
+本轮用户里程碑（原文）："①多层渲染优化 ②32³ 区块加载（失败则写不可行报告）③超视距 LOD
+④单区块高复杂度随机家具总内存 ≤40 GB"，并重申物理内存红线 56 GB。
+
+**本版相对 v0.0.9 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **实装 A** | **多层家具 LOD**（新增 `Game/SkylineRender.cs`）：把 v0.0.9 实测的占替距曲线 `d_box(E)=39.6·E^0.300`（≈投影 ≤70 px²，E=暴露度）**实装到渲染决策**——超出 `d_box` 的家具实例渲染为**主材质方盒**（`SkylineFurniture.DominantMaterial`），并按区块做 Full/Mixed/Boxed 三态状态机（5% 迟滞 + 每 tick 至多 1 次重建 + 分布因子 1.4 覆盖"多窗口暴露"）。`RenderEnabled` 默认 true，`Survey/Describe` 保持只读统计能力 |
+| **修复 A2** | **多层 LOD 的高空失效**：区块状态机原来只用水平距离——"水平 12 m / 垂直 ~800 m"的家具区块被判 Full（全精度），高空场景下 LOD 完全失效（实测 full=35,736）。现在用区块中心列顶部高度补竖直分量（地面场景行为不变）。双向对照：高空增量 **0 full / 8,210 box**；近处增量 **20,478 full / 4,143 box**（被遮挡件按曲线占位） |
+| **实装 B** | **超视距 LOD**（新增 `Game/SkylineLod.cs`，接线 `SubsystemTerrain.Draw` + `SkylineRuntime.Tick`）：加载即采样（每 tick 2 列的 16×16 粗网格：最低顶面高度+方块值）→ 每 60 s 落盘世界目录 `SkylineLod.bin` → 半径 1024 m 内生成低模（顶面四边形 + 双面裙边墙），用地形不透明 shader 与自己的雾带 `[0.55R, R]` 渲染；`LodEnabled/LodRadiusMetres/LodDescribe/LodSurvey/LodReset/LodSaveNow` 经 `SkylineRuntime` 暴露 |
+| **修复 B2** | **超视距 LOD 的两处实证缺陷**：①**视距内覆盖**——原来把 256 m 内的 806 个单元也画出来，16 m 粗平面盖住真实几何（on/off 差异 50,903 px、最大斑块 40,780 px）；修复为跳过 `≤视距+8 m` 的单元后降到 **3 px / 0**。②**采样列取树冠导致浮空平板**——采集改为扫全 256 列取最低顶面，并给相邻单元高度差加双面裙边；修复后同观察点 on/off 差异 15,954 px、最大斑块 13,618、噪声 0（地形连续成片） |
+| **修复 B3** | **跨世界数据污染**（跨世界测试发现）：`SkylineLod.Load()` 原来在"目标世界没有 `SkylineLod.bin`"时不 `m_cells.Clear()`，且 `FilePath()` 只在 Save（≤60 s）里调用——切世界会把上一个世界的 LOD 数据带过去、并写进新世界的 bin（实测 World 的 bin 被污染成 1,873 个 AgentLab 坐标）。修复：`Tick()` 每帧先调 `FilePath()`（换世界立即 Load）+ `Load()` 无条件清空。复测：切到 World 后 `cells=402` 全为新采（无残留）；切回 AgentLab **立即**恢复 `loaded 1193 cells` |
+| **验证 C** | **40 GB 硬指标**：单区块 16³ 随机拼配填满 **4096 件**高复杂度家具（8 种设计，每种非空体素 >10,000，每层随机组合、32 种摆放朝向）→ **物理内存峰值 21.9~26.1 GB**（两次会话实测，随当时已加载区块/LOD 数据量浮动；红线 56 GB）、进程 WS 4.9~8.9 GB、GPU 几何 116→167 MB、fps 最低 28.6、写入 458 ms |
+| **报告 D** | `notes/67-32³决策报告.md`：**本轮不实装 32³**（10 小时无人值守 + 单实例 + 不可破坏存档的约束下风险收益比不划算），给出竖直分节（16×16×256 子列）的细化设计、验收判据与护栏；`notes/66-超视距LOD.md`（机制+两修复+正反面证据+持久化）；`notes/68-dt冻结陷阱与API直连控制.md`（`BasicGameTimeFactor=0` 会让所有按 dt 缩放的行为停摆——移动/视角/物理，表现为"输入注入失效"；并给出 API 直连控制法） |
+
+### Added
+
+* `Game/SkylineRender.cs`（多层家具 LOD + 三层球只读统计）；`Game/SkylineLod.cs`（超视距 LOD）。
+* `SubsystemTerrain.Draw` 追加远景层绘制；`SkylineRuntime.Tick` 驱动采集/重建/落盘。
+* `heightlab/skyline-v010-lod-verify.py`（pre/post/collect/post2-4/persist/probe 七阶段验证）、
+  `heightlab/skyline-v010-lod-test.py`（4096 件高复杂度家具填充与内存测量）、`heightlab/skyline-v010-soak.py`（长时混合 soak）。
+
+### Verified（Windows / 世界 AgentLab / RTX 4060 8GB）
+
+* **超视距 LOD 正面证据**：驻留加载 316–583 m 地带（136 列 ≈272 MB）→ 采集 → 释放后，
+  从 y=200 高空观察点做 on/off 对照：关=LOD 只有雾、开=出现低模地形，差异 15,954 px（噪声 0）。
+* **持久化**：两次重启验证 `SkylineLod.bin` 恢复（`loaded 1050 cells` / `loaded 989 cells`，磁盘↔内存一致）。
+* **多层 LOD 双向对照**见上表修复 A2；`RenderDescribe` 常驻可读（full/box/rebakes/trackedChunks）。
+* **40 GB 指标**、几何/帧率/内存数据见验证 C。
+
+### Known issues
+
+* **三层球的"视觉球/加载球"仍是只读统计**（`notes/64 §7.3`）：椭球判据（`InsideVisualSphere`）
+  尚未接入实际加载/渲染裁剪；"短球内全渲染 / 短-全球间占位 / 全球外 LOD"三档中，占位与 LOD
+  已实装，视觉球裁剪留待 v0.1.1。
+* **32³ 未实装**（决策报告见 `notes/67`）；竖直分节设计与验收判据已就绪。
+* 超视距 LOD 的已知限制（`notes/66 §5`）：16 m 单点高度采样、无多级 LOD 树、未与家具占位球联动、
+  高空观察时被高度雾涂淡、采集依赖"加载过"的区域。
+
 ## [v0.0.9] - 2026-09-27
 
 第九个版本：**两处"尺度常量没同步"的修复 + 高复杂度家具的安全阀 + 一轮打崩级的压力测试**。

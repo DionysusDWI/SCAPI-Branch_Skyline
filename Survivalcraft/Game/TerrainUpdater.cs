@@ -1175,6 +1175,8 @@ namespace Game {
         public virtual void GenerateChunkVertices(TerrainChunk chunk, int stage) {
             // [v0.0.9] 家具几何预算：以"区块 + 阶段"为窗口重新计数（见 Game/SkylineFurniture.cs）
             SkylineFurniture.BeginStage($"{chunk.Coords.X},{chunk.Coords.Y}/s{stage}");
+            // [v0.1.0] 家具 LOD：stage 0 时重置该区块的实例统计（见 Game/SkylineRender.cs）
+            SkylineRender.BeginChunkStage(chunk, stage);
             m_subsystemTerrain.BlockGeometryGenerator.ResetCache();
             TerrainChunk chunkAtCoords1 = m_terrain.GetChunkAtCoords(chunk.Coords.X - 1, chunk.Coords.Y - 1);
             TerrainChunk chunkAtCoords2 = m_terrain.GetChunkAtCoords(chunk.Coords.X, chunk.Coords.Y - 1);

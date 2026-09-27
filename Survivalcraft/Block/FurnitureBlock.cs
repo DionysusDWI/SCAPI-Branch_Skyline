@@ -32,9 +32,21 @@ namespace Game {
             // [v0.0.9] 高复杂度家具的几何预算守卫：单个 16³ 区块里 N 件家具 = N × 单件顶点数（乘法），
             // 实测一件分辨率 28 的棋盘家具 ≈263k 顶点 / 6.5MB 显存，塞满会外推 26GB 显存 + 86GB 内存。
             // 超预算的实例退化成方盒（可见占位）或跳过，见 Game/SkylineFurniture.cs。
-            if (!SkylineFurniture.TryReserve(design)) {
+            if (SkylineFurniture.ForceBox
+                || designIndex == SkylineFurniture.ForceBoxDesign
+                || SkylineRender.ShouldBoxInstance(designIndex, x, y, z)
+                || !SkylineFurniture.TryReserve(design)) {
                 if (SkylineFurniture.FallbackBox) {
-                    generator.GenerateCubeVertices(this, value, x, y, z, Color.White, geometry.OpaqueSubsetsByFace);
+                    // 占位盒取**设计主材质**（v0.0.9 实测：用引擎默认贴图槽在 96 m 仍有可见差异）
+                    int dominant = SkylineFurniture.DominantMaterial(design);
+                    int dominantContents = Terrain.ExtractContents(dominant);
+                    if (dominant != 0 && dominantContents != 0 && dominantContents != 227) {
+                        generator.GenerateCubeVertices(BlocksManager.Blocks[dominantContents], dominant,
+                                                       x, y, z, Color.White, geometry.OpaqueSubsetsByFace);
+                    }
+                    else {
+                        generator.GenerateCubeVertices(this, value, x, y, z, Color.White, geometry.OpaqueSubsetsByFace);
+                    }
                     SkylineFurniture.NoteFallbackBox();
                 }
                 return;

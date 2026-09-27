@@ -30,6 +30,13 @@ namespace Game {
         /// <summary>超预算的家具是否退化成"方盒占位"（默认 true；false = 完全不画）。</summary>
         public static bool FallbackBox { get; set; } = true;
 
+        /// <summary>A/B 调试开关：强制**所有**家具走方盒占位（默认关）。用于"占位方盒一致性距离"测量。</summary>
+        public static bool ForceBox { get; set; }
+
+        /// <summary>A/B 调试开关：只把**指定设计索引**强制成方盒（默认 -1 = 关）。
+        /// 用它可以只替换"目标家具"而保留遮挡屏的窗孔几何（`ForceBox` 会把屏也变成方盒，窗口就没了）。</summary>
+        public static int ForceBoxDesign { get; set; } = -1;
+
         /// <summary>每次 BeginStage 重新计数的本阶段统计。</summary>
         static string m_stageName = "";
         static int m_stageVertices;
@@ -40,6 +47,10 @@ namespace Game {
 
         /// <summary>设计索引 → (分辨率, 顶点数)。设计槽会被回收复用，所以带上分辨率做校验。</summary>
         static readonly Dictionary<int, (int Resolution, int Vertices)> m_designVertices = [];
+
+        /// <summary>设计索引 → 主材质方块值（占位盒用它上色，见 notes/64 §4.1 的实测结论：
+        /// 用引擎默认贴图槽会在 96 m 仍有可见差异，必须取设计的主材质）。</summary>
+        static readonly Dictionary<int, int> m_designDominant = [];
 
         public static void BeginStage(string name) {
             m_stageName = name;
@@ -71,6 +82,35 @@ namespace Game {
             return count;
         }
 
+        /// <summary>设计里出现次数最多的体素材质（完整方块值），带缓存。空设计返回 0。</summary>
+        public static int DominantMaterial(FurnitureDesign design) {
+            if (design == null) {
+                return 0;
+            }
+            if (m_designDominant.TryGetValue(design.Index, out int cached)) {
+                return cached;
+            }
+            int resolution = design.Resolution;
+            var counts = new Dictionary<int, int>();
+            for (int i = 0; i < resolution * resolution * resolution; i++) {
+                int value = design.GetValue(i);
+                if (value == 0) {
+                    continue;
+                }
+                counts.TryGetValue(value, out int n);
+                counts[value] = n + 1;
+            }
+            int best = 0, bestCount = -1;
+            foreach (KeyValuePair<int, int> pair in counts) {
+                if (pair.Value > bestCount) {
+                    bestCount = pair.Value;
+                    best = pair.Key;
+                }
+            }
+            m_designDominant[design.Index] = best;
+            return best;
+        }
+
         /// <summary>true = 允许按设计烘几何；false = 超预算（调用方退化成方盒/跳过）。</summary>
         public static bool TryReserve(FurnitureDesign design) {
             if (!BudgetEnabled) {
@@ -93,10 +133,12 @@ namespace Game {
             m_totalCulled = 0;
             m_totalBoxes = 0;
             m_designVertices.Clear();
+            m_designDominant.Clear();
         }
 
         public static string Describe() =>
-            $"furnitureBudget={BudgetEnabled} maxStageVerts={MaxStageFurnitureVertices} box={FallbackBox} "
+            $"furnitureBudget={BudgetEnabled} maxStageVerts={MaxStageFurnitureVertices} box={FallbackBox} forceBox={ForceBox} "
+            + $"forceBoxDesign={ForceBoxDesign} "
             + $"stage[{m_stageName}] verts={m_stageVertices} kept={m_stageKept} culled={m_stageCulled} "
             + $"totalCulled={m_totalCulled} boxes={m_totalBoxes} designsCached={m_designVertices.Count}";
     }
