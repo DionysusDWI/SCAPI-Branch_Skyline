@@ -33,7 +33,10 @@ namespace Game {
     ///
     /// spec 文法（空格分隔的 key:value，`points` 与 `profile` 用 `;` 分隔坐标）：
     ///   points:2560,90,6740;2600,120,6780;2660,80,6820;2720,100,6870   ← 4 个点 = 一段三次贝塞尔；≥5 个点 = Catmull-Rom
-    ///   profile:2558,86,6738;2566,92,6740                              ← 横截面盒子（含端点）
+    ///   profile:2558,86,6738;2566,92,6740                              ← 横截面盒子（从世界里切，含端点）
+    ///   shape:deck width:3 thick:1 kerb:1 contents:5                   ← [v0.1.86] **程序化截面**（与 profile 二选一）
+    ///                                                                    deck|tube|wall|arch
+    ///                                                                    width/radius/height/thick/kerb/contents/data
     ///   step:1 onlyAir:1 groundFollow:0 groundOffset:0 vy:0 lat:0 mirror:0
     ///   dry:0 max:200000 ensureLoaded:1
     /// </summary>
@@ -103,6 +106,17 @@ namespace Game {
             public bool DryRun;
             public int MaxBlocks = 200000;
             public bool EnsureLoaded = true;
+            // [v0.1.86] **程序化横截面**（Axiom 学习项 #4：给贝塞尔扫掠补 profile 家族）。
+            // 以前只能"从世界里切一个横截面盒子"（`profile:`），要建桥/隧道/墙得先搭一段样板；
+            // 现在 `shape:deck|tube|wall|arch` 直接生成截面，配 `width/radius/height/thick/kerb/contents`。
+            public string Shape = "";
+            public int Width = 3;
+            public int Radius = 3;
+            public int Height = 4;
+            public int Thickness = 1;
+            public bool Kerb;
+            public int Contents = 5;            // CobblestoneBlock（`5` 是"铺路"最常用的默认）
+            public int Data;
         }
 
         struct Cubic {
@@ -207,10 +221,15 @@ namespace Game {
                     return result;
                 }
                 Vector3 tangent0 = Vector3.Normalize(Derivative(cubics[0], 0f));
-                Profile profile = CaptureProfile(terrain, profileMin, profileMax, tangent0);
+                // [v0.1.86] `shape:` → 程序化截面；否则沿用"从世界里切一个盒子"的老路子
+                Profile profile = options.Shape.Length > 0
+                    ? BuildProfile(options, tangent0)
+                    : CaptureProfile(terrain, profileMin, profileMax, tangent0);
                 result.ProfileVoxels = profile.Voxels.Count;
                 if (profile.Voxels.Count == 0) {
-                    result.Error = "profile is empty (nothing but air in the given box)";
+                    result.Error = options.Shape.Length > 0
+                        ? $"shape '{options.Shape}' produced no voxels"
+                        : "profile is empty (nothing but air in the given box)";
                     return result;
                 }
                 List<(Vector3 P, Vector3 T, Vector3 R, Vector3 U)> stations = BuildStations(cubics, options.Step);
@@ -453,6 +472,88 @@ namespace Game {
         }
 
         /// <summary>从世界区域切一段横截面：世界轴按"与起始切线最接近"的原则映到局部 (沿 A / 竖 U / 横 R)。</summary>
+        /// <summary>
+        /// [v0.1.86] **程序化横截面**（Axiom 学习项 #4）：不再需要先在世界里搭一段样板。
+        /// 坐标系与 <see cref="CaptureProfile"/> 完全一致（沿 = 起点切向的轴向化方向、上 = +Y、右 = 上×沿），
+        /// 所以 `shape:` 与 `profile:` 可以互换、`groundFollow/vy/lat/mirror` 等选项对两者同样有效。
+        ///
+        /// | `shape` | 截面（R=右, U=上） | 关键参数 |
+        /// |---|---|---|
+        /// | `deck` | 平板：R 在 ±w、U 在 0..thick−1；`kerb:1` 时在两侧 R=±w、U=thick 加路缘 | width/thick/kerb |
+        /// | `tube` | 圆环：距离 d=√(R²+U²) 落在 (radius−thick, radius] 内的格 | radius/thick |
+        /// | `arch` | 同上但只取 U 不小于 0 的那半边（拱顶，脚下留空） | radius/thick |
+        /// | `wall` | 竖直墙：R 在 ±(thick−1)/2、U 在 0..height | height/thick |
+        /// </summary>
+        static Profile BuildProfile(Options options, Vector3 tangent0) {
+            var profile = new Profile();
+            // 与 CaptureProfile 逐字同一套坐标系（轴向化切向 → 上 → 右）
+            Vector3 along = MathF.Abs(tangent0.X) >= MathF.Abs(tangent0.Y) && MathF.Abs(tangent0.X) >= MathF.Abs(tangent0.Z)
+                ? new Vector3(tangent0.X >= 0 ? 1 : -1, 0, 0)
+                : MathF.Abs(tangent0.Y) >= MathF.Abs(tangent0.Z)
+                    ? new Vector3(0, tangent0.Y >= 0 ? 1 : -1, 0)
+                    : new Vector3(0, 0, tangent0.Z >= 0 ? 1 : -1);
+            Vector3 up = MathF.Abs(Vector3.Dot(along, Vector3.UnitY)) > 0.9f ? Vector3.UnitZ : Vector3.UnitY;
+            Vector3 right = Vector3.Normalize(Vector3.Cross(up, along));
+            up = Vector3.Normalize(Vector3.Cross(along, right));
+            profile.Along = along;
+            profile.Up = up;
+            profile.Right = right;
+            int value = Terrain.MakeBlockValue(Math.Clamp(options.Contents, 0, 1023), options.Data, 0);
+            void Put(int r, int u) {
+                profile.Voxels.Add(new ProfileVoxel { R = r, U = u, A = 0, Value = value });
+                profile.MinR = Math.Min(profile.MinR, r);
+                profile.MaxR = Math.Max(profile.MaxR, r);
+                profile.MinU = Math.Min(profile.MinU, u);
+                profile.MaxU = Math.Max(profile.MaxU, u);
+            }
+            int w = Math.Clamp(options.Width, 0, 64);
+            int radius = Math.Clamp(options.Radius, 1, 64);
+            int height = Math.Clamp(options.Height, 1, 256);
+            int thick = Math.Clamp(options.Thickness, 1, 32);
+            switch (options.Shape) {
+                case "deck":
+                    for (int r = -w; r <= w; r++) {
+                        for (int u = 0; u < thick; u++) {
+                            Put(r, u);
+                        }
+                        if (options.Kerb) {
+                            Put(r, thick);
+                        }
+                    }
+                    break;
+                case "tube":
+                    for (int u = -radius; u <= radius; u++) {
+                        for (int r = -radius; r <= radius; r++) {
+                            int d2 = r * r + u * u;
+                            if (d2 <= radius * radius && d2 > (radius - thick) * (radius - thick)) {
+                                Put(r, u);
+                            }
+                        }
+                    }
+                    break;
+                case "arch":
+                    for (int u = 0; u <= radius; u++) {
+                        for (int r = -radius; r <= radius; r++) {
+                            int d2 = r * r + u * u;
+                            if (d2 <= radius * radius && d2 > (radius - thick) * (radius - thick)) {
+                                Put(r, u);
+                            }
+                        }
+                    }
+                    break;
+                case "wall":
+                    // 厚度 1 → R=0；2 → R∈{0,1}；3 → R∈{−1,0,1}（以路径为中心，避免整体偏一格）
+                    int r0 = -(thick - 1) / 2, r1 = thick / 2;
+                    for (int r = r0; r <= r1; r++) {
+                        for (int u = 0; u <= height; u++) {
+                            Put(r, u);
+                        }
+                    }
+                    break;
+            }
+            return profile;
+        }
+
         static Profile CaptureProfile(Terrain terrain, Vector3 boxMin, Vector3 boxMax, Vector3 tangent0) {
             var profile = new Profile();
             Vector3 along = MathF.Abs(tangent0.X) >= MathF.Abs(tangent0.Y) && MathF.Abs(tangent0.X) >= MathF.Abs(tangent0.Z)
@@ -542,6 +643,38 @@ namespace Game {
                         hasProfile = true;
                         break;
                     }
+                    // [v0.1.86] 程序化横截面（与 `profile:` 二选一）
+                    case "shape": {
+                        string mode = value.ToLowerInvariant();
+                        if (mode is not ("deck" or "tube" or "wall" or "arch")) {
+                            error = $"shape must be deck|tube|wall|arch, got '{value}'";
+                            return false;
+                        }
+                        options.Shape = mode;
+                        hasProfile = true;
+                        break;
+                    }
+                    case "width":
+                        options.Width = (int)ParseFloat(value, options.Width);
+                        break;
+                    case "radius":
+                        options.Radius = (int)ParseFloat(value, options.Radius);
+                        break;
+                    case "height":
+                        options.Height = (int)ParseFloat(value, options.Height);
+                        break;
+                    case "thick":
+                        options.Thickness = Math.Max(1, (int)ParseFloat(value, options.Thickness));
+                        break;
+                    case "kerb":
+                        options.Kerb = ParseBool(value, options.Kerb);
+                        break;
+                    case "contents":
+                        options.Contents = (int)ParseFloat(value, options.Contents);
+                        break;
+                    case "data":
+                        options.Data = (int)ParseFloat(value, options.Data);
+                        break;
                     case "step":
                         options.Step = ParseFloat(value, options.Step);
                         break;
@@ -582,7 +715,8 @@ namespace Game {
                 return false;
             }
             if (!hasProfile) {
-                error = "profile box is required (cut a cross-section from the world)";
+                error = "either profile:x1,y1,z1;x2,y2,z2 (cut a cross-section from the world) "
+                    + "or shape:deck|tube|wall|arch (procedural) is required";
                 return false;
             }
             return true;

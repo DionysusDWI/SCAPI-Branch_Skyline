@@ -7,6 +7,57 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.86] - 2026-09-28
+
+第九十六个版本：**贝塞尔扫掠的 profile 家族**（Axiom 学习项 #4）。
+用户口径："Axiom 可以提供的修建变化，注意这**不是某个圆或者椭圆的一部分，而是通过贝塞尔曲线生成的**。"
+
+### 以前的问题：铺一条弯道要先搭一段"样板"
+
+`SkylineBuilder.SweepBezier`（v0.0.6）早就能把**一个横截面**沿贝塞尔/Catmull-Rom 扫出去，
+但横截面**只能从世界里切**（`profile:x1,y1,z1;x2,y2,z2`）——
+建弯的高架路/隧道/墙时每次都要先手工搭一段试样，对 **AI 建筑 Agent** 尤其别扭。
+
+### 本版：`shape:` 直接生成截面
+
+| `shape` | 截面（R=右、U=上；坐标系与 `profile:` **逐字同一套**） | 关键参数 |
+|---|---|---|
+| `deck` | 平板 R±w、U 0..thick−1；`kerb:1` 时两侧加路缘 | width/thick/kerb |
+| `tube` | 圆环：d=√(R²+U²) 落在 (radius−thick, radius] | radius/thick |
+| `arch` | 同上只取 U 不小于 0 的半边（拱顶） | radius/thick |
+| `wall` | 竖直墙 R±(thick−1)/2、U 0..height | height/thick |
+
+新增 spec 键：`shape / width / radius / height / thick / kerb / contents / data`。
+`profile:` 与 `shape:` 二选一；因为坐标系相同，
+`step / onlyAir / groundFollow / groundOffset / vy / lat / mirror / ensureLoaded` **对两者都有效**。
+
+### 验收（一段"拱桥"曲线，四种截面各扫一次）
+
+| shape | 参数 | 站 | **截面体素** | 写入 | 耗时 | 重算区块 |
+|---|---|---|---|---|---|---|
+| `deck` | width 3 / thick 1 / kerb | 39 | **14**（7 路面 + 7 路缘） | **546** | 2.6 ms | 10 |
+| `tube` | radius 3 / thick 1 | 39 | **16** | **624** | 0.8 ms | 9 |
+| `wall` | height 4 / thick 2 | 39 | **10**（(4+1)×2） | **390** | 0.6 ms | 8 |
+| `arch` | radius 4 / thick 1 | 39 | **11** | **429** | 1.7 ms | 9 |
+
+* `written == voxels`、`skipAir/skipNotLoaded/failed` 全 0；
+* **`Preview`（dry）与实建的 stations/voxels 完全一致** ⇒ 可用于配额预检；
+* 截面体素与公式对得上；包围盒跟着曲线起伏（y 70 → 86~89 → 落）⇒ 确实沿曲线走；
+* 单次扫掠 **0.6~2.6 ms**，是本项目里最便宜的建造路径之一。
+
+### 没做 / 风险（如实）
+
+* **stair/rail/road 没单列**：楼梯需要"沿程递增"的参数（不是截面能表达），现在用 `vy:`/`groundFollow:` 近似；
+* **没有按名字解析材质**（`contents:` 收索引，默认 5 = 鹅卵石）；
+* **`tube`/`arch` 是斜置的**（截面跟随切向），要"始终水平的拱"需另加截面旋转参数；
+* 观感只取两张截图，且落点在雪原上，判读不如数值清楚。
+
+证据：`data/sessions/skyline-v0186/`（`bezier-profiles.json` + 两张截图）、`notes/164`。
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+源码包内含本版补丁 `height-v0186.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.85] - 2026-09-28
 
 第九十五个版本：**16 m 壳粒度** —— 里程碑 **1.2 的"治本"**（从 v0.1.62 起一直挂在待办上）。
