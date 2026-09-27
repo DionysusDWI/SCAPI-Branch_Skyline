@@ -1,0 +1,432 @@
+using System;
+using System.Text.Json.Nodes;
+using Engine;
+using Engine.Graphics;
+
+namespace Game {
+    /// <summary>
+    /// SCAPI Skyline v0.1.58：**离屏 G-buffer 样板 pass**（光影接入面 v1 的"着色器 + 渲染引擎"那一半）。
+    ///
+    /// 它做三件事，都是光影包真接入时必须先具备的能力：
+    ///   1. **自编译 shader**（`new Shader(vsh, psh)`，从 C# 字符串来 —— v0.1.32 证实可行），
+    ///      把远景三层网格（粗 16 m / 细 8 m / 近环 4 m）渲染进**自建 RenderTarget**；
+    ///   2. 片元输出 **albedo**（地形图集采样 × 顶点色）× 与 **覆盖率**（alpha=1 表示"这里画到了几何"）；
+    ///   3. **回读自检**（`GetData`）+ **调试直显**（把这张 RT 贴到屏幕上做 A/B）。
+    ///
+    /// 如实记的边界（写在 `skyline.GBufferInfo()` 与 `SkylineShaderHook.Describe()` 里）：
+    ///   * LOD 顶点格式目前只有 position/texcoord/color（v0.1.11 就公开了这个布局），**没有法线、没有材质 id**
+    ///     —— 所以本版 G-buffer 只有 **albedo + 覆盖**；法线要等"给 LOD 网格加一个顶点属性"那一步，
+    ///     材质 id 同理（这是 Iris 侧真正要改底层的地方）；
+    ///   * 只画远景（LOD）几何，不含地形区块/实体/家具（后续 pass）。
+    ///
+    /// 默认**关**（不改变任何既有渲染）；打开后用 `skyline.GBufferCapture()` 取证。
+    /// </summary>
+    public static class SkylineGBuffer {
+        public static bool Enabled { get; set; }
+        public static int Size { get; set; } = 512;
+        /// <summary>调试直显：把 G-buffer 画到屏幕（A/B 用；默认关）。</summary>
+        public static bool DebugDraw { get; set; }
+        /// <summary>调试时叠加一个棋盘格（看清 uv/覆盖范围）。</summary>
+        public static bool DebugChecker { get; set; } = true;
+
+        static RenderTarget2D m_rt;
+        static Shader m_shader;
+        static Shader m_debugShader;
+        static SamplerState m_sampler;
+        static long m_hookTouches;
+        static string m_lastError = "";
+
+        public static string LastError => m_lastError;
+        public static long HookTouches => m_hookTouches;
+        public static bool HasTarget => m_rt != null;
+
+        /// <summary>阶段回调里调用（只累加计数，证明"外部处理器被调到了"）。</summary>
+        public static void TouchFromHook() {
+            m_hookTouches++;
+        }
+
+        const string GBufferVsh = @"#ifdef HLSL
+
+float2 u_origin;
+float4x4 u_viewProjectionMatrix;
+
+void main(
+	in float3 a_position: POSITION,
+	in float4 a_color: COLOR,
+	in float2 a_texcoord: TEXCOORD,
+	out float4 v_color : COLOR,
+	out float2 v_texcoord : TEXCOORD,
+	out float4 sv_position: SV_POSITION
+)
+{
+	v_color = a_color;
+	v_texcoord = a_texcoord;
+	sv_position = mul(float4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0), u_viewProjectionMatrix);
+}
+
+#endif
+#ifdef GLSL
+
+// <Semantic Name='POSITION' Attribute='a_position' />
+// <Semantic Name='COLOR' Attribute='a_color' />
+// <Semantic Name='TEXCOORD' Attribute='a_texcoord' />
+
+precision highp float;
+
+uniform vec2 u_origin;
+uniform mat4 u_viewProjectionMatrix;
+
+attribute vec3 a_position;
+attribute vec4 a_color;
+attribute vec2 a_texcoord;
+
+varying vec4 v_color;
+varying vec2 v_texcoord;
+
+void main()
+{
+	v_color = a_color;
+	v_texcoord = a_texcoord;
+	gl_Position = u_viewProjectionMatrix * vec4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0);
+	OPENGL_POSITION_FIX;
+}
+
+#endif";
+
+        const string GBufferPsh = @"#ifdef HLSL
+
+Texture2D u_texture;
+SamplerState u_samplerState;
+
+void main(
+	in float4 v_color : COLOR,
+	in float2 v_texcoord: TEXCOORD,
+	out float4 svTarget: SV_TARGET
+)
+{
+	float4 albedo = v_color * u_texture.Sample(u_samplerState, v_texcoord);
+	svTarget = float4(albedo.rgb, 1.0);      // alpha=1 = 这里画到了几何（覆盖率判据）
+}
+
+#endif
+#ifdef GLSL
+
+// <Sampler Name='u_samplerState' Texture='u_texture' />
+
+precision highp float;
+
+uniform sampler2D u_texture;
+
+varying vec4 v_color;
+varying vec2 v_texcoord;
+
+void main()
+{
+	vec4 albedo = v_color * texture2D(u_texture, v_texcoord);
+	gl_FragColor = vec4(albedo.rgb, 1.0);
+}
+
+#endif";
+
+        /// <summary>调试直显用的 shader（只采样那张 RT + 可选棋盘格）。</summary>
+        const string DebugVsh = @"#ifdef HLSL
+
+void main(
+	in float3 a_position: POSITION,
+	in float2 a_texcoord: TEXCOORD,
+	out float2 v_texcoord : TEXCOORD,
+	out float4 sv_position: SV_POSITION
+)
+{
+	v_texcoord = a_texcoord;
+	sv_position = float4(a_position.xy, 0.0, 1.0);
+}
+
+#endif
+#ifdef GLSL
+
+// <Semantic Name='POSITION' Attribute='a_position' />
+// <Semantic Name='TEXCOORD' Attribute='a_texcoord' />
+
+precision highp float;
+
+attribute vec3 a_position;
+attribute vec2 a_texcoord;
+
+varying vec2 v_texcoord;
+
+void main()
+{
+	v_texcoord = a_texcoord;
+	gl_Position = vec4(a_position.xy, 0.0, 1.0);
+}
+
+#endif";
+
+        const string DebugPsh = @"#ifdef HLSL
+
+Texture2D u_texture;
+SamplerState u_samplerState;
+float u_checker;
+
+void main(
+	in float2 v_texcoord: TEXCOORD,
+	out float4 svTarget: SV_TARGET
+)
+{
+	float4 c = u_texture.Sample(u_samplerState, v_texcoord);
+	if (u_checker > 0.5)
+	{
+		float2 g = floor(v_texcoord * 16.0);
+		float k = frac((g.x + g.y) * 0.5) * 0.25 + 0.75;
+		c.rgb *= k;
+	}
+	svTarget = float4(c.rgb, 1.0);
+}
+
+#endif
+#ifdef GLSL
+
+// <Sampler Name='u_samplerState' Texture='u_texture' />
+
+precision highp float;
+
+uniform sampler2D u_texture;
+uniform float u_checker;
+
+varying vec2 v_texcoord;
+
+void main()
+{
+	vec4 c = texture2D(u_texture, v_texcoord);
+	if (u_checker > 0.5)
+	{
+		vec2 g = floor(v_texcoord * 16.0);
+		float k = fract((g.x + g.y) * 0.5) * 0.25 + 0.75;
+		c.rgb *= k;
+	}
+	gl_FragColor = vec4(c.rgb, 1.0);
+}
+
+#endif";
+
+        static Shader EnsureShader() {
+            m_shader ??= new Shader(GBufferVsh, GBufferPsh);
+            return m_shader;
+        }
+
+        static Shader EnsureDebugShader() {
+            m_debugShader ??= new Shader(DebugVsh, DebugPsh);
+            return m_debugShader;
+        }
+
+        static SamplerState EnsureSampler() {
+            m_sampler ??= new SamplerState {
+                AddressModeU = TextureAddressMode.Clamp,
+                AddressModeV = TextureAddressMode.Clamp,
+                FilterMode = TextureFilterMode.Point,
+                MaxLod = 0f
+            };
+            return m_sampler;
+        }
+
+        static void DrawLodLayers(Shader shader) {
+            if (SkylineLod.CoarseVertexBuffer != null && SkylineLod.CoarseIndexCount > 0) {
+                Display.DrawIndexed(PrimitiveType.TriangleList, shader, SkylineLod.CoarseVertexBuffer,
+                    SkylineLod.CoarseIndexBuffer, 0, SkylineLod.CoarseIndexCount);
+            }
+            if (SkylineLod.FineVertexBuffer != null && SkylineLod.FineIndexCount > 0) {
+                Display.DrawIndexed(PrimitiveType.TriangleList, shader, SkylineLod.FineVertexBuffer,
+                    SkylineLod.FineIndexBuffer, 0, SkylineLod.FineIndexCount);
+            }
+            if (SkylineLod.NearVertexBuffer != null && SkylineLod.NearIndexCount > 0) {
+                Display.DrawIndexed(PrimitiveType.TriangleList, shader, SkylineLod.NearVertexBuffer,
+                    SkylineLod.NearIndexBuffer, 0, SkylineLod.NearIndexCount);
+            }
+        }
+
+        /// <summary>
+        /// 渲染一次 G-buffer 并回读自检。返回 JSON：
+        /// { ok, size, coveragePixels, coverageRatio, meanLuma, distinctColors, ms, png? }
+        /// </summary>
+        public static string Capture() {
+            JsonObject result = new();
+            SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
+            Camera camera = SkylineLod.ActiveCamera;
+            if (subsystemTerrain?.Terrain == null || camera == null) {
+                result["ok"] = false;
+                result["err"] = "no terrain/camera";
+                return result.ToJsonString();
+            }
+            if (TerrainRenderer.m_opaqueShader == null) {
+                result["ok"] = false;
+                result["err"] = "no opaque shader";
+                return result.ToJsonString();
+            }
+            int size = Math.Clamp(Size, 64, Math.Min(Display.MaxTextureSize, 2048));
+            RenderTarget2D previousTarget = Display.RenderTarget;
+            Viewport previousViewport = Display.Viewport;
+            Rectangle previousScissor = Display.ScissorRectangle;
+            System.Diagnostics.Stopwatch watch = System.Diagnostics.Stopwatch.StartNew();
+            try {
+                if (m_rt == null || m_rt.Width != size) {
+                    Utilities.Dispose(ref m_rt);
+                    m_rt = new RenderTarget2D(size, size, 1, ColorFormat.Rgba8888, DepthFormat.Depth24Stencil8);
+                }
+                Display.RenderTarget = m_rt;
+                // 注意：**必须显式清深度**（与 SkylineGpuShadow.RenderDepthMap 同一坑）——
+                // 只清颜色、不清深度时，新 RenderTarget 的深度缓冲是未定义值（实测全 0）→ 所有片元都过不了深度测试
+                // → 回读覆盖率 0（第一次实现就是这么翻车的）。
+                Display.Clear(new Vector4(0f, 0f, 0f, 0f), 1f, 0);
+                Display.Viewport = new Viewport(0, 0, size, size);
+                Display.ScissorRectangle = new Rectangle(0, 0, size, size);
+                Display.BlendState = BlendState.Opaque;
+                Display.DepthStencilState = DepthStencilState.Default;
+                Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
+
+                Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
+                Vector3 v = new(MathF.Floor(viewPosition.X), 0f, MathF.Floor(viewPosition.Z));
+                Matrix matrix = Matrix.CreateTranslation(v - viewPosition)
+                    * camera.ViewMatrix.OrientationMatrix * camera.ProjectionMatrix;
+                Shader shader = EnsureShader();
+                shader.GetParameter("u_origin", true).SetValue(new Vector2(v.X, v.Z));
+                shader.GetParameter("u_viewProjectionMatrix", true).SetValue(matrix);
+                shader.GetParameter("u_texture", true)
+                    .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
+                shader.GetParameter("u_samplerState", true).SetValue(EnsureSampler());
+                DrawLodLayers(shader);
+
+                Engine.Media.Image image = m_rt.GetData(new Rectangle(0, 0, size, size));
+                int covered = 0;
+                double lumaSum = 0.0;
+                System.Collections.Generic.HashSet<int> distinct = [];
+                for (int y = 0; y < size; y++) {
+                    for (int x = 0; x < size; x++) {
+                        Color c = image.GetPixel(x, y);
+                        if (c.A > 0) {
+                            covered++;
+                            lumaSum += 0.2126 * c.R + 0.7152 * c.G + 0.0722 * c.B;
+                            distinct.Add((c.R >> 4) << 8 | (c.G >> 4) << 4 | (c.B >> 4));
+                        }
+                    }
+                }
+                watch.Stop();
+                result["ok"] = true;
+                result["size"] = size;
+                result["coveragePixels"] = covered;
+                result["coverageRatio"] = Math.Round(covered / (double)(size * size), 4);
+                result["meanLuma"] = Math.Round(covered > 0 ? lumaSum / covered : 0.0, 2);
+                result["distinctColors"] = distinct.Count;
+                result["ms"] = Math.Round(watch.Elapsed.TotalMilliseconds, 2);
+                result["layers"] = new JsonObject {
+                    ["coarseIndices"] = SkylineLod.CoarseIndexCount,
+                    ["fineIndices"] = SkylineLod.FineIndexCount,
+                    ["nearIndices"] = SkylineLod.NearIndexCount
+                };
+                result["note"] = "G-buffer v1：RGB=albedo（图集采样×顶点色），A=1 表示画到了几何；"
+                    + "尚无 normal / materialId（LOD 顶点格式还没有这两个属性）";
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            finally {
+                Display.RenderTarget = previousTarget;
+                Display.Viewport = previousViewport;
+                Display.ScissorRectangle = previousScissor;
+            }
+            return result.ToJsonString();
+        }
+
+        /// <summary>由 `SubsystemTerrain.Draw` 的 final 阶段调用：调试直显这张 G-buffer。</summary>
+        public static void DebugDrawIfEnabled(Camera camera) {
+            if (!DebugDraw || m_rt == null || camera == null) {
+                return;
+            }
+            try {
+                RenderTarget2D previousTarget = Display.RenderTarget;
+                Viewport previousViewport = Display.Viewport;
+                Rectangle previousScissor = Display.ScissorRectangle;
+                Display.BlendState = BlendState.Opaque;
+                Display.DepthStencilState = DepthStencilState.None;
+                Display.RasterizerState = RasterizerState.CullNoneScissor;
+                Display.Viewport = new Viewport(0, 0, previousTarget.Width, previousTarget.Height);
+                Display.ScissorRectangle = new Rectangle(0, 0, previousTarget.Width, previousTarget.Height);
+                Shader shader = EnsureDebugShader();
+                shader.GetParameter("u_texture", true).SetValue(m_rt);
+                shader.GetParameter("u_samplerState", true).SetValue(EnsureSampler());
+                shader.GetParameter("u_checker", true).SetValue(DebugChecker ? 1f : 0f);
+                // 一个覆盖全屏的四边形（NDC 坐标在顶点着色器里直接用）
+                m_quad ??= CreateFullScreenQuad();
+                Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_quad, m_quadIndices, 0, m_quadIndicesCount);
+                Display.RenderTarget = previousTarget;
+                Display.Viewport = previousViewport;
+                Display.ScissorRectangle = previousScissor;
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+                Log.Warning($"SkylineGBuffer.DebugDraw: {e.Message}");
+            }
+        }
+
+        static VertexBuffer m_quad;
+
+        static VertexBuffer CreateFullScreenQuad() {
+            TerrainVertex[] vertices = new TerrainVertex[4];
+            // **左上角 1/4 画中画**（NDC 里 y=+1 是屏幕上方）：这样 A/B 截图能同时看到"正常画面"和"G-buffer 内容"，
+            // 比全屏覆盖直观得多（全屏覆盖会把整个画面替换成 G-buffer，除了黑背景什么也看不出来）。
+            BlockGeometryGenerator.SetupVertex(-1f, 0f, 0f, Color.White, 0f, 1f, ref vertices[0]);
+            BlockGeometryGenerator.SetupVertex(0f, 0f, 0f, Color.White, 1f, 1f, ref vertices[1]);
+            BlockGeometryGenerator.SetupVertex(0f, 1f, 0f, Color.White, 1f, 0f, ref vertices[2]);
+            BlockGeometryGenerator.SetupVertex(-1f, 1f, 0f, Color.White, 0f, 0f, ref vertices[3]);
+            short[] indices = [0, 1, 2, 0, 2, 3];
+            VertexBuffer vb = new(TerrainVertex.VertexDeclaration, 4);
+            vb.SetData(vertices, 0, 4);
+            // 这里把索引也塞进同一个 VertexBuffer 的“兄弟”里不方便，改为直接返回带索引的对象
+            m_quadIndices = new IndexBuffer(IndexFormat.SixteenBits, indices.Length);
+            m_quadIndices.SetData(indices, 0, indices.Length);
+            m_quadIndicesCount = indices.Length;
+            return vb;
+        }
+
+        static IndexBuffer m_quadIndices;
+        static int m_quadIndicesCount;
+
+        public static string Info() {
+            return new JsonObject {
+                ["ok"] = true,
+                ["enabled"] = Enabled,
+                ["size"] = Size,
+                ["debugDraw"] = DebugDraw,
+                ["hasTarget"] = HasTarget,
+                ["hookTouches"] = m_hookTouches,
+                ["layers"] = new JsonObject {
+                    ["coarseIndices"] = SkylineLod.CoarseIndexCount,
+                    ["fineIndices"] = SkylineLod.FineIndexCount,
+                    ["nearIndices"] = SkylineLod.NearIndexCount
+                },
+                ["note"] = "G-buffer v1 = albedo + 覆盖；法线/材质 id 需要先给 LOD 顶点格式加属性（下一步）",
+                ["lastError"] = m_lastError
+            }.ToJsonString();
+        }
+    }
+
+    /// <summary>桥：`skyline.GBuffer*`。</summary>
+    public static partial class SkylineRuntime {
+        public static string GBufferEnable(bool enabled) {
+            SkylineGBuffer.Enabled = enabled;
+            return SkylineGBuffer.Info();
+        }
+
+        public static string GBufferDebug(bool debugDraw, bool checker) {
+            SkylineGBuffer.DebugDraw = debugDraw;
+            SkylineGBuffer.DebugChecker = checker;
+            return SkylineGBuffer.Info();
+        }
+
+        public static string GBufferCapture() => SkylineGBuffer.Capture();
+
+        public static string GBufferInfo() => SkylineGBuffer.Info();
+    }
+}

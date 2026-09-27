@@ -3,6 +3,37 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.58] - 2026-09-28
+
+第六十八个版本：**光影接入面 v1**（里程碑 4「Iris 真接入」打基础）—— 阶段注册表 + 离屏 G-buffer 样板。
+
+**本版相对 v0.1.57 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **阶段注册表** | 新增 `SkylineShaderHook`：固定五个阶段 `shadow / opaque / lod / composite / final`，外部光影包按名字挂回调（同阶段按 `priority` 排序），**不用改游戏源码**；处理器抛异常**只记日志、不改帧**；**没有任何处理器时逐位同上一版** |
+| **挂点** | `SubsystemTerrain.Draw` 五处：不透明地形前（shadow）/ 后（opaque）、远景层（LOD 三层 + 32³ 壳）后（lod）、alpha-tested 后（composite）、帧末（final） |
+| **接管点写清楚** | `SkylineShaderHook.Describe()` 给出：阶段与处理器、每阶段调用/异常计数、`SkylineLod.ExternalShaderHooked + CustomDraw` 的整层接管入口、**几何源清单**（地形区块数、三层 LOD 索引数、壳立方体数、顶点布局） |
+| **离屏 G-buffer 样板** | 新增 `SkylineGBuffer`：**自编译 shader** 把远景三层网格画进自建 RenderTarget，输出 `RGB=albedo`（图集×顶点色）、`A=1`（覆盖率判据），`GetData` 回读自检；另有**调试直显**（左上 1/4 画中画 + 棋盘格）做 A/B |
+| **只读访问器补齐** | `SkylineLodIris`：`NearVertexBuffer/NearIndexBuffer/NearIndexCount`（近环 4 m 层）、`LoadedChunks`、`ActiveCamera` |
+
+### Verified（AgentLab）
+
+| 项 | 值 |
+|---|---|
+| 五个阶段的调用计数（注册 5 个测试处理器后） | shadow 81 / opaque 78 / lod 75 / composite 71 / final 68，**合计 373、异常 0** —— 每帧都被调到 |
+| 几何源清单 | `terrainChunks=200`、`lodCoarse=11,670 索引(16 m)`、`lodFine=20,016(8 m)`、`lodNear=234(4 m)`、`shellCubes=66`、`vertexLayout=Position@0/TexCoord@12/Color@16 stride=20` |
+| **G-buffer 捕获** | `ok`、512²、**覆盖 15,080 px = 5.75%**、`meanLuma=103.14`、**`distinctColors=67`**、71.53 ms（含回读） |
+| **调试直显 A/B** | **258,334 px 变化**、亮度 117.78 → 95.70；截图里左上 1/4 能直接看到**用真实地形图集渲染的远景岛屿** |
+
+**踩到的坑（如实记）**：G-buffer 第一次捕获**覆盖率 0** —— 根因不是 shader，而是 `Display.Clear(颜色)`
+**只清颜色不清深度**，新 RenderTarget 的深度缓冲是未定义值（实测全 0）→ `DepthStencilState.Default` 下所有片元过不了深度测试；
+改成 `Display.Clear(color, 1f, 0)` 立刻正常（与 `SkylineGpuShadow` 同一坑）。
+**还没做的（写在 `Describe().notYet`）**：①**法线通道 / 材质 id 通道** —— LOD 顶点格式目前只有 position/texcoord/color，
+要补必须**给顶点格式加属性**（Iris 侧真正要改底层的一步）；②天空盒/体积云/后处理/水面反射按用户口径**暂缓**；
+③实体与家具的独立 pass；④G-buffer 目前只画远景 LOD 三层，不含地形区块与 32³ 壳的逐立方体网格。
+证据：`data/sessions/skyline-v0158/`、`notes/133`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.57] - 2026-09-28
 
 第六十七个版本：**壳存档的增量（追加）写 + 墓碑删除 + 压缩重写**（新目标 2/3.2 的规模上限所在）。

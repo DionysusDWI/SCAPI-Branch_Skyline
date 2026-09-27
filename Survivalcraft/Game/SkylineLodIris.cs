@@ -34,6 +34,45 @@ namespace Game {
         /// <summary>细层索引缓冲；未构建时为 null。</summary>
         public static IndexBuffer FineIndexBuffer => m_ibFine;
 
+        /// <summary>[v0.1.58] 近环（4 m 单元，交接带）顶点缓冲；未构建时为 null。</summary>
+        public static VertexBuffer NearVertexBuffer => m_vbNear;
+
+        /// <summary>[v0.1.58] 近环（4 m 单元，交接带）索引缓冲；未构建时为 null。</summary>
+        public static IndexBuffer NearIndexBuffer => m_ibNear;
+
+        /// <summary>[v0.1.58] 近环索引数。</summary>
+        public static int NearIndexCount => m_indexCountNear;
+
+        /// <summary>[v0.1.58] 当前已分配且 Valid 的区块数（光影包"几何源清单"用；与 `Survey()` 同口径）。</summary>
+        public static int LoadedChunks {
+            get {
+                Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+                if (terrain == null) {
+                    return 0;
+                }
+                int n = 0;
+                foreach (TerrainChunk chunk in terrain.AllocatedChunks) {
+                    if (chunk != null && chunk.ThreadState >= TerrainChunkState.Valid) {
+                        n++;
+                    }
+                }
+                return n;
+            }
+        }
+
+        /// <summary>
+        /// [v0.1.58] 当前正在用的相机（光影包做离屏 pass 需要 `Camera` 里的视图/投影矩阵，
+        /// 而 `CameraViewPosition()` 只给位置）。没世界/没玩家时返回 null。
+        /// </summary>
+        public static Camera ActiveCamera {
+            get {
+                SubsystemPlayers players = GameManager.Project?.FindSubsystem<SubsystemPlayers>(true);
+                ComponentPlayer player = players != null && players.ComponentPlayers.Count > 0
+                    ? players.ComponentPlayers[0] : null;
+                return player?.GameWidget?.ActiveCamera;
+            }
+        }
+
         /// <summary>粗层索引数（= 要画的索引个数，`DrawIndexed(..., 0, CoarseIndexCount)`）。</summary>
         public static int CoarseIndexCount => m_indexCount;
 

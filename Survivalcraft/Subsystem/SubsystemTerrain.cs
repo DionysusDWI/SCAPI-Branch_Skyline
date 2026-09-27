@@ -513,17 +513,29 @@ namespace Game {
                 if (drawOrder == DrawOrders[0]) {
                     TerrainUpdater.PrepareForDrawing(camera);
                     TerrainRenderer.PrepareForDrawing(camera);
+                    // [v0.1.58] 光影接入面：shadow 阶段（外部包在此准备它自己的深度/阴影资源）
+                    SkylineShaderHook.Run("shadow", camera);
                     TerrainRenderer.DrawOpaque(camera);
+                    // [v0.1.58] 光影接入面：不透明地形画完之后（外部包在此写自己的 G-buffer / 覆盖地表 shader）
+                    SkylineShaderHook.Run("opaque", camera);
                     // [v0.1.0] 超视距 LOD 层：在视距之外补一层粗网格（见 Game/SkylineLod.cs）
                     SkylineLod.Draw(camera);
                     // [v0.1.50] 32³ 表面壳网格实验层（默认关；见 Game/CubeSurface32Mesh.cs）
                     SkylineCubeSurfaceDemo.DrawIfEnabled(camera);
                     // [v0.1.51] 32³ 表面壳的**生产层**：只画"已经离开加载范围"的立方体（交接带内）
                     SkylineCubeShellStore.Draw(camera);
+                    // [v0.1.58] 光影接入面：远景层（LOD + 壳）画完之后
+                    SkylineShaderHook.Run("lod", camera);
                     TerrainRenderer.DrawAlphaTested(camera);
+                    // [v0.1.58] 光影接入面：不透明 pass 全部结束（外部包在此做合成）
+                    SkylineShaderHook.Run("composite", camera);
+                    // [v0.1.58] G-buffer 调试直显（默认关）
+                    SkylineGBuffer.DebugDrawIfEnabled(camera);
                 }
                 else if (drawOrder == m_drawOrders[1]) {
                     TerrainRenderer.DrawTransparent(camera);
+                    // [v0.1.58] 光影接入面：帧末（透明也画完了；后处理类效果在这里）
+                    SkylineShaderHook.Run("final", camera);
                 }
             }
         }
