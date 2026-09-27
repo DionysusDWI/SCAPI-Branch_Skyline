@@ -780,6 +780,8 @@ namespace Game {
                     foreach (SubsystemBlockBehavior blockBehavior in m_subsystemBlockBehaviors.BlockBehaviors) {
                         blockBehavior.OnChunkDiscarding(terrainChunk);
                     }
+                    // [v0.1.47] 卸载前把 LOD 采一次（4.2：进入→离开加载范围都要刷新 LOD 状态）
+                    SkylineLod.NotifyChunkUnloading(terrainChunk);
                     RememberColumnBand(terrainChunk);          // [v0.1.14] 卸载前记住内容带（球形窗用）
                     m_subsystemTerrain.TerrainSerializer.SaveChunk(terrainChunk);
                     m_terrain.FreeChunk(terrainChunk);

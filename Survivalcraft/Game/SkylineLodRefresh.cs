@@ -93,7 +93,8 @@ namespace Game {
             NewChunk,        // 区块被释放过：这个对象我还没采过
             CounterChanged,  // ModificationCounter 变了
             Refresh,         // 超过 RefreshSeconds 的兜底
-            Sweep            // 脏集合溢出后的全量校验
+            Sweep,           // 脏集合溢出后的全量校验
+            Unloading        // [v0.1.47] 区块即将离开加载范围（卸载前最后一采）
         }
 
         struct SampleStamp {

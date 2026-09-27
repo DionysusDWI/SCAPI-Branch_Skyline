@@ -113,6 +113,37 @@ namespace Game {
 
         static Vector3 m_lastNearMarkCenter;
         static bool m_hasNearMarkCenter;
+
+        // ===== [v0.1.47] 卸载前"最后一采"（4.2：玩家进入→离开加载范围都要刷新一次 LOD）=====
+
+        static TerrainChunk m_forceHarvestChunk;
+        static ResampleReason m_forceHarvestReason;
+        static long m_refreshedOnUnload;
+        /// <summary>因"区块即将离开加载范围"而采样的次数（诊断）。</summary>
+        public static long RefreshedOnUnload => m_refreshedOnUnload;
+
+        /// <summary>
+        /// [v0.1.47] 区块**即将被卸载**（离开加载范围）时先把它采进 LOD —— 4.2 的要求：
+        /// "让玩家进入→离开区块加载范围的过程中刷新一次 LOD 区块状态"，避免"改完走远，LOD 还是旧的"。
+        /// 调用点：`TerrainUpdater.AllocateAndFreeChunks`（**主线程**，与 LOD 的采集/重建同线程，无并发风险）。
+        /// </summary>
+        public static void NotifyChunkUnloading(TerrainChunk chunk) {
+            if (!Enabled || chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
+                return;
+            }
+            try {
+                m_forceHarvestChunk = chunk;
+                m_forceHarvestReason = ResampleReason.Unloading;
+                Harvest();
+                m_refreshedOnUnload++;
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+            }
+            finally {
+                m_forceHarvestChunk = null;
+            }
+        }
         /// <summary>相机移动超过这个距离（米）就把交接带重新标脏一次。</summary>
         public static float NearMarkMoveThreshold { get; set; } = 24f;
         public static long NearMarkedCells { get; private set; }
@@ -250,7 +281,13 @@ namespace Game {
             for (int n = 0; n < rotationBudget + dirtyBudget; n++) {
                 TerrainChunk chunk;
                 ResampleReason reason;
-                if (dirtyUsed < dirtyBudget && TryTakeDirtyChunk(terrain, out chunk, out reason)) {
+                // [v0.1.47] 卸载前的"最后一采"优先（4.2：进入→离开加载范围都要刷新一次）
+                if (m_forceHarvestChunk != null) {
+                    chunk = m_forceHarvestChunk;
+                    reason = m_forceHarvestReason;
+                    m_forceHarvestChunk = null;              // 只采一次
+                }
+                else if (dirtyUsed < dirtyBudget && TryTakeDirtyChunk(terrain, out chunk, out reason)) {
                     dirtyUsed++;
                 }
                 else if (rotationUsed < rotationBudget) {
@@ -1124,6 +1161,7 @@ namespace Game {
                 ["nearMarkedCells"] = NearMarkedCells,
                 ["nearLayerEnabled"] = SkylineRuntime.LodNearLayerEnabled,
                 ["nearLayerSwitch"] = "skyline.LodNearLayerEnabled / skyline.LodNearBandMark() 立刻铺满",
+                ["refreshedOnUnload"] = m_refreshedOnUnload,
                 ["radiusMetres"] = RadiusMetres,
                 ["cellSizeBlocks"] = CellSize,
                 ["fineCellSizeBlocks"] = FineSize,

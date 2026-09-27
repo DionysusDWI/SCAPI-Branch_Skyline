@@ -3,6 +3,32 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.47] - 2026-09-27
+
+第五十七个版本：**内置雾/视距边缘渐变默认移除（4.1）+ 卸载前 LOD 最后一采（4.2）**
+—— 目标在本轮被用户更新（细化 4.1~4.5 与 5），本版先落地其中两项可立即完成、可验证的。
+
+**本版相对 v0.1.46 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **4.1 去雾默认** | `skyline.FogDisabled` **默认改为 true**：内置雾 + 视距边缘霾带默认移除（用户口径："可以移除内置雾气效果和视距边缘渐变效果，后续配合光影系统独立开发"）；`false` 即逐位回到原版；LOD 雾参数走同一开关 |
+| **4.2 卸载前最后一采** | `SkylineLod.NotifyChunkUnloading(chunk)` + `TerrainUpdater.AllocateAndFreeChunks` 钩子（在 `SaveChunk/FreeChunk` 之前、**主线程**）；`Harvest` 里加"强制采一次"通道；`ResampleReason.Unloading`；诊断 `Survey().refreshedOnUnload` |
+| **5 口径数据（不含新特性）** | 新增 `heightlab/skyline-shadow-unify.py`：同一机位四种组合（都关/只 CPU/只 GPU/都开）测平均亮度、像素差、fps |
+
+### Verified（AgentLab）
+
+* **4.1**：重启后不做任何手动设置，`FogDescribe → disabled=True`（内置雾与边缘渐变默认移除）；
+* **4.2**：建 7 格石砖"标记柱"于 `(4420,66..72,9200)` → LOD 单元 `(276,575)` 采到 `coarse=68 / fine=[72,68,68,68]`；
+  把 `settings.VisibilityRange` 128 → 64 强制释放：**`loadedChunks` 201 → 51**、**`refreshedOnUnload` 0 → 150**，
+  标记单元卸载后仍为 `coarse=68 / fine=[72,68,68,68]` 且 **`dirty=False`**；已恢复 128、fps 30.2；
+* **5 口径**：A 基线 luma 109.71 / B 只 CPU 109.44（差 85,681 px）/ C 只 GPU 105.64（差 **207,552 px**）/
+  D 都开 **103.63**（差 276,312 px）——**GPU 单独影响最大，两套同开会叠暗**（留作数据点，本轮不改行为）。
+
+**新目标里未动的条目（如实列出）**：4.3（LOD 按 32³ 表面材质渲染、降内存）、4.4（门/栅栏等非完整方块按材质表现）
+未开始；4.5 按用户口径暂缓；5 的"效果类"（柔和光/天空盒/物体阴影/体积云/后处理/水面反射）按用户口径暂缓。
+证据：`data/sessions/skyline-v0147/`、`notes/120`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.46] - 2026-09-27
 
 第五十六个版本：**交接带"立刻铺满" + 三件套常备验收脚本** —— 补上 v0.1.45 如实记录的两个口子：

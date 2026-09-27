@@ -14,8 +14,12 @@ namespace Game {
     ///     会在某些对话框上抛 NullReference，这里直接从管理器列表摘除 + 从父控件移除，绕开动画队列。
     /// </summary>
     public static partial class SkylineRuntime {
-        /// <summary>[v0.1.35] 关雾开关（纯视觉测试用，默认关）。</summary>
-        public static bool FogDisabled { get; set; }
+        /// <summary>
+        /// [v0.1.35] 关雾开关；**[v0.1.47] 默认改为 true** —— 用户口径：
+        /// "可以移除游戏原有内置雾气效果和视距边缘渐变效果，后续如有需要则配合光影系统独立开发"。
+        /// 置 false 即回到游戏原版雾（含视距边缘霾带）。
+        /// </summary>
+        public static bool FogDisabled { get; set; } = true;
 
         /// <summary>雾带 (bottom, top, density)：关雾时把密度置 0 → 片元里 fogFactor 恒为 0。</summary>
         public static Vector3 FogBand(Vector3 bottomTopDensity) =>
