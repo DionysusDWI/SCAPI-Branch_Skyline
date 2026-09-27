@@ -40,8 +40,51 @@ namespace Game {
         public static int ChunksPerTick { get; set; } = 2;
         public static float MeshRebuildSeconds { get; set; } = 3f;
         public static int MaxCells { get; set; } = 24000;
-        /// <summary>精细层（8 m）覆盖到"视距 × 本系数"为止，之后交给 16 m 粗层。</summary>
-        public static float FineRangeFactor { get; set; } = 2.0f;
+        /// <summary>
+        /// 精细层（8 m）覆盖到"视距 × 本系数"为止，之后交给 16 m 粗层。
+        ///
+        /// **[v0.1.62] 2.0 → 4.0**：这是"远景 LOD 太平"真正能改的那一根杠杆（实测，确定性 `GBufferCapture`，
+        /// 强制重建后逐档对比）：
+        ///
+        /// | 系数 | 8 m 层覆盖到 | 覆盖率 | 平均亮度 | 索引总数 |
+        /// |---|---|---|---|---|
+        /// | 2.0（旧） | 256 m | 16,833 | 44.40 | 30,438 |
+        /// | **4.0（新）** | **512 m** | **17,475** | **46.90** | 51,642 |
+        /// | 6.0 | 768 m | 17,475 | 47.07 | 69,684 |
+        /// | 8.0 | 1024 m | 17,475 | 47.09 | 88,332 |
+        ///
+        /// 覆盖率与亮度在 **4.0 就饱和**（再往上只涨几何不涨画面）→ 取 4.0：**几何 ×1.7 换 +3.8% 覆盖率 / +2.5 亮度**；
+        /// 帧率实测无差异（都在 30 附近）。旧的 2.0 会让 256 m 以外全是 16 m 平台，正是"太平"的来源。
+        /// </summary>
+        public static float FineRangeFactor { get; set; } = 4.0f;
+
+        // ===== v0.1.62：LOD 采样"所有裸露在外的方块"（里程碑 1.6 的另一半）=====
+        /// <summary>
+        /// [v0.1.62] 采集时是否**额外**找"第二层表面"（裸露但不是列顶的那一层）。
+        ///
+        /// **默认关** —— 这是实测出来的结论，不是省事：实现完成并跑过确定性 A/B
+        /// （`GBufferCapture` + `LodSecondSurface(false/true)`）后测到：
+        /// 多画 385 个四边形 / 3,210 个索引，而 **G-buffer 覆盖率一模一样（16,833）**、亮度只差 **0.06/255**。
+        /// 原因是结构性的：`Height2` 按定义**低于** `Height`（`SecondMinDrop ≥ 2`），
+        /// 而每格的主表面是一整块 16 m 的四边形 —— 下层那张面**必然被上层完全盖住**。
+        /// 也就是说：**在"每格一个高度"的 LOD 里，"采样所有裸露表面"不可能看得见**；
+        /// 真正能看见的杠杆是**格子精细度**（见 `FineRangeFactor` 的实测）。
+        /// 开关与数据保留：等 LOD 换成更细的格子（或每格多高度场）之后，这个数据立刻就能用上。
+        /// </summary>
+        public static bool SecondSurfaceEnabled { get; set; }
+        /// <summary>[v0.1.62] 第二层表面至少要在主表面下方这么多格（否则两层太近，画出来是重复的面）。</summary>
+        public static int SecondMinDrop { get; set; } = 2;
+        /// <summary>[v0.1.62] 从主表面往下最多找这么多格（够覆盖树冠下方的地面；再深就不找了）。</summary>
+        public static int SecondSearchDepth { get; set; } = 40;
+        /// <summary>[v0.1.62] 第二层表面与主表面之间**至少**要隔这么多格空气（= 中间是真空腔，才叫"第二层"）。
+        /// 1 会把"台阶/斜坡"也算成第二层，2 才对应"树冠之下的地面"。</summary>
+        public static int SecondGap { get; set; } = 2;
+        /// <summary>[v0.1.62] 有第二层表面的**单元数**（普查，判据）。</summary>
+        public static int CellsWithSecond { get; private set; }
+        /// <summary>[v0.1.62] 第二层顶面四边形数（上一次重建）。</summary>
+        public static int SecondQuads { get; private set; }
+        /// <summary>[v0.1.62] 第二层裙边四边形数（上一次重建）。</summary>
+        public static int SecondWallQuads { get; private set; }
 
         // ===== v0.1.5：光影接口预适配（Dawnlight / Iris 式管线）=====
         /// <summary>
@@ -76,6 +119,13 @@ namespace Game {
             /// <summary>[v0.1.44] 采集时该顶面方块的光照值（0..15）。近景地形顶点色由光照决定，
             /// LOD 一直用常数基色 → 交界处出现"亮度台阶"（交接带口径，见 notes/117）。</summary>
             public byte Light;
+            // [v0.1.62] **第二层表面**：裸露但**不是列顶**的那层表面（树冠底面之下的地面、檐下的墙顶、
+            // 雪层台阶…）。用户口径 1.6："LOD 不应当只采样最上层方块，而是采样所有裸露在外的方块"。
+            // 没有第二层时 `HasSecond = false`，网格与 v0.1.61 逐位一致。
+            public short Height2;
+            public ushort Value2;
+            public byte Light2;
+            public bool HasSecond;
         }
 
         static readonly Dictionary<long, Cell> m_cells = [];
@@ -423,6 +473,12 @@ namespace Game {
             Span<long> fine1 = stackalloc long[64];
             Span<long> fine2 = stackalloc long[64];
             Span<long> fine3 = stackalloc long[64];
+            // [v0.1.62] 第二层表面的采样缓冲（与主表面同一套中位/众数口径，只是样本集不同）
+            Span<long> coarseSecond = stackalloc long[TerrainChunk.Size * TerrainChunk.Size];
+            Span<long> fineSecond0 = stackalloc long[64];
+            Span<long> fineSecond1 = stackalloc long[64];
+            Span<long> fineSecond2 = stackalloc long[64];
+            Span<long> fineSecond3 = stackalloc long[64];
             // v0.1.8：脏重采（推通道）**不挤占**轮转采集的预算。原来两者共用一个预算，
             // 一旦脏队列被"世界加载期的一批内容变更 / 大编辑"堆起来就要排队好几秒
             // （12:45 实测：目标单元 7.2 s 才刷新，超出 1 s 判据）。现在：
@@ -470,6 +526,7 @@ namespace Game {
                 // (height<<32|value) 打包进 5 组样本（粗层 256 + 4 个细子块各 64），
                 // 各自排序取中位。Span<long>.Sort() 用默认比较（先 height 后 value），无 lambda。
                 int cCount = 0, f0 = 0, f1 = 0, f2 = 0, f3 = 0;
+                int cSecond = 0, s0 = 0, s1 = 0, s2 = 0, s3 = 0;
                 // [v0.1.45] 近环细层（4 m）只填"视距外的交接带"这一圈：先判断本区块在不在带里
                 bool fillNear = false;
                 if (SkylineRuntime.LodNearLayerEnabled) {
@@ -492,6 +549,38 @@ namespace Game {
                         }
                         long packed = ((long)top << 32) | (uint)chunk.GetCellValueFast(x, top, z);
                         coarseSamples[cCount++] = packed;
+                        // [v0.1.62] **第二层表面**：从主表面往下找"下一块上面是空气的实心块"，
+                        // 且它与主表面之间至少隔 `SecondGap` 格空气。树冠之下的地面、檐下的墙顶就是它。
+                        // 找不到（实心一直连到主表面）就不算 —— 那本来就是同一个表面。
+                        if (SecondSurfaceEnabled) {
+                            int airRun = 0;
+                            int floorY = Math.Max(top - SecondSearchDepth, TerrainChunk.MinHeight);
+                            for (int yy = top - 1; yy >= floorY; yy--) {
+                                int vv = chunk.GetCellValueFast(x, yy, z);
+                                if (Terrain.ExtractContents(vv) == 0) {
+                                    airRun++;
+                                    continue;
+                                }
+                                // 走到第一个实心块时**不能直接停**：主表面（树冠顶）下面往往还有好几层实心树叶，
+                                // 真正要找的是"**上面攒够 SecondGap 格空气**的那个实心块"= 树冠之下的地面。
+                                // 空气不够 → 这一块属于主表面本身，重置计数继续往下。
+                                if (airRun < SecondGap) {
+                                    airRun = 0;
+                                    continue;
+                                }
+                                if (top - yy >= SecondMinDrop) {
+                                    long packed2 = ((long)yy << 32) | (uint)vv;
+                                    coarseSecond[cSecond++] = packed2;
+                                    switch ((x >> 3) | ((z >> 3) << 1)) {
+                                        case 0: fineSecond0[s0++] = packed2; break;
+                                        case 1: fineSecond1[s1++] = packed2; break;
+                                        case 2: fineSecond2[s2++] = packed2; break;
+                                        default: fineSecond3[s3++] = packed2; break;
+                                    }
+                                }
+                                break;                        // 已经找到"主表面 → 空气 → 实心"这一组，再深就是更下面的层
+                            }
+                        }
                         if (fillNear) {
                             int sub = ((x >> 2) & 3) + ((z >> 2) & 3) * 4;
                             if (nearCounts[sub] < 16) {
@@ -519,9 +608,38 @@ namespace Game {
                 MedianInto(fine1, f1, fineTop, fineValue, fineLight, 1);
                 MedianInto(fine2, f2, fineTop, fineValue, fineLight, 2);
                 MedianInto(fine3, f3, fineTop, fineValue, fineLight, 3);
+                // [v0.1.62] 第二层表面：同一个中位/众数口径，只是样本集不同。
+                // **要求"够多列有第二层"才认**（否则单列噪声会在远处糊出一层假表面）。
+                Span<int> coarseTop2 = [int.MaxValue];
+                Span<int> coarseValue2 = [0];
+                Span<byte> coarseLight2 = [15];
+                if (cSecond >= Math.Max(4, cCount / 8)) {
+                    MedianInto(coarseSecond, cSecond, coarseTop2, coarseValue2, coarseLight2, 0);
+                }
+                bool coarseHasSecond = coarseTop2[0] != int.MaxValue && bestTop - coarseTop2[0] >= SecondMinDrop;
+                Span<int> fineTop2 = [int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue];
+                Span<int> fineValue2 = [0, 0, 0, 0];
+                Span<byte> fineLight2 = [15, 15, 15, 15];
+                Span<int> fineSecondCount = [s0, s1, s2, s3];
+                if (s0 >= 4) {
+                    MedianInto(fineSecond0, s0, fineTop2, fineValue2, fineLight2, 0);
+                }
+                if (s1 >= 4) {
+                    MedianInto(fineSecond1, s1, fineTop2, fineValue2, fineLight2, 1);
+                }
+                if (s2 >= 4) {
+                    MedianInto(fineSecond2, s2, fineTop2, fineValue2, fineLight2, 2);
+                }
+                if (s3 >= 4) {
+                    MedianInto(fineSecond3, s3, fineTop2, fineValue2, fineLight2, 3);
+                }
                 if (bestTop != int.MaxValue) {
                     m_cells[key] = new Cell {
-                        Height = (short)bestTop, Value = (ushort)bestValue, Light = coarseLight[0]
+                        Height = (short)bestTop, Value = (ushort)bestValue, Light = coarseLight[0],
+                        Height2 = (short)(coarseHasSecond ? coarseTop2[0] : 0),
+                        Value2 = (ushort)(coarseHasSecond ? coarseValue2[0] : 0),
+                        Light2 = coarseHasSecond ? coarseLight2[0] : (byte)15,
+                        HasSecond = coarseHasSecond
                     };
                     m_harvestedCells++;
                     m_dirty = true;
@@ -538,7 +656,12 @@ namespace Game {
                         continue;
                     }
                     m_cellsFine[fkey] = new Cell {
-                        Height = (short)fineTop[k], Value = (ushort)fineValue[k], Light = fineLight[k]
+                        Height = (short)fineTop[k], Value = (ushort)fineValue[k], Light = fineLight[k],
+                        Height2 = (short)(fineTop2[k] == int.MaxValue ? 0 : fineTop2[k]),
+                        Value2 = (ushort)fineValue2[k],
+                        Light2 = fineLight2[k],
+                        HasSecond = fineSecondCount[k] >= 4 && fineTop2[k] != int.MaxValue
+                                    && fineTop[k] - fineTop2[k] >= SecondMinDrop
                     };
                     m_dirty = true;
                 }
@@ -819,6 +942,20 @@ namespace Game {
             // v0.1.19：昼夜调制——坡向明暗/自阴影是"太阳"效应，夜里（SkyLightValue→0）应淡出，
             // 否则远景观感与近景（由格子光照驱动、会随昼夜变暗）不一致。
             m_sunAmount = MathUtils.Saturate((sky?.SkyLightValue ?? 15) / 15f);
+            // [v0.1.62] 第二层表面的统计每次重建归零（普查在下面按字典实数一遍）
+            SecondQuads = 0;
+            SecondWallQuads = 0;
+            CellsWithSecond = 0;
+            foreach (Cell c2 in m_cells.Values) {
+                if (c2.HasSecond) {
+                    CellsWithSecond++;
+                }
+            }
+            foreach (Cell c2 in m_cellsFine.Values) {
+                if (c2.HasSecond) {
+                    CellsWithSecond++;
+                }
+            }
             float skipRadius = visualRange + FineSize * 0.5f;                  // 视距内不画（v0.1.0 修复）
             float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
             // [v0.1.45] 近环 4 m 层：只覆盖 [skipRadius, skipRadius+NearBandMetres]
@@ -924,6 +1061,19 @@ namespace Game {
             // 侧壁（v0.1.0 改进）：相邻单元高度差 ≥ 0.5 m 时，从**高的一侧**向下画一圈
             // 双面"裙边墙"，消除浮空平板之间的断层/黑洞（post3 取证）。
             var walls = new List<(int x0, int z0, float yHigh, float yLow, int side, int value)>();
+            // [v0.1.62] **第二层表面的顶面表**：与主表面合成同一张表，走同一套材质/光照管线
+            // （没有第二层单元的格时，这张表 == keys，逐位回 v0.1.61）。
+            var tops = new List<(long Key, int Height, int Value, byte Light)>(keys.Count);
+            int secondSheets = 0;
+            foreach (long key in keys) {
+                Cell c0 = dict[key];
+                tops.Add((key, c0.Height, c0.Value, c0.Light));
+                if (SecondSurfaceEnabled && c0.HasSecond) {
+                    tops.Add((key, c0.Height2, c0.Value2, c0.Light2));
+                    secondSheets++;
+                }
+            }
+            int secondWallCount = 0;
             foreach (long key in keys) {
                 Cell cell = dict[key];
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
@@ -939,10 +1089,28 @@ namespace Game {
                     }
                     walls.Add((cx << cellShift, cz << cellShift, yHigh, yLow, side, cell.Value));
                 }
+                // [v0.1.62] 第二层表面的**裙边**：从第二层顶面向下接到"邻居的第二层顶面或自己的主表面"，
+                // 把树冠/檐下那层表面的轮廓封闭起来（否则远处看是悬空的平板）。
+                if (SecondSurfaceEnabled && cell.HasSecond) {
+                    float yHigh2 = cell.Height2 + 1f;
+                    float yOwn = cell.Height + 1f;
+                    for (int side = 0; side < 4; side++) {
+                        long nk2 = Key(cx + s_sideDx[side], cz + s_sideDz[side]);
+                        float yLow2 = yOwn;
+                        if (dict.TryGetValue(nk2, out Cell nb2) && nb2.HasSecond) {
+                            yLow2 = MathF.Max(yOwn, nb2.Height2 + 1f);
+                        }
+                        if (yHigh2 - yLow2 < 0.5f) {
+                            continue;
+                        }
+                        walls.Add((cx << cellShift, cz << cellShift, yHigh2, yLow2, side, cell.Value2));
+                        secondWallCount++;
+                    }
+                }
             }
 
-            int indexCount = keys.Count * 6 + walls.Count * 12;
-            int vertexCount = keys.Count * 4 + walls.Count * 4;
+            int indexCount = tops.Count * 6 + walls.Count * 12;
+            int vertexCount = tops.Count * 4 + walls.Count * 4;
             if (vertexCount == 0) {
                 // 空网格：由外层 RebuildMesh 统一决定是否保持 dirty（v0.1.0 修复的逻辑移到外层）。
                 SetLayerMesh(layer, null, null, 0, 0, 0);
@@ -972,18 +1140,19 @@ namespace Game {
                     BlockGeometryGenerator.SetupVertex(px, py, pz, c, u, v, ref bakedVertices[i]);
                 }
             }
-            foreach (long key in keys) {
-                Cell cell = dict[key];
+            // [v0.1.62] 这里遍历的是 `tops`（主表面 + 第二层表面），**同一套材质/光照/坡向/自阴影管线**，
+            // 只是高度与材质取自各自那一层。
+            foreach ((long key, int topHeight, int topValue, byte topLight) in tops) {
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
                 float x0 = cx << cellShift, z0 = cz << cellShift;
-                float y = cell.Height + 1f;
+                float y = topHeight + 1f;
                 // [v0.1.44] 基色改用**采集时的光照值**（0..15 → 0..255，与游戏光照→顶点色的口径一致）。
                 // 关掉开关即回到常数 220（= 光 13），用于 A/B（`skyline.LodLightFromSamples`）。
                 Color cellBase = SkylineRuntime.LodLightFromSamples
-                    ? new Color((byte)(cell.Light * 17), (byte)(cell.Light * 17), (byte)(cell.Light * 17))
+                    ? new Color((byte)(topLight * 17), (byte)(topLight * 17), (byte)(topLight * 17))
                     : light;
-                int contents = Terrain.ExtractContents(cell.Value);
-                int value = cell.Value;
+                int contents = Terrain.ExtractContents(topValue);
+                int value = topValue;
                 Block block = BlocksManager.Blocks[contents];
                 int slotCount = Math.Max(block.GetTextureSlotCount(value), 1);
                 // [v0.1.48] 4.4：非完整方块（门/栅栏/栅栏门…）在 LOD 里按**材质**表现，
@@ -1001,12 +1170,12 @@ namespace Game {
                 Color cellLight = cellBase;
                 if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f) {
                     float gain = SlopeShadingStrength > 0f
-                        ? SlopeLightGain(dict, cx, cz, cell.Height, cellSize)
+                        ? SlopeLightGain(dict, cx, cz, topHeight, cellSize)
                         : 1f;
                     gain = MathUtils.Lerp(1f, gain, m_sunAmount);      // v0.1.19：坡向明暗同样按日照量淡出
                     if (SelfShadowStrength > 0f) {
                         // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）
-                        float shadow = SelfShadowFactor(dict, cx, cz, cell.Height, cellSize);
+                        float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize);
                         // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
                         gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
                         if (layer == 0) {
@@ -1114,7 +1283,16 @@ namespace Game {
             else {
                 ib.SetData(indices, 0, ii);
             }
-            SetLayerMesh(layer, vb, ib, ii, built, vertexCount);
+            // [v0.1.62] "单元数"仍按**主表面单元**报（`keys.Count`），第二层表面的顶面数单独统计
+            if (layer == 0) {
+                SecondQuads = secondSheets;
+                SecondWallQuads = secondWallCount;
+            }
+            else if (layer == 1) {
+                SecondQuads += secondSheets;
+                SecondWallQuads += secondWallCount;
+            }
+            SetLayerMesh(layer, vb, ib, ii, keys.Count, vertexCount);
         }
 
         /// <summary>[v0.1.45] 把一套网格写回对应层（0=粗 16 m、1=细 8 m、2=近环 4 m）。</summary>
@@ -1356,6 +1534,11 @@ namespace Game {
                 }
             }
             float covered = m_cells.Count * (CellSize * (float)CellSize);
+            // [v0.1.62] 精细层**实际**覆盖多远（与 `RebuildMesh` 同一公式；不是简单的 视距×系数）
+            float viewRangeNow = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            float skipRadiusNow = viewRangeNow + FineSize * 0.5f;
+            float fineRangeNow = MathF.Max(viewRangeNow * FineRangeFactor, skipRadiusNow + FineSize * 4f);
             return new JsonObject {
                 ["ok"] = true,
                 ["enabled"] = Enabled,
@@ -1371,6 +1554,14 @@ namespace Game {
                 ["nearBandMetres"] = Math.Round(NearBandMetres, 1),
                 ["nearMarkedCells"] = NearMarkedCells,
                 ["nearLayerEnabled"] = SkylineRuntime.LodNearLayerEnabled,
+                // [v0.1.62] 第二层表面（"所有裸露在外的方块"的另一半）
+                ["secondSurface"] = SecondSurfaceEnabled,
+                ["cellsWithSecond"] = CellsWithSecond,
+                ["secondQuads"] = SecondQuads,
+                ["secondWallQuads"] = SecondWallQuads,
+                ["secondMinDrop"] = SecondMinDrop,
+                ["secondGap"] = SecondGap,
+                ["secondSearchDepth"] = SecondSearchDepth,
                 // [v0.1.60] 顶点格式与字节：属性格式（SkylineLodVertex，28 B）还是老格式（TerrainVertex，20 B）
                 ["vertexAttributes"] = SkylineRuntime.LodVertexAttributes,
                 ["vertexStride"] = SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20,
@@ -1381,6 +1572,8 @@ namespace Game {
                 ["nearLayerSwitch"] = "skyline.LodNearLayerEnabled / skyline.LodNearBandMark() 立刻铺满",
                 ["refreshedOnUnload"] = m_refreshedOnUnload,
                 ["radiusMetres"] = RadiusMetres,
+                ["fineRangeFactor"] = FineRangeFactor,
+                ["fineRangeMetres"] = Math.Round(fineRangeNow, 1),
                 ["cellSizeBlocks"] = CellSize,
                 ["fineCellSizeBlocks"] = FineSize,
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),

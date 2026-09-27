@@ -17,6 +17,27 @@ namespace Game {
             return $"{{\"ok\":true,\"marked\":{marked},\"totalMarked\":{SkylineLod.NearMarkedCells}}}";
         }
 
+        /// <summary>
+        /// [v0.1.62] **LOD 也采样"所有裸露在外的方块"**（里程碑 1.6 的另一半）：开 = 除了列顶，
+        /// 还采集并绘制"第二层表面"（树冠之下的地面、檐下的墙顶等裸露但非列顶的表面）；
+        /// 关 = 逐位回到 v0.1.61 的"每格只有一个中位高度"。切换后立刻重建网格。
+        /// 判据在 `skyline.LodSurvey()` 的 `cellsWithSecond / secondQuads / secondWallQuads`。
+        /// </summary>
+        public static string LodSecondSurface(bool enabled) {
+            SkylineLod.SecondSurfaceEnabled = enabled;
+            SkylineLod.RequestRebuild();
+            return SkylineLod.Survey();
+        }
+
+        /// <summary>[v0.1.62] 第二层表面的参数：最小落差 / 需要的空气间隔 / 向下搜索深度。</summary>
+        public static string LodSecondSurfaceParams(int minDrop, int gap, int searchDepth) {
+            SkylineLod.SecondMinDrop = Math.Clamp(minDrop, 1, 32);
+            SkylineLod.SecondGap = Math.Clamp(gap, 1, 8);
+            SkylineLod.SecondSearchDepth = Math.Clamp(searchDepth, 4, 120);
+            SkylineLod.RequestRebuild();
+            return SkylineLod.Survey();
+        }
+
         /// <summary>[v0.1.48] 4.4：LOD 材质按"完整方块取顶面 / 非完整方块取侧面"（默认 true；
         /// false = 回到 v0.1.47 的"一律顶面"）。改后需 `LodReset()` 或等下一次网格重建生效。</summary>
         public static bool LodMaterialAware { get; set; } = true;
