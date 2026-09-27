@@ -7,6 +7,77 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.96] - 2026-09-28
+
+第一百零三个版本：**体素壳额度的滑动窗口**（里程碑 1.3 的"体积感"从 **0** 恢复）+ **验收脚手架的观测前提**。
+
+### 1. 发现：那条"体积感"实际一个像素都没画
+
+v0.1.60 给**最近档**加了"表面体素壳"（六向贪心网格 ⇒ 体素的体积感）。本轮普查：
+
+```
+voxelShellCubes = 512（顶格）   voxelSkippedByCap = 12,338
+voxelMeshResident = 0           drawnVoxelLastFrame = 0
+CubeShellSurfaceVoxel 开/关的画面差 = 0 px（同设置连拍噪声底亦为 0 px）
+```
+
+**根因**：额度 `SurfaceVoxelMaxCubes = 512` 是**终身累计**的 —— 第一批跨过卸载边界的 512 个立方体
+把它占死（6.25 MiB），玩家走远后它们还在占，后来进入近档的立方体**一个都拿不到额度**
+⇒ `wantVoxel` 永远 false ⇒ 最近档永远建不出体素网格。
+
+### 2. 修法：额度**滑动**（与里程碑 2.2 的滑动窗口同一口径）
+
+新增 `VoxelShellSlidingWindow`（默认开）与 `VoxelShellReleaseFactor`（默认 4）：
+立方体离开体素档很远（`rel > 48 × 4 = 192 m`）就**交还 `Entry.VoxelShell` 并减计数**
+（`VoxelShellReleasedTotal` 记账）。交还窗口必须比档位宽，否则"刚交还又被自己采回来"会抖。
+关掉它 = 逐位回到 v0.1.95 的终身累计口径（A/B 用）。
+
+### 3. 实测（从 0 到"真的在画"）
+
+| | 修前 | 修后 |
+|---|---|---|
+| `voxelMeshResident` | **0** | **61~74** |
+| `drawnVoxelLastFrame` | **0** | **22~56**（部分方向） |
+| `voxelShellReleasedTotal` | —（无此字段） | **3,571~5,126** |
+| 体素档开/关画面差 | **0 px** | 直接差 213~742 px；**稳定掩膜上 170~742 px**（噪声底 0~18 px） |
+
+判据见新脚本 `skyline-v0196-voxel-sliding.py`：①额度在交还 ②有常驻体素网格
+③**转 8 个方向至少一个真的画到** ④"开/关"的差在**稳定像素掩膜**（每态连拍取交集 ⇒ 排除场景动画）上 > 0。
+**如实记**：其视觉量级不大（170~742 px，约 0.02%~0.08%）—— 它的几何与高度场版本大部分是同一张顶面，
+差异在台阶/侧裙/悬垂处；本版证明的是"**它真的在画了**"。
+
+### 4. 验收脚手架的"观测前提"（巡检 4 条 FAIL 竟然全是自己造成的）
+
+v0193/v0194/v0196 并入巡检后，**连着跑 4 条 FAIL、单独跑全过**：
+`v0181` 只有 30 个候选（**没有样本**）、`v0193` 雾差 0.0%（镜头前是洞壁）、
+`v0196` 整段 walk 在地下走完、`v0194` 撞上一条**位姿相关**的判据。
+
+* `bridge_util.py` 新增 `ensure_open_vantage()`（`teleport(surface)` 从上一个测试挖的坑里脱困）、
+  `aim_at()`（闭环摆视角）、`aim_to_far_view()`（用壳仓的"候选最远距离"当深度探针找远景方向；
+  找不到远景 ⇒ 调用方报 **SKIP** 而不是 FAIL）；
+* v0177/v0181/v0193/v0194/v0196 各自接上前置条件；`v0181` 的 `--steps` 默认 **0 → 6**，
+  候选 < 100 时明确报 SKIP；
+* 修掉 v0194 一条**逻辑上不成立**的判据（"剔除开着画得更远"位姿相关）⇒ 改为断言
+  "候选数 ≤ 个数上限 + 不被时间预算截断"（可见集不被任何预算掐掉）。
+
+**结果：巡检 14 条 PASS 14 / FAIL 0。**
+
+### 5. 如实留档（没查完的）
+
+长巡检后（大量传送/重建网格）堆指纹出现 `Engine.Graphics.VertexBuffer / IndexBuffer` **live ≈ 46,466 对**
+（`MemoryCompactAndCollect` 回收 27.1 MiB 后 gcHeap 1,037.5 MiB）。
+本轮**没有**做持有链定位（`dotnet-dump analyze` 在本机报 "No CLR runtime found"、缺 DAC，v0.1.93 已记），
+**不假装已经解释**，列入下一轮。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**（`defaults` 新增 `voxelShellSlidingWindow`）；
+* 功能验收巡检 **PASS 14 / FAIL 0**；
+* 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0196/`（`voxel-sliding.json`、`voxel-on-*.png`、`voxel-off-*.png`、
+`regression2.json`、`sweep-final3/`）、`notes/172`。
+
 ## [v0.1.95] - 2026-09-28
 
 第一百零二个版本：**修一条正在变空的判据** —— `lod-attr-selfcheck` 必须"有东西可比"。

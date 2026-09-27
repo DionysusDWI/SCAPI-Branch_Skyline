@@ -136,6 +136,25 @@ namespace Game {
         /// <summary>[v0.1.60] 体素壳的采集半径（米，相对视距）：`rel ≤ 此值` 才采（默认 48 = `TierMetres[0]`）。</summary>
         public static float SurfaceVoxelRelMetres { get; set; } = 48f;
 
+        /// <summary>
+        /// [v0.1.96] **体素壳的滑动窗口**（默认开）：离开体素档 `SurfaceVoxelRelMetres × VoxelShellReleaseFactor`
+        /// 就**交还额度**（把 `Entry.VoxelShell` 放掉并减计数）。
+        ///
+        /// 为什么必须做：额度（`SurfaceVoxelMaxCubes`）原本是**终身累计**的 —— 实测
+        /// `voxelShellCubes=512`（顶格）、`voxelSkippedByCap=9619`，而 `voxelMeshResident=0`、
+        /// `drawnVoxelLastFrame=0`：**第一批跨过卸载边界的 512 个立方体把额度占死**（6.25 MiB），
+        /// 玩家走远后它们还在占，于是近档**一个体素网格都建不出来** ⇒
+        /// 里程碑 1.3 要的"体积感"（v0.1.60 的表面体素壳最近档）**实际是 0**。
+        ///
+        /// 交还时机：`rel > 48 × 4 = 192 m`。此时立方体早已不可能落到体素档（`step ≤ 1` ⇔ `rel ≤ 48`），
+        /// 而新立方体是在 `rel ≈ 48` 的**卸载时刻**才采体素壳 —— 所以窗口必须比档位宽出一段，
+        /// 否则"刚交还就被自己重新采回来"会抖。关掉它 = 逐位回到 v0.1.95 的终身累计口径（A/B 用）。
+        /// </summary>
+        public static bool VoxelShellSlidingWindow { get; set; } = true;
+        public static float VoxelShellReleaseFactor { get; set; } = 4f;
+        /// <summary>[v0.1.96] 累计交还（释放）的体素壳数。</summary>
+        public static long VoxelShellReleasedTotal { get; private set; }
+
         // ---------------- 带内主动补采（v0.1.61，里程碑 1.2「无缝转换」的数据侧） ----------------
         /// <summary>
         /// [v0.1.61] **在地形还在的时候就把它所属的 32³ 壳采好**，这样地形释放的那一刻壳已经就位。
@@ -1374,6 +1393,19 @@ namespace Game {
                     }
                 }
                 int step = StepForDistance(dist, viewRange);
+                // [v0.1.96] **体素壳额度也要滑动**：离开体素档很远就交还，让后面进入近档的立方体拿得到。
+                //   不交还的后果是实测出来的：额度顶格 512、`voxelSkippedByCap=9619`、
+                //   而 `voxelMeshResident=0` / `drawnVoxelLastFrame=0` —— 近档一个体素网格都建不出来。
+                if (VoxelShellSlidingWindow && entry.VoxelShell != null) {
+                    float rel = dist - viewRange;
+                    if (rel > SurfaceVoxelRelMetres * MathF.Max(VoxelShellReleaseFactor, 1f)) {
+                        entry.VoxelShell = null;
+                        if (m_voxelShellCount > 0) {
+                            m_voxelShellCount--;
+                        }
+                        VoxelShellReleasedTotal++;
+                    }
+                }
                 // [v0.1.60] 最近档用**表面体素网格**（体积感），其余档位仍用列顶高度场（省内存）
                 bool wantVoxel = SurfaceVoxelEnabled && entry.VoxelShell != null && step <= SurfaceVoxelMaxStep;
                 bool hasMesh = entry.MeshIsVoxel ? entry.VoxelMesh != null : entry.Mesh != null;
@@ -2182,6 +2214,10 @@ namespace Game {
                 ["voxelMeshBytes"] = VoxelMeshBytes,
                 ["voxelMeshMiB"] = Math.Round(VoxelMeshBytes / 1048576.0, 3),
                 ["voxelHarvestedTotal"] = VoxelHarvestedTotal,
+                // [v0.1.96] 体素壳额度的滑动窗口：不交还就"顶格 + 近档 0 网格"（见 VoxelShellSlidingWindow 注释）
+                ["voxelShellSlidingWindow"] = VoxelShellSlidingWindow,
+                ["voxelShellReleaseFactor"] = VoxelShellReleaseFactor,
+                ["voxelShellReleasedTotal"] = VoxelShellReleasedTotal,
                 ["voxelRefreshedTotal"] = VoxelRefreshedTotal,
                 ["voxelMeshedTotal"] = VoxelMeshedTotal,
                 ["voxelSkippedByCap"] = VoxelSkippedByCap,
