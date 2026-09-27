@@ -31,6 +31,10 @@ namespace Game {
 
         public static float GpuShadowRadius { get; set; } = 512f;
 
+        /// <summary>[v0.1.33] 是否把**真实区块几何**也画进同一张深度图（默认开）。
+        /// v0.1.32 只画 LOD 网格，因此近景（≤视距+8 m，LOD 刻意跳过）是空洞。</summary>
+        public static bool GpuShadowIncludeChunks { get; set; } = true;
+
         const string GpuShadowVsh = @"#ifdef HLSL
 
 float2 u_origin;
@@ -181,6 +185,17 @@ void main()
                 Display.DepthStencilState = DepthStencilState.Default;
                 Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
                 SkylineLod.DrawWithShader(shader);
+                // [v0.1.33] 真实区块几何：与 LOD 共用同一个深度 shader / 同一张深度图（不透明子集 0..4）。
+                int chunksDrawn = 0;
+                if (GpuShadowIncludeChunks) {
+                    foreach (TerrainChunk chunk in subsystemTerrain.Terrain.AllocatedChunks) {
+                        if (chunk == null || chunk.State != TerrainChunkState.Valid || chunk.Buffers.Count == 0) {
+                            continue;
+                        }
+                        DrawChunkIntoDepth(shader, chunk);
+                        chunksDrawn++;
+                    }
+                }
 
                 Image image = m_gpuShadowRt.GetData(new Rectangle(0, 0, size, size));
                 int covered = 0;
@@ -217,6 +232,13 @@ void main()
                     Vector4 clip = Vector4.Transform(new Vector4(world - origin3, 1f), viewProjectionShifted);
                     float sx = (clip.X / clip.W) * 0.5f + 0.5f;
                     float sy = 0.5f - (clip.Y / clip.W) * 0.5f;
+                    // 视锥外（比如高得超出正交盒的高点）→ 记 outside，不参与判定（覆盖半径是配置项，不是缺陷）。
+                    if (sx < 0f || sx > 1f || sy < 0f || sy > 1f) {
+                        samples.Add(new JsonObject {
+                            ["cx"] = pcx, ["cz"] = pcz, ["top"] = pheight, ["outside"] = true
+                        });
+                        continue;
+                    }
                     int ix = Math.Clamp((int)(sx * size), 0, size - 1);
                     int iy = Math.Clamp((int)(sy * size), 0, size - 1);
                     int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * 255f);
@@ -244,6 +266,52 @@ void main()
                         selfCheckOk = false;
                     }
                 }
+                // [v0.1.33] 近景自检：玩家周围几列的**真实地表顶面点**（v0.1.32 时它们会落在背景上，
+                // 本版由"真实区块几何"覆盖，应命中）。
+                (int x, int z)[] localPairs = [(4290, 9095), (4316, 9099), (4280, 9080), (4300, 9100)];
+                foreach ((int lx, int lz) in localPairs) {
+                    int top = terrain.GetTopHeight(lx, lz);
+                    if (top <= TerrainChunk.MinHeight) {
+                        continue;                                       // 未加载 → 跳过
+                    }
+                    Vector3 world = new(lx + 0.5f, top + 1.5f, lz + 0.5f);
+                    Vector4 clip = Vector4.Transform(new Vector4(world - origin3, 1f), viewProjectionShifted);
+                    float sx = (clip.X / clip.W) * 0.5f + 0.5f;
+                    float sy = 0.5f - (clip.Y / clip.W) * 0.5f;
+                    if (sx < 0f || sx > 1f || sy < 0f || sy > 1f) {
+                        samples.Add(new JsonObject {
+                            ["kind"] = "chunk",
+                            ["x"] = lx, ["z"] = lz, ["top"] = top, ["outside"] = true
+                        });
+                        continue;
+                    }
+                    int ix = Math.Clamp((int)(sx * size), 0, size - 1);
+                    int iy = Math.Clamp((int)(sy * size), 0, size - 1);
+                    int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * 255f);
+                    int got = -1;
+                    int bestErr = int.MaxValue;
+                    foreach (int flip in new[] { 0, 1 }) {
+                        int cy = flip == 0 ? iy : size - 1 - iy;
+                        for (int dy = -8; dy <= 8; dy++) {
+                            for (int dx = -8; dx <= 8; dx++) {
+                                int qx = Math.Clamp(ix + dx, 0, size - 1);
+                                int qy = Math.Clamp(cy + dy, 0, size - 1);
+                                int v = image.GetPixel(qx, qy).R;
+                                int err = Math.Abs(v - expected);
+                                if (err < bestErr) { bestErr = err; got = v; }
+                            }
+                        }
+                    }
+                    samples.Add(new JsonObject {
+                        ["kind"] = "chunk",
+                        ["x"] = lx, ["z"] = lz, ["top"] = top,
+                        ["pixelX"] = ix, ["pixelY"] = iy,
+                        ["expectedDepth"] = expected, ["mapDepth"] = got, ["absErr"] = bestErr
+                    });
+                    if (bestErr > 24) {
+                        selfCheckOk = false;
+                    }
+                }
                 checkedPairs = samples.Count;
                 m_gpuShadowCaptures++;
                 m_gpuShadowLast =
@@ -256,6 +324,7 @@ void main()
                 result["radius"] = radius;
                 result["covered"] = covered;
                 result["coverage"] = Math.Round((double)covered / (size * size), 5);
+                result["chunksDrawn"] = chunksDrawn;
                 result["minDepth"] = minDepth;
                 result["maxDepth"] = maxDepth;
                 result["meanDepth"] = Math.Round(covered > 0 ? sumDepth / covered : 0, 1);
@@ -299,10 +368,40 @@ void main()
                 result["stats"] = m_gpuShadowLast;
             }
             catch (Exception e) {
-                result["ok"] = false;
-                result["err"] = e.Message;
-            }
+               result["ok"] = false;
+               result["err"] = e.Message;
+           }
             return result.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.33] 把一个区块的**不透明子集（0..4）**画进当前深度图。
+        /// 逻辑与 `TerrainRenderer.DrawTerrainChunkGeometrySubsets(shader, chunk, 0x1F, false)` 一致：
+        /// 相邻子集的索引区间合并成一次 DrawIndexed（减少 draw call）。
+        /// </summary>
+        static void DrawChunkIntoDepth(Shader shader, TerrainChunk chunk) {
+            const int opaqueMask = 0x1F;                             // 子集 0..4 = 不透明
+            foreach (TerrainChunkGeometry.Buffer buffer in chunk.Buffers) {
+                int start = int.MaxValue;
+                int end = 0;
+                for (int i = 0; i < 8; i++) {
+                    if (i < 7 && (opaqueMask & (1 << i)) != 0) {
+                        if (buffer.SubsetIndexBufferEnds[i] > 0) {
+                            if (start == int.MaxValue) {
+                                start = buffer.SubsetIndexBufferStarts[i];
+                            }
+                            end = buffer.SubsetIndexBufferEnds[i];
+                        }
+                    }
+                    else {
+                        if (end > start) {
+                            Display.DrawIndexed(PrimitiveType.TriangleList, shader,
+                                buffer.VertexBuffer, buffer.IndexBuffer, start, end - start);
+                        }
+                        start = int.MaxValue;
+                    }
+                }
+            }
         }
     }
 }
