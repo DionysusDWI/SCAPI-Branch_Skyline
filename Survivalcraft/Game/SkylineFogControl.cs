@@ -36,6 +36,12 @@ namespace Game {
         /// </summary>
         public static bool ShellFurnitureCollapse { get; set; } = true;
 
+        /// <summary>
+        /// [v0.1.59] 壳采集时**把材质替换成 LOD 结构材质**（默认开）：草方块→泥土、雪层/雪→雪方块。
+        /// 用户口径（1.6）："雪层算一个雪方块，而草方块则算作泥土"。
+        /// </summary>
+        public static bool ShellLodMaterialSubstitute { get; set; } = true;
+
         public static string FogDescribe() =>
             $"fog disabled={FogDisabled} (density=0; 关掉开关即恢复)";
 

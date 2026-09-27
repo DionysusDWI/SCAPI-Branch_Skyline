@@ -150,7 +150,7 @@ namespace Game {
         /// <summary>实例口径的家具塌缩（顺手记账）。</summary>
         int CollapseFurniture(int value) {
             if (!SkylineRuntime.ShellFurnitureCollapse || Terrain.ExtractContents(value) != FurnitureBlock.Index) {
-                return value;
+                return SubstituteLodMaterial(value);
             }
             FurnitureCells++;
             int material = FurnitureMaterial(value);
@@ -164,10 +164,27 @@ namespace Game {
 
         static int CollapseFurnitureStatic(int value) {
             if (!SkylineRuntime.ShellFurnitureCollapse || Terrain.ExtractContents(value) != FurnitureBlock.Index) {
-                return value;
+                return SubstituteLodMaterial(value);
             }
             int material = FurnitureMaterial(value);
             return material > 0 ? material : value;
+        }
+
+        /// <summary>
+        /// [v0.1.59] **LOD 材质替换**（用户口径 1.6）："雪层算一个雪方块，而草方块则算作泥土" ——
+        /// LOD 里用的是**结构材质**：草皮的"体"是泥土、雪层的"体"是雪。返回替换后的完整值（保留 light）。
+        /// 开关 `skyline.ShellLodMaterialSubstitute`（默认 true；关掉 = 与 v0.1.58 逐位一致）。
+        /// </summary>
+        static int SubstituteLodMaterial(int value) {
+            if (!SkylineRuntime.ShellLodMaterialSubstitute) {
+                return value;
+            }
+            int contents = Terrain.ExtractContents(value);
+            int substitute = SkylineSurfaceAudit.LodSubstitute(contents);
+            if (substitute < 0 || substitute == contents) {
+                return value;
+            }
+            return Terrain.ReplaceContents(value, substitute);
         }
 
         /// <summary>
@@ -366,6 +383,13 @@ namespace Game {
                             int furnitureMaterial = CubeSurface32.FurnitureMaterial(engineValue);
                             if (furnitureMaterial > 0) {
                                 expectedContents = Terrain.ExtractContents(furnitureMaterial);
+                            }
+                        }
+                        // [v0.1.59] 材质替换也要跟：开着替换时，草方块那一格**期望**是泥土。
+                        else if (SkylineRuntime.ShellLodMaterialSubstitute) {
+                            int substitute = SkylineSurfaceAudit.LodSubstitute(expectedContents);
+                            if (substitute >= 0) {
+                                expectedContents = substitute;
                             }
                         }
                         int shellValue = surface.TopContents[idx];
