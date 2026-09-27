@@ -3,6 +3,27 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.13] - 2026-09-27
+
+第二十三个版本：**32³ 三维窗口账本（里程碑 3 的 P2 第一刀）**——在真实游戏循环里量出
+"把加载窗口从列换成 32³ 立方体"的规模、内存与开销。**默认关闭，不参与加载/存档**。
+
+**本版相对 v0.1.12 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（账本）** | `SkylineCubeWindow.cs`（`SkylineRuntime` partial，`SkylineRuntime.Tick` 每帧调用、内部按"中心移动 >8 格"限频）：按 `notes/64` 的椭球判据（`dx²+(dy/m)²+dz² ≤ R²`，R 默认取设置视距）统计 **球内立方体 / 有内容立方体 / 列** 的数量与内存，并记录重算耗时、候选数、预算命中。桥接口：`skyline.CubeWindowEnabled`、`CubeWindowRadiusBlocks`、`CubeWindowYMultiplier`、`CubeWindowMoveThreshold`、`CubeWindowCandidateBudget`、`skyline.CubeWindowDescribe()`、`skyline.CubeWindowSurvey()` |
+| **判据** | 计数口径与现列式"被球波及的列都要加载"一致（包围盒 vs 椭球），因此两组数字可比；另给**内容感知**口径（只算高度区间与地形内容带相交的立方体） |
+
+### Verified
+
+* **独立交叉验证**（同一判据的 Python 实现 vs 引擎账本）：(3104.5,70.5,7937.5) → **433 / 233** vs **433 / 233** ✅；y=150 → 439/233 ✅；y=420 → 424/233 ✅；y=900 → 424/233 ✅（全部逐项一致）；
+* **关键测量**（R=128，AgentLab）：地表 球内 433 / **有内容 229**（28.6 MB）vs 列 233（58.2 MB）；
+  y=150 → 有内容 100（12.5 MB）；**y=420/900 → 有内容 0**，而现列式仍占 58.2 MB；
+* **开销**：重算 0.10~0.44 ms（候选 729），远低于一帧预算；
+* 默认 `CubeWindowEnabled=false` 时零遍历零分配（对现有游玩无影响）；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.12] - 2026-09-27
 
 第二十二个版本：**32³ 立方区块影子原型（里程碑 3 的 P1）**——纯新增、不接入游戏路径，

@@ -18,7 +18,7 @@ namespace Game {
     ///   {"op":"invoke","target":"type:Game.SkylineRuntime.FreeViewMode","value":true}
     ///   {"op":"invoke","target":"type:Game.SkylineRuntime","member":"Describe","args":[]}
     /// </summary>
-    public static class SkylineRuntime {
+    public static partial class SkylineRuntime {
         /// <summary>建筑范围之外、仍允许角色生存的余量（格）。</summary>
         public const int SurvivalMargin = 64;
 
@@ -333,6 +333,8 @@ namespace Game {
             SkylineRender.Tick();
             // [v0.1.0] 超视距 LOD：采集粗网格 + 定时重建网格/落盘（见 SkylineLod.Tick）
             SkylineLod.Tick();
+            // [v0.1.13] 32³ 三维窗口账本（默认关；见 SkylineCubeWindow.cs）
+            CubeWindowTick();
             if (Regions.Count == 0) {
                 return;
             }
