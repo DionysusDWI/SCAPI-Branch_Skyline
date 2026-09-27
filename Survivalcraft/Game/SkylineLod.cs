@@ -28,6 +28,12 @@ namespace Game {
         // 采集时每个 16 m 单元同时填 4 个 8 m 子单元；重建时近环用细网格、远环用粗网格。
         public const int FineShift = 3;                 // 8 格/单元
         public const int FineSize = 1 << FineShift;
+        // [v0.1.45] **近环细层**（4 m 单元）：只填"视距外的交接带"那一圈，
+        // 用来压低"8 m 单元只有一个高度"造成的起伏损失（审计口径见 notes/116/117）。
+        public const int NearShift = 2;                 // 4 格/单元
+        public const int NearSize = 1 << NearShift;
+        /// <summary>[v0.1.45] 近环细层的带宽（米）：从 `视距+FineSize/2` 起往外这么宽。</summary>
+        public static float NearBandMetres { get; set; } = 48f;
 
         public static bool Enabled { get; set; } = true;
         public static float RadiusMetres { get; set; } = 1024f;
@@ -74,6 +80,7 @@ namespace Game {
 
         static readonly Dictionary<long, Cell> m_cells = [];
         static readonly Dictionary<long, Cell> m_cellsFine = [];        // 8 m 精细层
+        static readonly Dictionary<long, Cell> m_cellsNear = [];        // 4 m 近环细层（交接带专用）
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
@@ -87,6 +94,11 @@ namespace Game {
         static IndexBuffer m_ibFine;
         static int m_indexCountFine;
         static int m_cellsInMeshFine;
+        // [v0.1.45] 4 m 近环层（交接带）
+        static VertexBuffer m_vbNear;
+        static IndexBuffer m_ibNear;
+        static int m_indexCountNear;
+        static int m_cellsInMeshNear;
         static int m_harvestedCells;
         static int m_rebuilds;
         static string m_lastError = "";
@@ -102,16 +114,21 @@ namespace Game {
         public static void Reset() {
             m_cells.Clear();
             m_cellsFine.Clear();
+            m_cellsNear.Clear();
             ResetRefreshState();          // v0.1.8：采样戳/脏集合与单元数据同生命周期
             m_indexCount = 0;
             m_cellsInMesh = 0;
             m_indexCountFine = 0;
             m_cellsInMeshFine = 0;
+            m_indexCountNear = 0;
+            m_cellsInMeshNear = 0;
             m_harvestedCells = 0;
             Utilities.Dispose(ref m_vb);
             Utilities.Dispose(ref m_ib);
             Utilities.Dispose(ref m_vbFine);
             Utilities.Dispose(ref m_ibFine);
+            Utilities.Dispose(ref m_vbNear);
+            Utilities.Dispose(ref m_ibNear);
             m_dirty = true;
         }
 
@@ -201,6 +218,20 @@ namespace Game {
                 // (height<<32|value) 打包进 5 组样本（粗层 256 + 4 个细子块各 64），
                 // 各自排序取中位。Span<long>.Sort() 用默认比较（先 height 后 value），无 lambda。
                 int cCount = 0, f0 = 0, f1 = 0, f2 = 0, f3 = 0;
+                // [v0.1.45] 近环细层（4 m）只填"视距外的交接带"这一圈：先判断本区块在不在带里
+                bool fillNear = false;
+                if (SkylineRuntime.LodNearLayerEnabled) {
+                    Vector3 camera = CameraViewPosition();
+                    float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                        ?? SettingsManager.VisibilityRange;
+                    float bandStart = viewRange + FineSize * 0.5f - 8f;
+                    float bandEnd = bandStart + NearBandMetres + 16f;
+                    float dx = chunk.Origin.X + TerrainChunk.Size * 0.5f - camera.X;
+                    float dz = chunk.Origin.Y + TerrainChunk.Size * 0.5f - camera.Z;
+                    float dist = MathF.Sqrt(dx * dx + dz * dz);
+                    fillNear = dist >= bandStart && dist <= bandEnd;
+                }
+                Span<int> nearCounts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
                 for (int x = 0; x < TerrainChunk.Size; x++) {
                     for (int z = 0; z < TerrainChunk.Size; z++) {
                         int top = chunk.GetTopHeightFast(x, z);
@@ -209,6 +240,12 @@ namespace Game {
                         }
                         long packed = ((long)top << 32) | (uint)chunk.GetCellValueFast(x, top, z);
                         coarseSamples[cCount++] = packed;
+                        if (fillNear) {
+                            int sub = ((x >> 2) & 3) + ((z >> 2) & 3) * 4;
+                            if (nearCounts[sub] < 16) {
+                                m_nearScratch[sub * 16 + nearCounts[sub]++] = packed;
+                            }
+                        }
                         switch ((x >> 3) | ((z >> 3) << 1)) {
                             case 0: fine0[f0++] = packed; break;
                             case 1: fine1[f1++] = packed; break;
@@ -252,6 +289,30 @@ namespace Game {
                         Height = (short)fineTop[k], Value = (ushort)fineValue[k], Light = fineLight[k]
                     };
                     m_dirty = true;
+                }
+                // [v0.1.45] 近环细层：16 个 4 m 子单元，各自取中位（样本数 ≤16）
+                if (fillNear) {
+                    int nx0 = chunk.Origin.X >> NearShift;
+                    int nz0 = chunk.Origin.Y >> NearShift;
+                    for (int k = 0; k < 16; k++) {
+                        int nearSampleCount = nearCounts[k];
+                        long nkey = Key(nx0 + (k & 3), nz0 + (k >> 2));
+                        if (nearSampleCount == 0) {
+                            if (RemoveEmptiedCells && m_cellsNear.Remove(nkey)) {
+                                m_dirty = true;
+                            }
+                            continue;
+                        }
+                        Span<int> nTop = [int.MaxValue];
+                        Span<int> nValue = [0];
+                        Span<byte> nLight = [15];
+                        Span<long> group = m_nearScratch.AsSpan(k * 16, nearSampleCount);
+                        MedianInto(group, nearSampleCount, nTop, nValue, nLight, 0);
+                        m_cellsNear[nkey] = new Cell {
+                            Height = (short)nTop[0], Value = (ushort)nValue[0], Light = nLight[0]
+                        };
+                        m_dirty = true;
+                    }
                 }
                 RecordSample(chunk, reason);          // v0.1.8：登记采样戳 + 清脏标记
             }
@@ -458,6 +519,8 @@ namespace Game {
         // [v0.1.43] 材质众数统计用的复用容器（不每次分配）
         static readonly Dictionary<int, int> m_contentCounts = [];
         static readonly long[] m_valueScratch = new long[TerrainChunk.Size * TerrainChunk.Size];
+        /// <summary>[v0.1.45] 近环细层采样暂存：16 个 4 m 子单元 × 最多 16 列。</summary>
+        static readonly long[] m_nearScratch = new long[16 * 16];
 
         static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, Span<byte> lights, int index) {
             if (count <= 0) {
@@ -506,19 +569,56 @@ namespace Game {
             m_sunAmount = MathUtils.Saturate((sky?.SkyLightValue ?? 15) / 15f);
             float skipRadius = visualRange + FineSize * 0.5f;                  // 视距内不画（v0.1.0 修复）
             float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
-            RebuildMeshCore(m_cellsFine, FineShift, skipRadius, fineRange, true);
-            RebuildMeshCore(m_cells, CellShift, fineRange, RadiusMetres, false);
+            // [v0.1.45] 近环 4 m 层：只覆盖 [skipRadius, skipRadius+NearBandMetres]
+            float nearRange = skipRadius + NearBandMetres;
+            if (SkylineRuntime.LodNearLayerEnabled) {
+                PruneNearCells(skipRadius + NearBandMetres + 32f);
+                RebuildMeshCore(m_cellsNear, NearShift, skipRadius, nearRange, 2);
+            }
+            else if (m_indexCountNear > 0 || m_cellsNear.Count > 0) {
+                m_cellsNear.Clear();
+                m_indexCountNear = 0;
+                m_cellsInMeshNear = 0;
+                Utilities.Dispose(ref m_vbNear);
+                Utilities.Dispose(ref m_ibNear);
+            }
+            RebuildMeshCore(m_cellsFine, FineShift, MathF.Max(skipRadius, nearRange), fineRange, 1);
+            RebuildMeshCore(m_cells, CellShift, fineRange, RadiusMetres, 0);
             m_rebuilds++;
             m_dirty = false;
             // v0.1.0 修复保留：相机未就位（建出空网格）时保持 dirty，等相机就位后重建。
-            if (m_indexCount == 0 && m_indexCountFine == 0
-                && (m_cells.Count > 0 || m_cellsFine.Count > 0)) {
+            if (m_indexCount == 0 && m_indexCountFine == 0 && m_indexCountNear == 0
+                && (m_cells.Count > 0 || m_cellsFine.Count > 0 || m_cellsNear.Count > 0)) {
+                m_dirty = true;
+            }
+        }
+
+        /// <summary>[v0.1.45] 玩家走远后清掉带外的近环单元（近环层不落盘、纯临时）。</summary>
+        static void PruneNearCells(float maxDist) {
+            if (m_cellsNear.Count == 0) {
+                return;
+            }
+            Vector3 camera = CameraViewPosition();
+            float maxSq = maxDist * maxDist;
+            List<long> remove = null;
+            foreach (long key in m_cellsNear.Keys) {
+                int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
+                float dx = (cx << NearShift) + NearSize * 0.5f - camera.X;
+                float dz = (cz << NearShift) + NearSize * 0.5f - camera.Z;
+                if (dx * dx + dz * dz > maxSq) {
+                    (remove ??= []).Add(key);
+                }
+            }
+            if (remove != null) {
+                foreach (long key in remove) {
+                    m_cellsNear.Remove(key);
+                }
                 m_dirty = true;
             }
         }
 
         static void RebuildMeshCore(Dictionary<long, Cell> dict, int cellShift,
-                                    float minDist, float maxDist, bool fine) {
+                                    float minDist, float maxDist, int layer) {
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
                 return;
@@ -532,7 +632,7 @@ namespace Game {
             float maxSq = maxDist * maxDist;
 
             var keys = new List<long>();
-            if (!fine) {                                     // v0.1.15：坡向明暗诊断只在粗层重置（避免细层覆盖）
+            if (layer == 0) {                                // v0.1.15：坡向明暗诊断只在粗层重置（避免细层覆盖）
                 m_slopeStatMin = float.MaxValue;
                 m_slopeStatMax = float.MinValue;
                 m_slopeStatSum = 0.0;
@@ -584,14 +684,7 @@ namespace Game {
             int vertexCount = keys.Count * 4 + walls.Count * 4;
             if (vertexCount == 0) {
                 // 空网格：由外层 RebuildMesh 统一决定是否保持 dirty（v0.1.0 修复的逻辑移到外层）。
-                if (fine) {
-                    m_indexCountFine = 0;
-                    m_cellsInMeshFine = 0;
-                }
-                else {
-                    m_indexCount = 0;
-                    m_cellsInMesh = 0;
-                }
+                SetLayerMesh(layer, null, null, 0, 0);
                 return;
             }
             var vertices = new TerrainVertex[vertexCount];
@@ -633,7 +726,7 @@ namespace Game {
                         float shadow = SelfShadowFactor(dict, cx, cz, cell.Height, cellSize);
                         // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
                         gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
-                        if (!fine) {
+                        if (layer == 0) {
                             m_selfShadowSampled++;
                             if (shadow < 0.999f) {
                                 m_selfShadowedCells++;
@@ -722,21 +815,36 @@ namespace Game {
             else {
                 ib.SetData(indices, 0, ii);
             }
-            if (fine) {
-                Utilities.Dispose(ref m_vbFine);
-                Utilities.Dispose(ref m_ibFine);
-                m_vbFine = vb;
-                m_ibFine = ib;
-                m_indexCountFine = ii;
-                m_cellsInMeshFine = built;
-            }
-            else {
-                Utilities.Dispose(ref m_vb);
-                Utilities.Dispose(ref m_ib);
-                m_vb = vb;
-                m_ib = ib;
-                m_indexCount = ii;
-                m_cellsInMesh = built;
+            SetLayerMesh(layer, vb, ib, ii, built);
+        }
+
+        /// <summary>[v0.1.45] 把一套网格写回对应层（0=粗 16 m、1=细 8 m、2=近环 4 m）。</summary>
+        static void SetLayerMesh(int layer, VertexBuffer vb, IndexBuffer ib, int indexCount, int cellsInMesh) {
+            switch (layer) {
+                case 2:
+                    Utilities.Dispose(ref m_vbNear);
+                    Utilities.Dispose(ref m_ibNear);
+                    m_vbNear = vb;
+                    m_ibNear = ib;
+                    m_indexCountNear = indexCount;
+                    m_cellsInMeshNear = cellsInMesh;
+                    break;
+                case 1:
+                    Utilities.Dispose(ref m_vbFine);
+                    Utilities.Dispose(ref m_ibFine);
+                    m_vbFine = vb;
+                    m_ibFine = ib;
+                    m_indexCountFine = indexCount;
+                    m_cellsInMeshFine = cellsInMesh;
+                    break;
+                default:
+                    Utilities.Dispose(ref m_vb);
+                    Utilities.Dispose(ref m_ib);
+                    m_vb = vb;
+                    m_ib = ib;
+                    m_indexCount = indexCount;
+                    m_cellsInMesh = cellsInMesh;
+                    break;
             }
         }
 
@@ -819,6 +927,10 @@ namespace Game {
                 }
                 if (m_vbFine != null && m_ibFine != null && m_indexCountFine > 0) {
                     Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vbFine, m_ibFine, 0, m_indexCountFine);
+                }
+                // [v0.1.45] 近环 4 m 层最后画（离相机最近，盖在 8 m 层之上）
+                if (m_vbNear != null && m_ibNear != null && m_indexCountNear > 0) {
+                    Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vbNear, m_ibNear, 0, m_indexCountNear);
                 }
             }
             catch (Exception e) {
@@ -916,9 +1028,10 @@ namespace Game {
         // ---------------- 状态 ----------------
 
         public static string Describe() =>
-            $"lod:enabled={Enabled} cells={m_cells.Count}(+{m_cellsFine.Count}f) "
-            + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f) indices={m_indexCount}(+{m_indexCountFine}f) "
-            + $"radius={RadiusMetres:0}m cell={CellSize}/{FineSize} rebuilds={m_rebuilds} "
+            $"lod:enabled={Enabled} cells={m_cells.Count}(+{m_cellsFine.Count}f+{m_cellsNear.Count}n) "
+            + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f+{m_cellsInMeshNear}n) "
+            + $"indices={m_indexCount}(+{m_indexCountFine}f+{m_indexCountNear}n) "
+            + $"radius={RadiusMetres:0}m cell={CellSize}/{FineSize}/{NearSize} rebuilds={m_rebuilds} "
             + $"err={(m_lastError.Length > 0 ? m_lastError : "-")} " + RefreshDescribe();
 
         public static string Survey() {
@@ -942,6 +1055,10 @@ namespace Game {
                 ["fineCells"] = m_cellsFine.Count,
                 ["fineCellsInMesh"] = m_cellsInMeshFine,
                 ["fineMeshIndices"] = m_indexCountFine,
+                ["nearCells"] = m_cellsNear.Count,
+                ["nearCellsInMesh"] = m_cellsInMeshNear,
+                ["nearMeshIndices"] = m_indexCountNear,
+                ["nearBandMetres"] = Math.Round(NearBandMetres, 1),
                 ["radiusMetres"] = RadiusMetres,
                 ["cellSizeBlocks"] = CellSize,
                 ["fineCellSizeBlocks"] = FineSize,

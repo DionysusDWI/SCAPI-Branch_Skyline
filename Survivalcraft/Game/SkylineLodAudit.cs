@@ -18,6 +18,16 @@ namespace Game {
         /// <summary>[v0.1.43] 只读取某列命中的 LOD 单元（先细层后粗层）。</summary>
         public static bool TryGetCellAt(int x, int z, out int cellSize, out int height, out int contents, out bool fine,
                                         out int light) {
+            // [v0.1.45] 优先近环 4 m 层
+            long nearKey = Key(x >> NearShift, z >> NearShift);
+            if (m_cellsNear.TryGetValue(nearKey, out Cell nearCell)) {
+                cellSize = NearSize;
+                height = nearCell.Height;
+                contents = Terrain.ExtractContents(nearCell.Value);
+                light = nearCell.Light;
+                fine = true;
+                return true;
+            }
             long fineKey = Key(x >> FineShift, z >> FineShift);
             if (m_cellsFine.TryGetValue(fineKey, out Cell fineCell)) {
                 cellSize = FineSize;
@@ -74,6 +84,7 @@ namespace Game {
                 int hi = rect.HasValue ? 0 : Math.Max(lo + 1, Math.Max(inner, outer));
                 Random random = new(20260927);
                 int loadedColumns = 0, lodHits = 0, fineHits = 0, coarseHits = 0;
+                int nearHits = 0;      // [v0.1.45] 命中 4 m 近环层的列数
                 int heightGt1 = 0, heightGt4 = 0, maxAbs = 0;
                 long sumAbs = 0;
                 int materialChecked = 0, materialMatch = 0;
@@ -104,7 +115,10 @@ namespace Game {
                         continue;
                     }
                     lodHits++;
-                    if (fine) {
+                    if (cellSize == NearSize) {
+                        nearHits++;
+                    }
+                    else if (fine) {
                         fineHits++;
                     }
                     else {
@@ -168,6 +182,7 @@ namespace Game {
                 result["lodHits"] = lodHits;
                 result["fineHits"] = fineHits;
                 result["coarseHits"] = coarseHits;
+                result["nearHits"] = nearHits;
                 result["meanAbsHeightDiff"] = lodHits > 0 ? Math.Round((double)sumAbs / lodHits, 3) : 0;
                 result["maxAbsHeightDiff"] = maxAbs;
                 result["heightDiffGt1Ratio"] = lodHits > 0 ? Math.Round((double)heightGt1 / lodHits, 4) : 0;
