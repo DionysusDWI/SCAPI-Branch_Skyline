@@ -1,5 +1,6 @@
 using Engine;
 using Engine.Graphics;
+using System.Text.Json.Nodes;
 
 namespace Game {
     /// <summary>
@@ -30,8 +31,48 @@ namespace Game {
 
         public static bool GpuShadowFlipY { get; set; }
 
+        /// <summary>[v0.1.64] **软阴影（PCF）开关，默认开**。用户口径（里程碑 3.2）：
+        /// "为了降低渲染开销，物体阴影应当为软阴影，而非 Dawnlight 目前的硬阴影"。
+        /// 关掉 = 单次采样（v0.1.63 及以前的硬阴影），比较式与旧版**逐位一致**（用同一个已取到的 mapDepth）。
+        /// </summary>
+        public static bool GpuShadowSoftEnabled { get; set; } = true;
+
+        /// <summary>[v0.1.64] PCF 核半径（texel 数，默认 1.5）。
+        /// 偏移在 **UV 空间**累计（1 texel = 1/尺寸），所以这里按 texel 计；
+        /// 换算成世界尺度：远图 2×512/1024 = 1.0 m/texel → 半影半径 ≈1.5 m；
+        /// 近图 2×128/1024 = 0.25 m/texel → ≈0.375 m。**近场接触阴影天然更锐**（这正是级联想要的效果）。
+        /// ⚠️ 第一版把"米"当 UV 传进去（1.0 UV = 整张贴图宽）→ 8 个抽样全落到边界外 → 阴影整片消失；
+        /// 实测的软/硬 A/B 立刻暴露（见 notes/143）。
+        /// </summary>
+        public static float GpuShadowSoftRadius { get; set; } = 1.5f;
+
+        /// <summary>[v0.1.64] **坡度 bias 系数**（默认 1.0 = 按最坏情况补偿）。
+        /// 为什么必须有这一项（实测踩到）：地面上相邻 texel 沿太阳方向的深度变化是
+        /// `texel米数 / sinθ / depthMax`（θ = 太阳仰角；低太阳角下一个 texel 的**地面足迹**被拉长），
+        /// 而 PCF 的抽样半径是 1.5 texel —— 只要这个变化超过固定 bias，"朝太阳那一侧"的抽样就会一律判成
+        /// 遮挡，**大片受光地面被压暗**（实测 r=1.5 时 48.5% 像素变暗、亮度 −16.1）。
+        /// </summary>
+        public static float GpuShadowSoftSlopeBias { get; set; } = 1f;
+
+        /// <summary>[v0.1.64] **relief（起伏）bias 的 texel 数**（默认 0）。
+        /// 这一项补偿"地形起伏落在同一个 texel 内"：1 格雪阶会让相邻 texel 的深度差达到 1 m 量级。
+        /// **实测结论（不要想当然开大）**：把坡度项改成带 `1/sinθ` 之后，斜坡项本身已经覆盖了起伏误差
+        /// —— 扫描 relief = 0/1/2/3/4 时 **0 就已经没有条纹**（见 notes/143 的扫描表），更大的值只是让
+        /// 亮度继续上漂（+1.1 → +3.1），也就是**把真阴影也擦掉**（peter-panning）。
+        /// 所以默认 0；它同时保证"半径=0 时软路径与硬路径逐位相同"这条可证伪不变量继续成立。
+        /// </summary>
+        public static float GpuShadowSoftReliefTexels { get; set; }
+
+        /// <summary>[v0.1.64] 太阳仰角下限（sinθ）。低于它按它算，避免日出日落时 bias 发散。</summary>
+        public static float GpuShadowSoftSunYFloor { get; set; } = 0.15f;
+
         /// <summary>[v0.1.34] 调试：0=正常阴影；1=把"采样到的阴影图深度"直接画到颜色（验证 UV/绑定是否正确）。</summary>
         public static int GpuShadowDebugMode { get; set; }
+
+        // [v0.1.64] 捕获时的实际几何量：PCF 的核半径要按**真实 texel 尺寸**换算，不能用配置项想当然。
+        static float m_gpuShadowRadiusAtCapture = 512f;
+        static float m_gpuShadowNearRadiusAtCapture = 128f;
+        static int m_gpuShadowSizeAtCapture = 1024;
 
         static string m_gpuShadowSampleError = "";
         static Shader m_gpuShadowOpaqueShader;
@@ -40,9 +81,30 @@ namespace Game {
         static long m_gpuShadowSampleFallbacks;
         static string m_gpuShadowSampleLastReason = "";
 
+        /// <summary>[v0.1.64] 软阴影参数的**机器可读**快照（发版回归门禁的"默认值漂移门"用它）。
+        /// 为什么单列一个方法：`...Describe()` 是给人读的字符串，门禁不该去解析它。</summary>
+        public static string GpuShadowSoftInfo() {
+            JsonObject o = new() {
+                ["sampleEnabled"] = GpuShadowSampleEnabled,
+                ["softEnabled"] = GpuShadowSoftEnabled,
+                ["softRadius"] = (double)GpuShadowSoftRadius,
+                ["reliefTexels"] = (double)GpuShadowSoftReliefTexels,
+                ["slopeBias"] = (double)GpuShadowSoftSlopeBias,
+                ["sunYFloor"] = (double)GpuShadowSoftSunYFloor,
+                ["bias"] = (double)GpuShadowSampleBias,
+                ["strength"] = (double)GpuShadowSampleStrength
+            };
+            return o.ToJsonString();
+        }
+
         public static string GpuShadowSampleDescribe() =>
             $"gpuShadowSample enabled={GpuShadowSampleEnabled} strength={GpuShadowSampleStrength:0.##} "
             + $"bias={GpuShadowSampleBias:0.####} flipY={GpuShadowFlipY} hasMap={m_gpuShadowHasMap} "
+            + $"soft={GpuShadowSoftEnabled}/{GpuShadowSoftRadius:0.##}texel "
+            + $"penumbraFar={GpuShadowSoftRadius * 2f * m_gpuShadowRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1):0.###}m "
+            + $"penumbraNear={GpuShadowSoftRadius * 2f * m_gpuShadowNearRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1):0.###}m "
+            + $"relief={GpuShadowSoftReliefTexels:0.##}tx slopeBias={GpuShadowSoftSlopeBias:0.##} "
+            + $"sunY={m_gpuShadowSun.Y:0.###} "
             + $"depth16={m_gpuShadowDepth16AtCapture} "
             + $"cascade={GpuShadowCascadeEnabled} hasNearMap={m_gpuShadowHasNearMap} "
             + $"resolved={m_gpuShadowSampleResolved} fallbacks={m_gpuShadowSampleFallbacks} "
@@ -108,6 +170,26 @@ namespace Game {
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
                 shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
                 shader.GetParameter("u_shadowDebug", true).SetValue((float)GpuShadowDebugMode);
+                // [v0.1.64] PCF：偏移在 **UV 空间**（1 texel = 1/尺寸）。传"米"会把整张贴图当偏移跨过去
+                // （实测：8 个抽样全落到边界外 → 阴影整片消失）。级联的世界尺度差异由"覆盖范围不同"自然给出。
+                shader.GetParameter("u_shadowSoft", true).SetValue(GpuShadowSoftEnabled ? 1f : 0f);
+                shader.GetParameter("u_shadowSoftRadius", true).SetValue(GpuShadowSoftRadius);
+                shader.GetParameter("u_shadowTexelFar", true).SetValue(
+                    1f / System.Math.Max(m_gpuShadowSizeAtCapture, 1));
+                shader.GetParameter("u_shadowTexelNear", true).SetValue(
+                    1f / System.Math.Max(m_gpuShadowSizeAtCapture, 1));
+                // [v0.1.64] 坡度项：每个 texel 的**归一化深度变化**（最坏情况：受光面与太阳方向夹角 0°）
+                //   每 texel 的归一化深度 = (2×半径/尺寸) 米 ÷ depthMax ÷ sinθ
+                //   （÷sinθ 是因为正交盒沿太阳方向，太阳越低，一个 texel 对应的**地面足迹**越长）
+                float sunY = System.MathF.Max(System.MathF.Abs(m_gpuShadowSun.Y), GpuShadowSoftSunYFloor);
+                float farRelief = 2f * m_gpuShadowRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1)
+                                  / System.Math.Max(m_gpuShadowDepthMax, 0.0001f) / sunY;
+                float nearRelief = 2f * m_gpuShadowNearRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1)
+                                   / System.Math.Max(m_gpuShadowDepthMaxNear, 0.0001f) / sunY;
+                shader.GetParameter("u_shadowReliefFar", true).SetValue(farRelief);
+                shader.GetParameter("u_shadowReliefNear", true).SetValue(nearRelief);
+                shader.GetParameter("u_shadowSoftSlopeBias", true).SetValue(GpuShadowSoftSlopeBias);
+                shader.GetParameter("u_shadowSoftReliefTexels", true).SetValue(GpuShadowSoftReliefTexels);
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
@@ -240,6 +322,14 @@ float u_shadowStrength;
 float u_shadowFlipY;
 float u_shadowDepth16;
 float u_shadowDebug;
+float u_shadowSoft;
+float u_shadowSoftRadius;
+float u_shadowTexelFar;
+float u_shadowTexelNear;
+float u_shadowReliefFar;
+float u_shadowReliefNear;
+float u_shadowSoftSlopeBias;
+float u_shadowSoftReliefTexels;
 
 // [v0.1.35] R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
 float decodeShadowDepth(float4 texel)
@@ -311,10 +401,53 @@ void main(
 		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
 		float3 eye = insideNear ? u_eyeNear : u_eye;
 		float fragDepth = saturate(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001));
-		if (mapDepth + u_shadowBias < fragDepth)
+		float lit;
+		if (u_shadowSoft > 0.5)
 		{
-			result.rgb *= (1.0 - u_shadowStrength);
+			// [v0.1.64] 软阴影 = 8 抽样八边形核 PCF。要点：**平均的是「遮挡判定」而不是深度**
+			// （平均深度只会让明暗过渡跟着深度走，不会产生半影）。
+			// 逐像素旋转来自世界坐标哈希 → 确定性、跨帧稳定（截图 A/B 可复现），同时打破八边形的规则性。
+			// 只对**自身级联**取样：近图 0.25 m/texel、远图 1 m/texel，半影半径因此天然分层。
+			float t = (insideNear ? u_shadowTexelNear : u_shadowTexelFar) * max(u_shadowSoftRadius, 0.0);
+			float ang = frac(sin(dot(v_world.xz, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+			// bias 补偿：(relief texel 数 + 抽样半径×1.4142) × 每 texel 归一化深度（已含 1/sinθ）。
+			// 没有坡度项 → 大片受光地面被压暗（实测 48.5%）；没有 relief 项 → 残留斜向条纹 acne。
+			float relief = insideNear ? u_shadowReliefNear : u_shadowReliefFar;
+			float sb = u_shadowBias + (u_shadowSoftReliefTexels
+				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
+			float ca = cos(ang);
+			float sa = sin(ang);
+			float acc = 0.0;
+			if (insideNear)
+			{
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(sa * t, -ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca + sa) * t, (sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-ca * t, -sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(ca * t, sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-sa * t, ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+			}
+			else
+			{
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(sa * t, -ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca + sa) * t, (sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-ca * t, -sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(ca * t, sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-sa * t, ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+			}
+			lit = acc * 0.125;
 		}
+		else
+		{
+			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
+			lit = step(fragDepth, mapDepth + u_shadowBias);
+		}
+		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
 	result.rgb = lerp(result.rgb, u_fogColor * v_color.a, v_fog);
 	svTarget = result;
@@ -350,6 +483,14 @@ uniform float u_shadowStrength;
 uniform float u_shadowFlipY;
 uniform float u_shadowDepth16;
 uniform float u_shadowDebug;
+uniform float u_shadowSoft;
+uniform float u_shadowSoftRadius;
+uniform float u_shadowTexelFar;
+uniform float u_shadowTexelNear;
+uniform float u_shadowReliefFar;
+uniform float u_shadowReliefNear;
+uniform float u_shadowSoftSlopeBias;
+uniform float u_shadowSoftReliefTexels;
 
 varying vec4 v_color;
 varying vec2 v_texcoord;
@@ -419,10 +560,49 @@ void main()
 		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
 		vec3 eye = insideNear ? u_eyeNear : u_eye;
 		float fragDepth = clamp(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001), 0.0, 1.0);
-		if (mapDepth + u_shadowBias < fragDepth)
+		float lit;
+		if (u_shadowSoft > 0.5)
 		{
-			result.rgb *= (1.0 - u_shadowStrength);
+			// [v0.1.64] 软阴影 = 8 抽样八边形核 PCF（与 HLSL 段同一算法：比较「遮挡判定」、逐像素旋转）
+			float t = (insideNear ? u_shadowTexelNear : u_shadowTexelFar) * max(u_shadowSoftRadius, 0.0);
+			float ang = fract(sin(dot(v_world.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+			// bias 补偿（与 HLSL 段同一算法）：relief texel + 抽样半径×1.4142，再乘每 texel 归一化深度
+			float relief = insideNear ? u_shadowReliefNear : u_shadowReliefFar;
+			float sb = u_shadowBias + (u_shadowSoftReliefTexels
+				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
+			float ca = cos(ang);
+			float sa = sin(ang);
+			float acc = 0.0;
+			if (insideNear)
+			{
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(sa * t, -ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-ca * t, -sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(ca * t, sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-sa * t, ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+			}
+			else
+			{
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(sa * t, -ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-ca * t, -sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(ca * t, sa * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-sa * t, ca * t))) + sb);
+				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+			}
+			lit = acc * 0.125;
 		}
+		else
+		{
+			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
+			lit = step(fragDepth, mapDepth + u_shadowBias);
+		}
+		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
 	result.rgb = mix(result.rgb, u_fogColor * v_color.a, v_fog);
 	gl_FragColor = result;

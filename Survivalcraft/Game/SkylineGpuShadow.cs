@@ -428,6 +428,9 @@ void main()
             }
             int size = Math.Clamp(GpuShadowSize, 64, Math.Min(Display.MaxTextureSize, 4096));
             float radius = Math.Clamp(GpuShadowRadius, 32f, 4096f);
+            // [v0.1.64] 采样侧要按**真实捕获几何**换算 PCF 的 texel 尺寸（配置值可能被 clamp 过）
+            m_gpuShadowRadiusAtCapture = radius;
+            m_gpuShadowSizeAtCapture = size;
             RenderTarget2D previousTarget = Display.RenderTarget;
             Viewport previousViewport = Display.Viewport;
             Rectangle previousScissor = Display.ScissorRectangle;
@@ -456,6 +459,7 @@ void main()
                 float nearStepMeters = 0f;
                 if (GpuShadowCascadeEnabled) {
                     nearRadius = Math.Clamp(GpuShadowNearRadius, 16f, radius);
+                    m_gpuShadowNearRadiusAtCapture = nearRadius;
                     if (m_gpuShadowRtNear == null || m_gpuShadowRtNear.Width != size) {
                         Utilities.Dispose(ref m_gpuShadowRtNear);
                         m_gpuShadowRtNear = new RenderTarget2D(size, size, 1, ColorFormat.Rgba8888, DepthFormat.Depth24Stencil8);
