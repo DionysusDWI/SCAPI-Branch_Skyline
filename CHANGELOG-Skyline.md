@@ -7,6 +7,60 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.76] - 2026-09-28
+
+第八十六个版本：**`ChunkInfo` 追踪表的距离裁剪**（"按走过的地方增长"的第三张表）+ **把堆指纹接进发版流程**。
+
+### 为什么还有第三张表
+
+v0.1.74 修掉的是 `SkylineLodRefresh.m_stamps`（一个 `object` 强引用把每个 `TerrainChunk` 永久钉住），
+v0.1.75 给采样戳加了距离裁剪。本轮给发版流程接**堆指纹**（`dotnet-gcdump` 类型统计）时，
+对账出**同一类问题的第三张表**：`SkylineRender.m_chunks`（每个访问过的区块一条 `ChunkInfo`）。
+
+| 项 | 数值 |
+|---|---|
+| 条目大小 | `ChunkInfo` **40 B** |
+| 修复前（走完 15 km） | **18,071 条**（≈ **0.7 MB**） |
+| 修复后（走完 5.8 km） | **4,253 条** |
+| 当前 | **3,987 条** |
+| 裁剪计数 `trackedChunksPrunedTotal` | **1,292** |
+
+**量级比 `m_stamps` 小得多**（0.7 MB vs 数百 MiB），所以它**不是**"内存只增不减"的主因 ——
+但它属于**同一类**：按访问过的地方增长、从不释放。裁掉**不影响正确性**：
+回来时 `GetInfo` 会重建条目，而家具 LOD 的适用距离只有约 142 m，4 km 外重建一次不值得留。
+
+### 相对 v0.1.75 的变更
+
+| 项 | 内容 |
+|---|---|
+| **`TrackedChunkKeepMetres`** | `m_chunks` 的距离裁剪半径，默认 **4096 m** |
+| **`PruneTrackedChunks()`** | 每 **5 s** 扫一遍、单次最多 `TrackedChunkPrunePerCall`(=20000) 条 ⇒ 单帧代价有界 |
+| **`RenderSurvey`** | 新增 `trackedChunksPrunedTotal` / `trackedChunkKeepMetres` 两个字段 |
+| **`heightlab/heap-fingerprint.py`** | 新增：把 `dotnet-gcdump report` 的类型统计抽成 JSON（看住"某个类型突然变多"） |
+| **`publish-version.ps1`** | 新增 `[4.5/6]` 步：每版留一份堆指纹（**采集失败不阻断发版**） |
+
+### 验收
+
+* **长行程（60 步 × 96 m ≈ 5.8 km）**：存活托管堆 **190.3 → 265.1 MiB（Δ +74.8）** —— 约 **12.9 MiB/km**，
+  与 v0.1.74 修复后的斜率（≈13 MiB/km）一致；`trackedChunks` **4,253**（修复前走 15 km 是 **18,071**）。
+* **堆指纹（随本版留档）**：`TerrainChunk` **206**（在册 201）、`TerrainGeometry` **25,869**、
+  `VertexBuffer`/`IndexBuffer` 各 **28,616** —— 与 v0.1.74 修复后的口径同量级（`TerrainChunk` 1,223 → 206）。
+* **回归门禁**：**PASS 16 / FAIL 0 / SKIP 0 / KNOWN 1**（`defaults` 门新增 `trackedChunkKeepMetres=4096`）。
+  唯一 KNOWN 仍是 `lod-attr-selfcheck`（**GPU 坡向明暗 + 自阴影尚未实现**，目前只有 CPU 烘焙路径）：
+  `gpuVsCpu mean=37.975 max=51`（523 个采样里 479 个差 >8/255）—— **不阻挡发版，但必须在发布说明里写明**。
+
+### 没做 / 风险（如实）
+
+* 裁剪只验到"**会触发 + 有界**"，**没跑到持续裁剪的稳态**（需要反复进出 4 km 边界的更长行程）；
+* `ChunkInfo` 只按距离裁，**没有像 LOD 区域仓那样落盘**（它的信息量本来就小，重采代价是 `FirstSeen` 一次）；
+* 堆里仍有约 **170 万对象 / 296 MiB** 没做逐类型"应然 vs 实然"对账（本轮只把仪器接进了流程，没做全量对账）。
+
+证据：`data/sessions/skyline-v0176/`（`regression.json`、`heap-fingerprint.json`）。
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+源码包内含本版补丁 `height-v0176.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.75] - 2026-09-28
 
 第八十五个版本：**15.4 km 长行程 soak（内存修复的验收）** + **球形加载窗的高度测量（否定结论）** +

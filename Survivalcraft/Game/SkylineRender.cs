@@ -147,6 +147,52 @@ namespace Game {
 
         public static void ResetChunkLod() => m_chunks.Clear();
 
+        /// <summary>[v0.1.76] `m_chunks`（每个访问过的区块一条 `ChunkInfo`）的**距离裁剪半径**（米）。
+        /// 为什么要它：这张表随"走过的区块"增长（实测走过 15 km 后 **18,071** 条），
+        /// 与 v0.1.74 修掉的那条是**同一类问题**（都是"按走过的地方增长、从不释放"），只是量级小得多
+        /// （每条 ~40 B ⇒ 18k 条约 0.7 MB）。裁掉不影响正确性：回来时 `GetInfo` 会重建条目，
+        /// 而家具 LOD 的适用距离只有 ~142 m，4 km 外重建一次不值得留。</summary>
+        public static float TrackedChunkKeepMetres { get; set; } = 4096f;
+
+        /// <summary>单次裁剪最多检查多少条（防一次裁太多卡帧）。</summary>
+        public static int TrackedChunkPrunePerCall { get; set; } = 20000;
+
+        static long m_trackedChunksPruned;
+
+        public static long TrackedChunksPrunedTotal => m_trackedChunksPruned;
+
+        static double m_pruneNext;
+
+        /// <summary>[v0.1.76] 每 5 s 扫一遍 `m_chunks`，把超出半径的条目丢掉（单帧代价有界）。</summary>
+        static void PruneTrackedChunks(Vector3 camera) {
+            if (m_chunks.Count == 0 || Time.RealTime < m_pruneNext) {
+                return;
+            }
+            m_pruneNext = Time.RealTime + 5.0;
+            float keepSq = TrackedChunkKeepMetres * TrackedChunkKeepMetres;
+            List<long> remove = null;
+            int scanned = 0;
+            foreach (long key in m_chunks.Keys) {
+                if (++scanned > Math.Max(TrackedChunkPrunePerCall, 1)) {
+                    break;
+                }
+                int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
+                float dx = cx * TerrainChunk.Size + TerrainChunk.Size * 0.5f - camera.X;
+                float dz = cz * TerrainChunk.Size + TerrainChunk.Size * 0.5f - camera.Z;
+                if (dx * dx + dz * dz > keepSq) {
+                    (remove ??= []).Add(key);
+                }
+            }
+            if (remove == null) {
+                return;
+            }
+            foreach (long key in remove) {
+                if (m_chunks.Remove(key)) {
+                    m_trackedChunksPruned++;
+                }
+            }
+        }
+
         /// <summary>一次烘焙开始时重置该区块的实例统计（由 TerrainUpdater 在 stage==0 调用）。</summary>
         public static void BeginChunkStage(TerrainChunk chunk, int stage) {
             if (!Enabled || chunk == null) {
@@ -315,6 +361,7 @@ namespace Game {
             }
             Vector3 camera = CameraPosition();
             float visual = VisualSphereRadius;
+            PruneTrackedChunks(camera);        // [v0.1.76] 先把 4 km 外的条目丢掉，再轮转
             var keys = new List<long>(m_chunks.Keys);
             int budget = Math.Max(MaxRebakesPerTick, 1);
             for (int i = 0; i < keys.Count && budget > 0; i++) {
@@ -588,6 +635,8 @@ namespace Game {
                 ["furnitureLod"] = new JsonObject {
                     ["fullInstances"] = m_fullInstances, ["boxInstances"] = m_boxInstances,
                     ["chunkRebakes"] = m_rebakes, ["trackedChunks"] = m_chunks.Count,
+                    ["trackedChunksPrunedTotal"] = m_trackedChunksPruned,
+                    ["trackedChunkKeepMetres"] = (double)TrackedChunkKeepMetres,
                     // [v0.1.63] 分级：每个区块当前记着的级别直方图（0=全精度 / 1=1/2 / 2=1/4）
                     ["levelHistogram"] = LevelHistogram(),
                     ["levelScanPerTick"] = FurnitureLodLevelScanPerTick,
