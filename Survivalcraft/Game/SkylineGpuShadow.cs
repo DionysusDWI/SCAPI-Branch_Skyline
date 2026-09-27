@@ -42,6 +42,10 @@ namespace Game {
         /// false = 旧 8 bit（R=G=B=depth）。采样侧按**捕获时**的编码解码。</summary>
         public static bool GpuShadowDepth16 { get; set; } = true;
 
+        /// <summary>[v0.1.36] 把**alpha-tested 几何**（子集 5：树叶、草、栅栏这类镂空方块）也画进深度图。
+        /// 需要采样地形贴图并按 alpha&lt;0.5 丢弃，否则树叶会投出"整块方盒"的假阴影。</summary>
+        public static bool GpuShadowIncludeAlphaTested { get; set; } = true;
+
         const string GpuShadowVsh = @"#ifdef HLSL
 
 float2 u_origin;
@@ -148,7 +152,117 @@ void main()
 #endif
 ";
 
+        // ============================================================================================
+        // [v0.1.36] alpha-tested 深度变体：结构与 GpuShadowVsh/Psh 相同，多输出 v_texcoord，
+        // 片元按贴图 alpha < u_alphaThreshold 丢弃 —— 树叶/草这类镂空方块才能投出"镂空"阴影，
+        // 而不是整块方盒阴影（Game 的 alpha-tested 子集是 5，见 TerrainRenderer.DrawAlphaTested 的 subsetsMask=32）。
+        // ============================================================================================
+        const string GpuShadowAlphaVsh = @"#ifdef HLSL
+
+float2 u_origin;
+float4x4 u_viewProjectionMatrix;
+float3 u_eye;
+float3 u_sunDir;
+float u_depthMax;
+
+void main(
+	in float3 a_position: POSITION,
+	in float4 a_color: COLOR,
+	in float2 a_texcoord: TEXCOORD,
+	out float v_depth : TEXCOORD0,
+	out float2 v_texcoord : TEXCOORD1,
+	out float4 sv_position: SV_POSITION
+)
+{
+	float3 shifted = float3(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y);
+	float d = dot(u_eye - a_position, u_sunDir);
+	v_depth = saturate(d / max(u_depthMax, 0.0001));
+	v_texcoord = a_texcoord;
+	sv_position = mul(float4(shifted, 1.0), u_viewProjectionMatrix);
+}
+
+#endif
+#ifdef GLSL
+
+// <Semantic Name='POSITION' Attribute='a_position' />
+// <Semantic Name='COLOR' Attribute='a_color' />
+// <Semantic Name='TEXCOORD' Attribute='a_texcoord' />
+
+uniform vec2 u_origin;
+uniform mat4 u_viewProjectionMatrix;
+uniform vec3 u_eye;
+uniform vec3 u_sunDir;
+uniform float u_depthMax;
+
+attribute vec3 a_position;
+attribute vec4 a_color;
+attribute vec2 a_texcoord;
+
+varying float v_depth;
+varying vec2 v_texcoord;
+
+void main()
+{
+	vec3 shifted = vec3(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y);
+	float d = dot(u_eye - a_position, u_sunDir);
+	v_depth = clamp(d / max(u_depthMax, 0.0001), 0.0, 1.0);
+	v_texcoord = a_texcoord;
+	gl_Position = u_viewProjectionMatrix * vec4(shifted, 1.0);
+	OPENGL_POSITION_FIX;
+}
+
+#endif
+";
+
+        const string GpuShadowAlphaPsh = @"#ifdef HLSL
+
+Texture2D u_texture;
+SamplerState u_samplerState;
+float u_alphaThreshold;
+
+void main(
+	in float v_depth : TEXCOORD0,
+	in float2 v_texcoord : TEXCOORD1,
+	out float4 svTarget : SV_TARGET
+)
+{
+	if (u_texture.Sample(u_samplerState, v_texcoord).a < u_alphaThreshold)
+	{
+		discard;
+	}
+	svTarget = float4(v_depth, v_depth, v_depth, 1.0);
+}
+
+#endif
+#ifdef GLSL
+
+#ifdef GL_ES
+precision highp float;
+#endif
+
+// <Sampler Name='u_samplerState' Texture='u_texture' />
+
+uniform sampler2D u_texture;
+uniform float u_alphaThreshold;
+
+varying float v_depth;
+varying vec2 v_texcoord;
+
+void main()
+{
+	if (texture2D(u_texture, v_texcoord).a < u_alphaThreshold)
+	{
+		discard;
+	}
+	gl_FragColor = vec4(v_depth, v_depth, v_depth, 1.0);
+}
+
+#endif
+";
+
         static Shader m_gpuShadowShader;
+        static Shader m_gpuShadowAlphaShader;
+        static SamplerState m_gpuShadowAlphaSampler;
         static RenderTarget2D m_gpuShadowRt;
         static string m_gpuShadowLast = "(never captured)";
         static int m_gpuShadowCaptures;
@@ -165,13 +279,29 @@ void main()
 
         public static string GpuShadowDescribe() =>
             $"gpuShadow enabled={GpuShadowEnabled} size={GpuShadowSize} radius={GpuShadowRadius:0} "
-            + $"depth16={GpuShadowDepth16} captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
+            + $"depth16={GpuShadowDepth16} alphaTested={GpuShadowIncludeAlphaTested} "
+            + $"captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
 
         static Shader EnsureGpuShadowShader() {
             if (m_gpuShadowShader == null) {
                 m_gpuShadowShader = new Shader(GpuShadowVsh, GpuShadowPsh);
             }
             return m_gpuShadowShader;
+        }
+
+        static Shader EnsureGpuShadowAlphaShader() {
+            if (m_gpuShadowAlphaShader == null) {
+                m_gpuShadowAlphaShader = new Shader(GpuShadowAlphaVsh, GpuShadowAlphaPsh);
+            }
+            if (m_gpuShadowAlphaSampler == null) {
+                m_gpuShadowAlphaSampler = new SamplerState {
+                    AddressModeU = TextureAddressMode.Clamp,
+                    AddressModeV = TextureAddressMode.Clamp,
+                    FilterMode = TextureFilterMode.Point,
+                    MaxLod = 0f
+                };
+            }
+            return m_gpuShadowAlphaShader;
         }
 
         /// <summary>
@@ -238,13 +368,36 @@ void main()
                 SkylineLod.DrawWithShader(shader);
                 // [v0.1.33] 真实区块几何：与 LOD 共用同一个深度 shader / 同一张深度图（不透明子集 0..4）。
                 int chunksDrawn = 0;
+                int alphaChunksDrawn = 0;
                 if (GpuShadowIncludeChunks) {
+                    // [v0.1.36] alpha-tested 子集（5）：树叶/草等镂空方块，按贴图 alpha 丢弃
+                    Shader alphaShader = null;
+                    if (GpuShadowIncludeAlphaTested) {
+                        alphaShader = EnsureGpuShadowAlphaShader();
+                        alphaShader.GetParameter("u_origin", true).SetValue(new Vector2(origin3.X, origin3.Z));
+                        alphaShader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
+                        alphaShader.GetParameter("u_eye", true).SetValue(eye);
+                        alphaShader.GetParameter("u_sunDir", true).SetValue(sun);
+                        alphaShader.GetParameter("u_depthMax", true).SetValue(depthMax);
+                        alphaShader.GetParameter("u_alphaThreshold", true).SetValue(0.5f);
+                        alphaShader.GetParameter("u_texture", true)
+                            .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
+                        alphaShader.GetParameter("u_samplerState", true).SetValue(m_gpuShadowAlphaSampler);
+                    }
+                    int alphaChunks = 0;
                     foreach (TerrainChunk chunk in subsystemTerrain.Terrain.AllocatedChunks) {
                         if (chunk == null || chunk.State != TerrainChunkState.Valid || chunk.Buffers.Count == 0) {
                             continue;
                         }
-                        DrawChunkIntoDepth(shader, chunk);
+                        DrawChunkSubsets(shader, chunk, 0x1F);
                         chunksDrawn++;
+                        if (alphaShader != null) {
+                            DrawChunkSubsets(alphaShader, chunk, 0x20);
+                            alphaChunks++;
+                        }
+                    }
+                    if (alphaShader != null) {
+                        alphaChunksDrawn = alphaChunks;
                     }
                 }
 
@@ -376,6 +529,7 @@ void main()
                     $"gpuShadow size={size} radius={radius:0} depth16={depth16} "
                     + $"step={(depthMax / depthUnits):0.####}m covered={covered} "
                     + $"({100.0 * covered / (size * size):0.##}%) depth=[{minDepth},{maxDepth}] "
+                    + $"chunks={chunksDrawn} alphaChunks={alphaChunksDrawn} "
                     + $"mean={(covered > 0 ? sumDepth / covered : 0):0.0} selfCheck={selfCheckOk} "
                     + $"captures={m_gpuShadowCaptures} ms={(Time.RealTime - start) * 1000.0:0.0}";
                 result["ok"] = true;
@@ -387,6 +541,7 @@ void main()
                 result["covered"] = covered;
                 result["coverage"] = Math.Round((double)covered / (size * size), 5);
                 result["chunksDrawn"] = chunksDrawn;
+                result["alphaChunksDrawn"] = alphaChunksDrawn;
                 result["minDepth"] = minDepth;
                 result["maxDepth"] = maxDepth;
                 result["meanDepth"] = Math.Round(covered > 0 ? sumDepth / covered : 0, 1);
@@ -437,17 +592,17 @@ void main()
         }
 
         /// <summary>
-        /// [v0.1.33] 把一个区块的**不透明子集（0..4）**画进当前深度图。
-        /// 逻辑与 `TerrainRenderer.DrawTerrainChunkGeometrySubsets(shader, chunk, 0x1F, false)` 一致：
+        /// [v0.1.33] 把一个区块的指定子集掩码画进当前深度图。
+        /// 逻辑与 `TerrainRenderer.DrawTerrainChunkGeometrySubsets(shader, chunk, mask, false)` 一致：
         /// 相邻子集的索引区间合并成一次 DrawIndexed（减少 draw call）。
+        /// 子集约定：0..4 = 不透明（0x1F）、5 = alpha-tested（0x20）、6 = 透明（0x40）。
         /// </summary>
-        static void DrawChunkIntoDepth(Shader shader, TerrainChunk chunk) {
-            const int opaqueMask = 0x1F;                             // 子集 0..4 = 不透明
+        static void DrawChunkSubsets(Shader shader, TerrainChunk chunk, int subsetMask) {
             foreach (TerrainChunkGeometry.Buffer buffer in chunk.Buffers) {
                 int start = int.MaxValue;
                 int end = 0;
                 for (int i = 0; i < 8; i++) {
-                    if (i < 7 && (opaqueMask & (1 << i)) != 0) {
+                    if (i < 7 && (subsetMask & (1 << i)) != 0) {
                         if (buffer.SubsetIndexBufferEnds[i] > 0) {
                             if (start == int.MaxValue) {
                                 start = buffer.SubsetIndexBufferStarts[i];

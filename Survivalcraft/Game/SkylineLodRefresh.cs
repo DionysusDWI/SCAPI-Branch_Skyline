@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Text.Json.Nodes;
 using Engine;
@@ -102,9 +103,17 @@ namespace Game {
         }
 
         static readonly Dictionary<long, SampleStamp> m_stamps = [];
-        static readonly HashSet<long> m_dirtyCells = [];
-        static readonly Queue<long> m_dirtyQueue = [];
-        static readonly Dictionary<long, double> m_dirtyTime = [];   // v0.1.8：标脏时刻（沉降期判定用）
+        // [v0.1.36] 这三份脏集合会被**两个线程**碰：
+        //   * 写入侧（`SubsystemTerrain.ChangeCell` → NotifyCellChanged）与区块转 Valid 的回调
+        //     跑在 **TerrainUpdater 的更新线程**上（`TerrainUpdater.UpdateChunkSingleStep`）；
+        //   * 消费侧（SkylineLod.Tick → TryTakeDirtyChunk / RecordSample）跑在主线程。
+        // 2026-09-27 实测日志：`SkylineLod.MarkDirty` 抛
+        //   InvalidOperationException: Operations that change non-concurrent collections must have
+        //   exclusive access …（`Dictionary` 内部状态被打散，随后 SkylineLod.Tick 也连续告警）。
+        // 修法：换成并发集合（`ConcurrentDictionary` 当 set 用），语义不变、无锁竞争窗口。
+        static readonly ConcurrentDictionary<long, byte> m_dirtyCells = [];         // set: key → 0
+        static readonly ConcurrentQueue<long> m_dirtyQueue = [];
+        static readonly ConcurrentDictionary<long, double> m_dirtyTime = [];        // v0.1.8：标脏时刻（沉降期判定用）
         static double m_sweepUntil;
         static double m_lastEditTime;
         static float m_lastDirtyLatencyMs;
@@ -178,7 +187,7 @@ namespace Game {
         public static void MarkDirty(long key) {
             m_lastEditTime = Time.RealTime;
             m_dirtyTime[key] = Time.RealTime;               // 沉降期起算点（重复标脏会刷新它）
-            if (!m_dirtyCells.Add(key)) {
+            if (!m_dirtyCells.TryAdd(key, 0)) {
                 return;                                     // 已经在待办里
             }
             if (m_dirtyCells.Count > MaxDirtyCells) {
@@ -200,13 +209,12 @@ namespace Game {
             double now = Time.RealTime;
             int count = m_dirtyQueue.Count;
             for (int i = 0; i < count; i++) {
-                if (m_dirtyQueue.Count == 0) {
+                if (!m_dirtyQueue.TryPeek(out long key)) {
                     break;
                 }
-                long key = m_dirtyQueue.Peek();
-                if (!m_dirtyCells.Contains(key)) {
-                    m_dirtyQueue.Dequeue();
-                    m_dirtyTime.Remove(key);
+                if (!m_dirtyCells.ContainsKey(key)) {
+                    m_dirtyQueue.TryDequeue(out _);
+                    m_dirtyTime.TryRemove(key, out _);
                     continue;                               // 队列里有重复项 / 已经重采过了
                 }
                 // v0.1.8/0.1.16：等沉降期再采。**注意**：标脏会刷新时间戳（重复编辑），所以队首可能
@@ -216,7 +224,7 @@ namespace Game {
                 if (DirtySettleSeconds > 0f
                     && m_dirtyTime.TryGetValue(key, out double dirtyAt)
                     && now - dirtyAt < DirtySettleSeconds) {
-                    m_dirtyQueue.Dequeue();
+                    m_dirtyQueue.TryDequeue(out _);
                     m_dirtyQueue.Enqueue(key);
                     m_dirtySkippedYoung++;
                     continue;
@@ -224,12 +232,12 @@ namespace Game {
                 m_dirtyScans++;
                 TerrainChunk candidate = terrain.GetChunkAtCoords((int)(key >> 32), (int)(key & 0xFFFFFFFF));
                 if (candidate == null || candidate.ThreadState < TerrainChunkState.Valid) {
-                    m_dirtyQueue.Dequeue();
+                    m_dirtyQueue.TryDequeue(out _);
                     m_dirtyQueue.Enqueue(key);              // 还没加载 → 留到以后
                     m_dirtySkippedUnloaded++;
                     continue;
                 }
-                m_dirtyQueue.Dequeue();
+                m_dirtyQueue.TryDequeue(out _);
                 m_dirtyTaken++;
                 chunk = candidate;
                 return true;
@@ -244,7 +252,7 @@ namespace Game {
             int cx = chunk.Origin.X >> CellShift;
             int cz = chunk.Origin.Y >> CellShift;
             long key = Key(cx, cz);
-            if (m_dirtyCells.Contains(key)) {
+            if (m_dirtyCells.ContainsKey(key)) {
                 return ResampleReason.Dirty;
             }
             if (Time.RealTime < m_sweepUntil) {
@@ -279,8 +287,8 @@ namespace Game {
                     ? Time.RealTime - RefreshSeconds + DirtyVerifySeconds
                     : Time.RealTime
             };
-            if (m_dirtyCells.Remove(key)) {
-                m_dirtyTime.Remove(key);
+            if (m_dirtyCells.TryRemove(key, out _)) {
+                m_dirtyTime.TryRemove(key, out _);
                 m_resampledDirty++;
                 m_lastDirtyLatencyMs = (float)((Time.RealTime - m_lastEditTime) * 1000.0);
                 // 编辑触发的重采：把下一次网格重建提前（DirtyRebuildSeconds 后），别等满 MeshRebuildSeconds。
@@ -312,7 +320,7 @@ namespace Game {
                 ["ok"] = true,
                 ["cx"] = cx,
                 ["cz"] = cz,
-                ["dirty"] = m_dirtyCells.Contains(key)
+                ["dirty"] = m_dirtyCells.ContainsKey(key)
             };
             if (m_cells.TryGetValue(key, out Cell coarse)) {
                 result["coarseHeight"] = coarse.Height;

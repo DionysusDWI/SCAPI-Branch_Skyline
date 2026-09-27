@@ -3,6 +3,37 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.36] - 2026-09-27
+
+第四十六个版本：**alpha-tested 几何进太阳深度图（树叶阴影）+ 修掉一个真实并发缺陷** ——
+树叶/草/栅栏这类"镂空方块"（几何子集 5）以前完全不进深度图，森林与树冠投不出影子；
+本版给深度 pass 加了一个**带贴图 alpha 丢弃的变体**，让它们也能投影。
+同时修掉日志里实测抓到的 `SkylineLod.MarkDirty` 并发崩溃（TerrainUpdater 更新线程 vs 主线程）。
+
+**本版相对 v0.1.35 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（alpha 深度变体）** | `SkylineGpuShadow.cs`：`GpuShadowAlphaVsh/Psh` —— 与深度 pass 同结构，顶点多输出 `v_texcoord`，片元按地形贴图 `alpha < 0.5` **discard**；`DrawChunkIntoDepth` 重构为 `DrawChunkSubsets(shader, chunk, mask)`，不透明 `0x1F` + alpha-tested `0x20` 画进**同一张深度图/同一个深度缓冲**；开关 `skyline.GpuShadowIncludeAlphaTested`（默认 true），诊断与 JSON 增 `alphaTested` / `alphaChunksDrawn` |
+| **修复 B（第 4 个 shader 坑）** | GLSL 顶点着色器必须带 `<Semantic Name='POSITION' Attribute='a_position' />` 等元数据注释，否则编译报 `Attribute "a_position" has no semantic defined in shader metadata.`（首轮捕获 `ok=false`，补齐三行注释后通过） |
+| **修复 C（并发）** | `SkylineLodRefresh`：`m_dirtyCells/m_dirtyQueue/m_dirtyTime` 换成 `ConcurrentDictionary/ConcurrentQueue`（消费侧 `Peek/Dequeue` → `TryPeek/TryDequeue`）。原因：`MarkDirty` 会被 **TerrainUpdater 更新线程**调用（区块→Valid 推通道、`ChangeCell` 写入侧），与主线程的 `SkylineLod.Tick` 撞车 → `InvalidOperationException: … non-concurrent collections …`。修复后两次世界加载 + 一次跨区传送（强制区块加载）**0 新增异常** |
+
+### Verified（AgentLab；关雾；16 bit 深度；strength 0.45 / bias 0.0002）
+
+| 项 | alpha off | alpha on |
+|---|---|---|
+| 深度图覆盖率 | 155,847 px（14.863%） | 155,857 px（14.864%） |
+| 画入区块（其中走 alpha 子集） | 201 | 201（201） |
+| 回读自检 / 耗时 | True / 147.6 ms | True / 128.6 ms |
+| **深度图逐像素变化** | — | **4,036 px**，其中 **3,175 px 更接近太阳**（= 树叶进图的直接证据，平均 14.3 m） |
+| **站在 2×2 树叶格子棚下看地面** | 地面完全受光、平均亮度 **219.03** | **格子状斑驳阴影**、平均亮度 **169.79**；像素差 **405,014 px 全部变暗（变亮 0）** |
+
+边界（如实）：深度图 1 texel/m，叶片贴图内部小于 1 m 的镂空在本分辨率下分辨不出（只有块级空隙可见）；
+目前只接入地形方块（家具/实体未进深度图）。证据：`data/sessions/skyline-v0136/`、
+`heightlab/skyline-v0136-alpha-shadow.py`、`notes/109`。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.35] - 2026-09-27
 
 第四十五个版本：**深度图 16 bit 双通道 + 关雾开关** —— 把 v0.1.32 起的太阳深度图从
