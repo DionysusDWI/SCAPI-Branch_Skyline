@@ -422,6 +422,8 @@ namespace Game {
             SkylineLod.Tick();
             // [v0.1.13] 32³ 三维窗口账本（默认关；见 SkylineCubeWindow.cs）
             CubeWindowTick();
+            // [v0.1.24] 大批写入期的光照去抖：写入停下后统一降级一次（见 SkylineBulkEdit.cs）
+            TickDeferredLight();
             if (Regions.Count == 0) {
                 return;
             }
