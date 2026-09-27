@@ -7,6 +7,61 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.80] - 2026-09-28
+
+第九十个版本：**壳的绘制按距离优先** —— 修掉 v0.1.79 收尾时暴露出来的那个真问题。
+
+### 问题：预算顶满时，"画到哪一批"由**字典顺序**决定
+
+原绘制循环是 `foreach (m_entries) { if (drawn >= MaxDrawPerFrame) break; ... }`。
+`m_entries` 是 `Dictionary`（元组键），**遍历顺序与距离无关** ⇒ 当"可画的壳 > 预算"时：
+
+* 丢掉的不是"最远的"，而是"**字典顺序靠后的**"；
+* 交接缝的价值集中在 **120~224 m**，这些壳**可能整批画不出来**；
+* **这个失效不报错**：`drawnLastFrame = 192`（= 预算）看起来"跑满"，实际是"随机画了 192 个"。
+
+v0.1.79 现场实测：`cubes 460 / mesh 325 / drawn 192` ⇒ **133 个可画的壳没画**，且不确定是哪些。
+
+### 改法
+
+* 新增只读候选收集器 `CollectDrawCandidates(...)`（**复用同一个 `List`，不每帧分配**）：
+  筛选条件与原逻辑逐字相同（带内 `[视距−8, 视距+768]` + 地形已释放），排序为**距离升序**；
+* 主画面 `Draw` 与 G-buffer 的 `CollectDrawableMeshes` **共用同一个候选顺序**（两层口径不分叉）；
+* 新增只读指标：`drawCandidatesLastFrame`、`drawnMaxDistMetres`、
+  `drawCandidateMin/MaxDistMetres`、`drawSkippedByBudgetTotal`、`drawOrder`。
+
+### 验收
+
+走 4 步 × 96 m 把壳攒到"候选 > 预算"：
+
+| 项 | 值 |
+|---|---|
+| 候选 / 预算 / 实画 | **283 / 192 / 192** |
+| 候选距离范围 | **140.8 – 895.2 m** |
+| **画到的最远距离** | **699.5 m** |
+| 因预算累计丢掉 | **177,624** 次绘制 |
+| `bandShellCubes` / `bandCoverage` | 296 / 0.594 |
+| fps | **29.2**（改动前 29~31 同档） |
+
+⇒ 被丢掉的正是 **699.5~895.2 m** 那一段（本来就该由远景 LOD 负责），**近处 140~224 m 的壳一个不落**。
+对照改动前：`drawnMaxDistMetres` 会等于候选最远距离（随机顺序里必然混着最远的那些）。
+
+**回归清单新增不变式**（`shell-survey`）：候选数 > 预算时，`drawnMaxDistMetres` 必须比
+`drawCandidateMaxDistMetres` 小至少 1 m；候选没超过预算时两者相等是允许的。
+全量门禁：**PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。
+
+### 没做 / 风险（如实）
+
+* 预算仍是**常数 192**，没有做"按距离分配预算"；本版只把"顶满时的取舍"从随机变成按距离；
+* **没有做跨立方体的网格合并**（把相邻壳并成一次 `DrawIndexed`）—— 那才是把预算本身降下来的办法；
+* 每帧 `List.Sort` 一次（候选 ≤ 数千）实测 fps 无变化；常驻壳涨到上万时需要换成"每 N 帧重排/按距离分桶"。
+
+证据：`data/sessions/skyline-v0180/`（`draw-order.json`、`regression.json`、`draw-order.png`）、
+`notes/158`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+源码包内含本版补丁 `height-v0180.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.79] - 2026-09-28
 
 第八十九个版本：里程碑 **1.2 的收口** —— 把"加载区块边界 ↔ 32³ LOD 块"之间的**区隔**

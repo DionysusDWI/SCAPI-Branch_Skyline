@@ -1358,6 +1358,70 @@ namespace Game {
             LastMeshMs = watch.Elapsed.TotalMilliseconds;
         }
 
+        // ============================================================================================
+        // [v0.1.80] **绘制按距离优先**（修掉 v0.1.79 暴露出来的那个真问题）
+        //   以前是"按字典顺序遍历 + 到预算就 break" —— 于是预算顶满时**画到哪一批是随机的**：
+        //   实测 v0.1.79 可画 **346** 个壳、预算 `MaxDrawPerFrame = 192`，等于一半的壳没画，
+        //   而且不保证是**近处**那批（交接缝的价值全在 120~224 m）。
+        //   现在：先把"带内 + 地形已释放"的候选**按距离升序**排好，再截断到预算
+        //   ⇒ 顶满时丢掉的永远是**最远**的那些（那本来就是 LOD 的活）。
+        //   主画面 `Draw` 与只读 `CollectDrawableMeshes` 共用同一个候选顺序，两层口径不会分叉。
+        // ============================================================================================
+        static readonly List<(float DistSq, int Cx, int Cy, int Cz)> m_drawScratch = [];
+        static readonly Comparison<(float DistSq, int Cx, int Cy, int Cz)> s_nearFirst =
+            static (a, b) => a.DistSq.CompareTo(b.DistSq);
+
+        /// <summary>[v0.1.80] 本帧候选数（带内 + 地形已释放 + 有网格的会被后面再筛）。</summary>
+        public static int DrawCandidatesLastFrame { get; private set; }
+        /// <summary>[v0.1.80] 因为预算被丢掉的绘制数（累计）。</summary>
+        public static long DrawSkippedByBudgetTotal { get; private set; }
+        /// <summary>[v0.1.80] 本帧**实际画到的最远距离**（米）—— 距离优先的可断言形式。</summary>
+        public static float DrawnMaxDistMetres { get; private set; }
+        /// <summary>[v0.1.80] 本帧候选里最近/最远的距离（米）—— 用来对"丢掉的确实是最远的"下断言。</summary>
+        public static float DrawCandidateMinDistMetres { get; private set; }
+        public static float DrawCandidateMaxDistMetres { get; private set; }
+
+        /// <summary>
+        /// [v0.1.80] 收集"本帧可画的壳立方体"（带内 `[视距−BandInset, 视距+BandMetres]` + 地形已释放），
+        /// **按距离从近到远**排序后返回（复用同一个 `List`，不分配）。
+        /// `countLoadedSkips` = 主画面路径才统计"因地形还在而跳过"。
+        /// </summary>
+        static List<(float DistSq, int Cx, int Cy, int Cz)> CollectDrawCandidates(
+                Vector3 viewPosition, Terrain terrain, bool countLoadedSkips) {
+            m_drawScratch.Clear();
+            float viewRange = ViewRangeMetres;
+            float near = MathF.Max(viewRange - BandInset, 0f);
+            float far = viewRange + BandMetres;
+            float nearSq = near * near, farSq = far * far;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                int cx = kv.Key.Cx, cz = kv.Key.Cz;
+                float wx = cx * CubeSize + CubeSize * 0.5f;
+                float wz = cz * CubeSize + CubeSize * 0.5f;
+                float dx = wx - viewPosition.X, dz = wz - viewPosition.Z;
+                float distSq = dx * dx + dz * dz;
+                if (distSq < nearSq || distSq > farSq) {
+                    continue;
+                }
+                if (terrain.GetChunkAtCoords(cx * 2, cz * 2) != null
+                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2) != null
+                    || terrain.GetChunkAtCoords(cx * 2, cz * 2 + 1) != null
+                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2 + 1) != null) {
+                    if (countLoadedSkips) {
+                        SkippedBecauseLoaded++;
+                    }
+                    continue;
+                }
+                m_drawScratch.Add((distSq, cx, kv.Key.Cy, cz));
+            }
+            m_drawScratch.Sort(s_nearFirst);
+            DrawCandidatesLastFrame = m_drawScratch.Count;
+            DrawCandidateMaxDistMetres = m_drawScratch.Count > 0
+                ? MathF.Sqrt(m_drawScratch[^1].DistSq) : 0f;
+            DrawCandidateMinDistMetres = m_drawScratch.Count > 0
+                ? MathF.Sqrt(m_drawScratch[0].DistSq) : 0f;
+            return m_drawScratch;
+        }
+
         /// <summary>
         /// [v0.1.61] **只读**：列出"这一帧真会被画出来"的壳网格（里程碑 1.4 的入口）。
         ///
@@ -1377,29 +1441,20 @@ namespace Game {
                 return list;
             }
             Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
-            float viewRange = ViewRangeMetres;
-            float near = MathF.Max(viewRange - BandInset, 0f);
-            float far = viewRange + BandMetres;
-            float nearSq = near * near, farSq = far * far;
-            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+            // [v0.1.80] 候选**按距离升序**（与主画面 `Draw` 共用同一套顺序与筛选）
+            List<(float DistSq, int Cx, int Cy, int Cz)> candidates =
+                CollectDrawCandidates(viewPosition, terrain, false);
+            for (int ci = 0; ci < candidates.Count; ci++) {
                 if (list.Count >= MaxDrawPerFrame) {
                     break;
                 }
-                int cx = kv.Key.Cx, cz = kv.Key.Cz;
+                (float DistSq, int Cx, int Cy, int Cz) c = candidates[ci];
+                int cx = c.Cx, cy = c.Cy, cz = c.Cz;
                 float wx = cx * CubeSize + CubeSize * 0.5f;
                 float wz = cz * CubeSize + CubeSize * 0.5f;
-                float dx = wx - viewPosition.X, dz = wz - viewPosition.Z;
-                float distSq = dx * dx + dz * dz;
-                if (distSq < nearSq || distSq > farSq) {
+                if (!m_entries.TryGetValue((cx, cy, cz), out Entry entry)) {
                     continue;
                 }
-                if (terrain.GetChunkAtCoords(cx * 2, cz * 2) != null
-                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2) != null
-                    || terrain.GetChunkAtCoords(cx * 2, cz * 2 + 1) != null
-                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2 + 1) != null) {
-                    continue;                                // 真实地形还在 → 不画壳（与 Draw 同口径）
-                }
-                Entry entry = kv.Value;
                 VertexBuffer vb = entry.MeshIsVoxel ? entry.VoxelMesh?.VertexBuffer : entry.Mesh?.VertexBuffer;
                 IndexBuffer ib = entry.MeshIsVoxel ? entry.VoxelMesh?.IndexBuffer : entry.Mesh?.IndexBuffer;
                 int indexCount = entry.MeshIsVoxel
@@ -1408,10 +1463,10 @@ namespace Game {
                 if (vb == null || ib == null || indexCount == 0) {
                     continue;
                 }
-                if (!NeighborhoodComplete(cx, kv.Key.Cy, cz)) {
+                if (!NeighborhoodComplete(cx, cy, cz)) {
                     continue;
                 }
-                Vector3 center = new(wx, kv.Key.Cy * CubeSize + CubeSize * 0.5f, wz);
+                Vector3 center = new(wx, cy * CubeSize + CubeSize * 0.5f, wz);
                 // 顶点 0 的真实世界坐标（取证探针用）；体素网格没有留 CPU 侧顶点数据，退回用中心
                 Vector3 first = entry.MeshIsVoxel || entry.Mesh == null
                     ? center
@@ -1434,37 +1489,27 @@ namespace Game {
                     return;
                 }
                 Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
-                float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
-                    ?? SettingsManager.VisibilityRange;
-                float near = MathF.Max(viewRange - BandInset, 0f);
-                float far = viewRange + BandMetres;
-                float nearSq = near * near, farSq = far * far;
                 Shader shader = SkylineCubeSurfaceDemo.PrepareTerrainShader(camera, BandLift);
                 if (shader == null) {
                     return;
                 }
+                // [v0.1.80] **按距离优先**：候选按近到远排序后截断到预算 —— 顶满时丢掉的是最远的那批
+                List<(float DistSq, int Cx, int Cy, int Cz)> candidates =
+                    CollectDrawCandidates(viewPosition, terrain, true);
                 int drawn = 0;
-                foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                float maxDist = 0f;
+                for (int ci = 0; ci < candidates.Count; ci++) {
                     if (drawn >= MaxDrawPerFrame) {
+                        DrawSkippedByBudgetTotal += candidates.Count - ci;
                         break;
                     }
-                    int cx = kv.Key.Cx, cz = kv.Key.Cz;
+                    (float DistSq, int Cx, int Cy, int Cz) c = candidates[ci];
+                    int cx = c.Cx, cy = c.Cy, cz = c.Cz;
                     float wx = cx * CubeSize + CubeSize * 0.5f;
                     float wz = cz * CubeSize + CubeSize * 0.5f;
-                    float dx = wx - viewPosition.X, dz = wz - viewPosition.Z;
-                    float distSq = dx * dx + dz * dz;
-                    if (distSq < nearSq || distSq > farSq) {
+                    if (!m_entries.TryGetValue((cx, cy, cz), out Entry entry)) {
                         continue;
                     }
-                    // 真实地形还在（区块已分配）→ 一律不画壳（否则两层互相穿插）
-                    if (terrain.GetChunkAtCoords(cx * 2, cz * 2) != null
-                        || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2) != null
-                        || terrain.GetChunkAtCoords(cx * 2, cz * 2 + 1) != null
-                        || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2 + 1) != null) {
-                        SkippedBecauseLoaded++;
-                        continue;
-                    }
-                    Entry entry = kv.Value;
                     // [v0.1.60] 两类网格互斥：最近档是体素网格（体积感），其余是列顶高度场网格
                     var vertexBuffer = entry.MeshIsVoxel ? entry.VoxelMesh?.VertexBuffer : entry.Mesh?.VertexBuffer;
                     var indexBuffer = entry.MeshIsVoxel ? entry.VoxelMesh?.IndexBuffer : entry.Mesh?.IndexBuffer;
@@ -1474,7 +1519,7 @@ namespace Game {
                     if (vertexBuffer == null || indexBuffer == null || indexCount == 0) {
                         continue;
                     }
-                    if (!NeighborhoodComplete(cx, kv.Key.Cy, cz)) {
+                    if (!NeighborhoodComplete(cx, cy, cz)) {
                         SkippedIsolated++;
                         continue;
                     }
@@ -1485,7 +1530,9 @@ namespace Game {
                         DrawnVoxelLastFrame++;
                     }
                     drawn++;
+                    maxDist = MathF.Max(maxDist, MathF.Sqrt(c.DistSq));
                 }
+                DrawnMaxDistMetres = maxDist;
                 DrawnLastFrame = drawn;
             }
             catch (Exception e) {
@@ -2049,6 +2096,13 @@ namespace Game {
                     ["meshBudgetMs"] = MeshBudgetMs,
                     ["maxDrawPerFrame"] = MaxDrawPerFrame
                 },
+                // [v0.1.80] 距离优先的绘制顺序：候选数 / 因预算丢掉多少 / **本帧画到的最远距离**
+                ["drawCandidatesLastFrame"] = DrawCandidatesLastFrame,
+                ["drawSkippedByBudgetTotal"] = DrawSkippedByBudgetTotal,
+                ["drawnMaxDistMetres"] = Math.Round(DrawnMaxDistMetres, 1),
+                ["drawCandidateMinDistMetres"] = Math.Round(DrawCandidateMinDistMetres, 1),
+                ["drawCandidateMaxDistMetres"] = Math.Round(DrawCandidateMaxDistMetres, 1),
+                ["drawOrder"] = "距离升序（近的先画）；预算顶满时丢掉的是**最远**的那批",
                 ["lastError"] = LastError
             }.ToJsonString();
         }
