@@ -247,8 +247,15 @@ namespace Game {
         }
 
         /// <summary>读回一张壳（坐标由调用方负责写/读）。</summary>
-        public static CubeSurface32 ReadFrom(BinaryReader reader) {
-            CubeSurface32 shell = new(0, 0, 0);
+        /// <summary>
+        /// 从记录里读一张壳。**必须把记录头里的立方体坐标传进来**：
+        /// 记录体本身只有高度场/材质（16,384 B），**不含坐标** ——
+        /// v0.1.61 之前这里固定 `new(0, 0, 0)`，于是**从存档读回来的每一张壳的 X/Z 都是 0**，
+        /// 网格全被建在世界原点附近（实测顶点 0 = `(16, 67, 0)`），
+        /// 主画面里"绘制的壳"与玩家看到的壳根本不是同一批几何。这是**生产路径上的真 bug**。
+        /// </summary>
+        public static CubeSurface32 ReadFrom(BinaryReader reader, int x = 0, int y = 0, int z = 0) {
+            CubeSurface32 shell = new(x, y, z);
             for (int i = 0; i < GridCells; i++) {
                 shell.TopHeight[i] = reader.ReadInt16();
                 shell.TopContents[i] = reader.ReadUInt16();

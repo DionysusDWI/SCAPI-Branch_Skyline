@@ -203,6 +203,12 @@ namespace Game {
         public static long CompactRewrites => m_compactRewrites;
         public static long TombstonesWritten => m_tombstonesWritten;
         public static long TombstonesLoaded { get; private set; }
+        /// <summary>
+        /// [v0.1.63] 读档时"壳自己的坐标 != 记录头的坐标"的次数。**必须恒为 0**：
+        /// 一旦不为 0，说明壳网格会被建到错误的位置（v0.1.61 之前固定 `new(0,0,0)` 就是这个 bug），
+        /// 而它在画面上表现为"提交了几百个网格却一个像素都没有"，极难从现象反推。所以做成判据。
+        /// </summary>
+        public static long ShellOriginMismatch { get; private set; }
         public static int FileRecords => m_fileRecords;
         static long m_compactRewrites;
         public static double LastSaveMs { get; private set; }
@@ -1289,9 +1295,10 @@ namespace Game {
         /// 所以"G-buffer 里有的 == 主画面壳层里有的"，不会出现两套口径。
         /// **不修改任何状态**（不刷 `LastUsed`、不动统计、不建网格）—— 因此离屏渲染可以安全调用。
         /// </summary>
-        public static List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel, Vector3 Center)>
+        public static List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel,
+                            Vector3 Center, Vector3 FirstVertex)>
             CollectDrawableMeshes(Camera camera) {
-            List<(VertexBuffer, IndexBuffer, int, bool, Vector3)> list = [];
+            List<(VertexBuffer, IndexBuffer, int, bool, Vector3, Vector3)> list = [];
             if (!Enabled || !RenderEnabled || m_entries.Count == 0 || camera == null) {
                 return list;
             }
@@ -1335,7 +1342,11 @@ namespace Game {
                     continue;
                 }
                 Vector3 center = new(wx, kv.Key.Cy * CubeSize + CubeSize * 0.5f, wz);
-                list.Add((vb, ib, indexCount, entry.MeshIsVoxel, center));
+                // 顶点 0 的真实世界坐标（取证探针用）；体素网格没有留 CPU 侧顶点数据，退回用中心
+                Vector3 first = entry.MeshIsVoxel || entry.Mesh == null
+                    ? center
+                    : new Vector3(entry.Mesh.FirstVertexX, entry.Mesh.FirstVertexY, entry.Mesh.FirstVertexZ);
+                list.Add((vb, ib, indexCount, entry.MeshIsVoxel, center, first));
             }
             return list;
         }
@@ -1631,6 +1642,7 @@ namespace Game {
         /// <summary>读档（换世界时自动调用；也可手动 `CubeShellLoad()`）。</summary>
         public static void Load() {
             Clear();                                  // 无条件先清（避免跨世界污染 —— 与 SkylineLod v0.1.0 的修复同因）
+            ShellOriginMismatch = 0;                  // [v0.1.63] 每次读档重新计数
             LoadedRecordsTotal = 0;
             string path = m_shellPath;
             if (path == null || !Storage.FileExists(path)) {
@@ -1661,7 +1673,12 @@ namespace Game {
                         catch (EndOfStreamException) {
                             break;                    // 上次写一半就被打断：读到哪算哪
                         }
-                        CubeSurface32 shell = CubeSurface32.ReadFrom(reader);
+                        // [v0.1.63] **把坐标传进去**：记录体不含坐标，不传就等于"所有读回来的壳都在原点"
+                        // （v0.1.61 之前就是这个 bug：165 个网格提交了却一个像素都没有，见 notes/140）。
+                        CubeSurface32 shell = CubeSurface32.ReadFrom(reader, cx, cy, cz);
+                        if (shell.X != cx || shell.Y != cy || shell.Z != cz) {
+                            ShellOriginMismatch++;            // 防御：真出现不一致要能在判据里看到
+                        }
                         // [v0.1.57] 追加式存档：**后面的记录覆盖前面的**；全零壳 = 删除标记
                         if (shell.IsEmpty) {
                             m_entries.Remove((cx, cy, cz));
@@ -1670,6 +1687,7 @@ namespace Game {
                         }
                         m_entries[(cx, cy, cz)] = new Entry { Shell = shell, LastUsed = 0 };
                         LoadedRecordsTotal++;
+                        // 读档回来的壳没有体素数据（记录格式 v1 只有列顶高度场）→ 靠预热重采
                     }
                     m_fileRecords = count;
                 }
@@ -1741,6 +1759,7 @@ namespace Game {
                 ["savedRecordsTotal"] = SavedRecordsTotal,
                 ["loadedRecordsTotal"] = LoadedRecordsTotal,
                 ["fileRecords"] = m_fileRecords,
+                ["shellOriginMismatch"] = ShellOriginMismatch,
                 ["appendedRecordsTotal"] = m_appendedRecords,
                 ["appendedBytes"] = m_appendedBytes,
                 ["appendedMiB"] = Math.Round(m_appendedBytes / 1048576.0, 3),

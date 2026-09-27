@@ -256,13 +256,16 @@ void main()
         /// 推导：透视矩阵 `M33 = f/(n−f)`、`M43 = n·f/(n−f)` → `n = M43/M33`、`f = M43/(1+M33)`。
         /// 非标准透视（正交等）直接原样返回，不硬改。
         /// </summary>
-        static Matrix ExtendFarPlane(Matrix projection, float farPlane) {
+        static Matrix ExtendFarPlane(Matrix projection, float farPlane, out float derivedNear, out float derivedFar) {
             float a = projection.M33, b = projection.M43;
             if (MathF.Abs(a) < 1e-6f || MathF.Abs(1f + a) < 1e-6f) {
+                derivedNear = derivedFar = 0f;
                 return projection;
             }
             float near = b / a;
             float currentFar = b / (1f + a);
+            derivedNear = near;
+            derivedFar = currentFar;
             if (near <= 0f || farPlane <= currentFar) {
                 return projection;                       // 远平面已经够远 → 不动
             }
@@ -284,6 +287,29 @@ void main()
                 Display.DrawIndexed(PrimitiveType.TriangleList, shader, SkylineLod.NearVertexBuffer,
                     SkylineLod.NearIndexBuffer, 0, SkylineLod.NearIndexCount);
             }
+        }
+
+        /// <summary>
+        /// [v0.1.61] **诊断用**：把三层远景 LOD 的缓冲当成"壳层列表"返回（`CaptureMode == 5`）。
+        /// 用途：壳层在离屏 pass 里不出像素时，用它把"**这条路画不出来**"和"**壳的 buffer 有问题**"分开。
+        /// </summary>
+        static List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel,
+                     Vector3 Center, Vector3 FirstVertex)>
+            LodBuffersAsList() {
+            List<(VertexBuffer, IndexBuffer, int, bool, Vector3, Vector3)> list = [];
+            if (SkylineLod.CoarseVertexBuffer != null && SkylineLod.CoarseIndexCount > 0) {
+                list.Add((SkylineLod.CoarseVertexBuffer, SkylineLod.CoarseIndexBuffer,
+                    SkylineLod.CoarseIndexCount, false, Vector3.Zero, Vector3.Zero));
+            }
+            if (SkylineLod.FineVertexBuffer != null && SkylineLod.FineIndexCount > 0) {
+                list.Add((SkylineLod.FineVertexBuffer, SkylineLod.FineIndexBuffer,
+                    SkylineLod.FineIndexCount, false, Vector3.Zero, Vector3.Zero));
+            }
+            if (SkylineLod.NearVertexBuffer != null && SkylineLod.NearIndexCount > 0) {
+                list.Add((SkylineLod.NearVertexBuffer, SkylineLod.NearIndexBuffer,
+                    SkylineLod.NearIndexCount, false, Vector3.Zero, Vector3.Zero));
+            }
+            return list;
         }
 
         /// <summary>
@@ -328,8 +354,9 @@ void main()
                 Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
                 Vector3 v = new(MathF.Floor(viewPosition.X), 0f, MathF.Floor(viewPosition.Z));
                 // [v0.1.61] 远平面要盖住"壳带 + LOD 半径"，否则离屏 pass 里远景几何全被裁掉（见 ExtendFarPlane 注释）
-                Matrix projection = ExtendFarPlane(camera.ProjectionMatrix,
-                    MathF.Max(SkylineLod.RadiusMetres, SkylineCubeShellStore.BandMetres) + 256f);
+                float wantFar = MathF.Max(SkylineLod.RadiusMetres, SkylineCubeShellStore.BandMetres) + 256f;
+                Matrix projection = ExtendFarPlane(camera.ProjectionMatrix, wantFar,
+                    out float derivedNear, out float derivedFar);
                 Matrix matrix = Matrix.CreateTranslation(v - viewPosition)
                     * camera.ViewMatrix.OrientationMatrix * projection;
                 Shader shader = EnsureShader();
@@ -339,31 +366,60 @@ void main()
                     .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
                 shader.GetParameter("u_samplerState", true).SetValue(EnsureSampler());
                 bool drawLod = CaptureMode != 2;
-                bool drawShells = IncludeShells && CaptureMode != 1;
+                bool drawShells = IncludeShells && (CaptureMode == 0 || CaptureMode >= 2);
+                bool shellsViaLodBuffers = CaptureMode == 5;     // 诊断：把 LOD 的 VB 走"壳层那条路"画一遍
+                if (shellsViaLodBuffers) {
+                    drawLod = false;
+                }
                 if (drawLod) {
                     DrawLodLayers(shader);
                 }
                 // [v0.1.61] 里程碑 1.4：把 32³ 壳网格也画进来（几何与主画面壳层同一批）
                 int shellMeshes = 0, shellIndices = 0, shellVoxelMeshes = 0;
+                int drawErrors = 0;
                 JsonArray ndcProbe = [];
                 if (drawShells) {
-                    List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel, Vector3 Center)> shells =
-                        SkylineCubeShellStore.CollectDrawableMeshes(camera);
+                    List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel,
+                          Vector3 Center, Vector3 FirstVertex)> shells =
+                        shellsViaLodBuffers ? LodBuffersAsList() : SkylineCubeShellStore.CollectDrawableMeshes(camera);
+                    if (CaptureMode == 4 && shells.Count > 1) {
+                        shells = shells.GetRange(0, 1);          // 诊断：只画第一个壳（排除"数量太多被丢"）
+                    }
+                    // 缓冲元数据：壳与 LOD 的顶点步长/元素数/索引格式都不一样的话，混在一个 pass 里可能就是问题
+                    VertexBuffer firstVb = shells.Count > 0 ? shells[0].VertexBuffer : null;
+                    IndexBuffer firstIb = shells.Count > 0 ? shells[0].IndexBuffer : null;
+                    result["buffers"] = new JsonObject {
+                        ["shellStride"] = firstVb?.VertexDeclaration?.VertexStride,
+                        ["shellElements"] = firstVb?.VertexDeclaration == null
+                            ? (int?)null : firstVb.VertexDeclaration.VertexElements.Count,
+                        ["shellVerts"] = firstVb?.VerticesCount,
+                        ["shellIndexFormat"] = firstIb?.IndexFormat.ToString(),
+                        ["lodStride"] = SkylineLod.CoarseVertexBuffer?.VertexDeclaration?.VertexStride,
+                        ["lodElements"] = SkylineLod.CoarseVertexBuffer?.VertexDeclaration == null
+                            ? (int?)null : SkylineLod.CoarseVertexBuffer.VertexDeclaration.VertexElements.Count,
+                        ["lodIndexFormat"] = SkylineLod.CoarseIndexBuffer?.IndexFormat.ToString()
+                    };
                     // [v0.1.61] **CPU 侧 NDC 探针**：把前几个壳的中心用同一个矩阵投一遍。
                     // 为什么需要：壳层在离屏 pass 里"提交了 165 个网格却一个像素都没有"，
                     // 只有把"投到哪去了"量出来，才能分清是"不在视锥内"还是"被深度挡住"。
                     // NDC 判据：|x|≤1 且 |y|≤1 且 0<z≤1 才算真的在视锥里。
-                    foreach ((VertexBuffer _, IndexBuffer _, int _, bool _, Vector3 center) in shells) {
+                    foreach ((VertexBuffer _, IndexBuffer _, int _, bool _, Vector3 center, Vector3 first) in shells) {
                         if (ndcProbe.Count >= 4) {
                             break;
                         }
                         Vector4 clip = Vector4.Transform(
                             new Vector4(center.X - v.X, center.Y, center.Z - v.Z, 1f), matrix);
+                        Vector4 clipV = Vector4.Transform(
+                            new Vector4(first.X - v.X, first.Y, first.Z - v.Z, 1f), matrix);
                         ndcProbe.Add(new JsonObject {
                             ["center"] = new JsonArray(Math.Round(center.X, 1), Math.Round(center.Y, 1), Math.Round(center.Z, 1)),
+                            ["vertex0"] = new JsonArray(Math.Round(first.X, 1), Math.Round(first.Y, 1), Math.Round(first.Z, 1)),
                             ["w"] = Math.Round(clip.W, 2),
                             ["ndc"] = new JsonArray(Math.Round(clip.X / clip.W, 3), Math.Round(clip.Y / clip.W, 3),
-                                Math.Round(clip.Z / clip.W, 3))
+                                Math.Round(clip.Z / clip.W, 3)),
+                            ["wV"] = Math.Round(clipV.W, 2),
+                            ["ndcV"] = new JsonArray(Math.Round(clipV.X / clipV.W, 3), Math.Round(clipV.Y / clipV.W, 3),
+                                Math.Round(clipV.Z / clipV.W, 3))
                         });
                     }
                     if (shells.Count > 0) {
@@ -376,8 +432,17 @@ void main()
                         Shader shellShader = SkylineCubeSurfaceDemo.PrepareTerrainShader(
                             camera, SkylineCubeShellStore.BandLift);
                         if (shellShader != null) {
-                            foreach ((VertexBuffer vb, IndexBuffer ib, int count, bool isVoxel, Vector3 center) in shells) {
-                                Display.DrawIndexed(PrimitiveType.TriangleList, shellShader, vb, ib, 0, count);
+                            foreach ((VertexBuffer vb, IndexBuffer ib, int count, bool isVoxel, Vector3 center,
+                                      Vector3 first) in shells) {
+                                try {
+                                    // 模式 3 = 用**自编译的 G-buffer shader** 画壳（第一次尝试的做法，用于同一二进制内对照）
+                                    Shader use = CaptureMode == 3 ? shader : shellShader;
+                                    Display.DrawIndexed(PrimitiveType.TriangleList, use, vb, ib, 0, count);
+                                }
+                                catch (Exception ex) {
+                                    drawErrors++;
+                                    m_lastError = $"{vb?.VerticesCount}v/{count}i: {ex.Message}";
+                                }
                                 shellMeshes++;
                                 shellIndices += count;
                                 if (isVoxel) {
@@ -424,6 +489,10 @@ void main()
                     ["indices"] = shellIndices,
                     ["voxelMeshes"] = shellVoxelMeshes,
                     ["bandLift"] = SkylineCubeShellStore.BandLift,
+                    ["drawErrors"] = drawErrors,
+                    ["derivedNear"] = Math.Round(derivedNear, 3),
+                    ["derivedFar"] = Math.Round(derivedFar, 1),
+                    ["appliedFar"] = Math.Round(wantFar, 1),
                     ["ndcProbe"] = ndcProbe
                 };
                 result["note"] = "G-buffer：RGB=albedo（图集采样×顶点色），A=1 表示画到了几何；"
@@ -546,7 +615,7 @@ void main()
         /// 壳层的独立覆盖率只看模式 2（两层一起画时壳被 LOD 压住，量不出自己的贡献）。
         /// </summary>
         public static string GBufferMode(int mode) {
-            SkylineGBuffer.CaptureMode = Math.Clamp(mode, 0, 2);
+            SkylineGBuffer.CaptureMode = Math.Clamp(mode, 0, 5);
             return SkylineGBuffer.Info();
         }
 

@@ -54,6 +54,8 @@ namespace Game {
         public int IndexCount;
         public long VertexBytes => (long)Vertices * 20;
         public int MinSurfaceY, MaxSurfaceY;
+        /// <summary>[v0.1.61] 顶点 0 的世界坐标（取证探针用；`CreateBuffers` 时留存）。</summary>
+        public float FirstVertexX, FirstVertexY, FirstVertexZ;
         public double BuildMs;
 
         // 用字段（不是属性）：`Utilities.Dispose` 收的是 `ref`，属性不能当 ref 参数。
@@ -495,6 +497,14 @@ namespace Game {
         void CreateBuffers() {
             Vertices = m_vertexCount;
             IndexCount = m_indexCount;
+            // [v0.1.61] 取证用：留下**顶点 0 的世界坐标**，不改渲染行为。
+            // 用途：G-buffer 里"壳层一个像素都不出"时，用它验证"网格顶点真的在立方体位置吗"——
+            // 光看立方体中心投到哪是不够的（中心在视锥内、顶点却在别处，画面照样是空的）。
+            if (Vertices > 0) {
+                FirstVertexX = m_vertexData[0].X;
+                FirstVertexY = m_vertexData[0].Y;
+                FirstVertexZ = m_vertexData[0].Z;
+            }
             VertexBuffer = new VertexBuffer(TerrainVertex.VertexDeclaration, Vertices);
             VertexBuffer.SetData(m_vertexData, 0, Vertices);
             bool big = Vertices > 65535;
