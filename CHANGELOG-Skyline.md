@@ -3,6 +3,27 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.18] - 2026-09-27
+
+第二十八个版本：**阴影阶段第一步 —— 太阳视角 pass + 回读验证**（里程碑 5）。
+
+**本版相对 v0.1.17 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（太阳视角 pass）** | `SkylineShadowPass.cs`（`SkylineRuntime` partial，**默认关**）：用游戏自己的地形不透明 shader（雾关闭）把 `SkylineLod` 的粗+细网格渲染到自建 `RenderTarget2D`，相机为**太阳方向正交相机**。接口：`skyline.ShadowPassEnabled / ShadowPassSize(1024) / ShadowPassRadius(256) / ShadowPassClearColor / ShadowPassUseCameraView`、`CaptureSunView()`（回传统计）、`SaveSunView()`（存 PNG 到 `ScreenCapture/`） |
+| **诊断 B** | `ShadowPassClearColor` 可设醒目色，用来**单独验证"渲染目标+清屏+回读"通路**（本次靠它把排查范围从整条管线缩到矩阵/几何）；`ShadowPassUseCameraView` 用相机矩阵渲染做二分 |
+
+### Verified
+
+* 清屏色回读校验：设 `(0.2,0.4,0.6)` → `meanRGB=(51,102,153)`（精确匹配）✅ 通路正确；
+* 相机矩阵渲染 LOD：`visiblePixels=137,965 (13.16%)`、`rows=525` ✅（绘制链无问题）；
+* **太阳矩阵渲染（修正后）**：`visiblePixels=403,608 (38.49%)`、`rows=943`、`meanRGB=(144,145,145)`、44.9 ms/次 ✅；
+  存图 `ScreenCapture/skyline-sunview-20260927-135030.png`（363 KB）——图中可见雪原平台、LOD 单元裙边竖条与未覆盖区域；
+* **踩坑（写进 notes/88）**：`Matrix.CreateLookAt` **自带平移**，补回 `u_origin` 后不能再减一次 eye
+  （平移被扣两次 → 全黑）；正确写法 `CreateTranslation(origin3) * CreateLookAt(...) * CreateOrthographic(...)`；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.17] - 2026-09-27
 
 第二十七个版本：**"区块 Valid 即刻补采"** —— 新区块（或玩家刚走过的区块）一达到 Valid 就立刻通知
