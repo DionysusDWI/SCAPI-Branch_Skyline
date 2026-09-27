@@ -62,11 +62,16 @@ namespace Game {
 
         public TerrainChunkGeometry Geometry = new();
 
-        // ===== v0.1.4：**竖直分节**（32³ 路线第 1 步）=====
-        // 把"整列 Size×Size×Height 一块"拆成 ColumnSlicesCount 个 256 层的子列，**按需租借**：
-        // 高空玩家只需顶部子列，竖直方向的裁剪才真正省内存（notes/67 §3）。读取未租借的段返回 0（空气），
-        // 写入会自动租借该段。对外访问全部走 Get/SetCellValueFast，行为与原整块一致。
-        public const int ColumnSliceHeight = 256;
+        // ===== v0.1.4：**竖直分节**（32³ 路线第 1 步）；v0.1.29：分节粒度 256 → **32** =====
+        // 把"整列 Size×Size×Height 一块"拆成 ColumnSlicesCount 个 **32 层**的分带，**按需租借**：
+        // 地表列只租"地形所在的那几条带"（典型 3 条 = 96 KiB，原 256 层分节是 1 段 = 256 KiB），
+        // 高空建造只租内容所在的那一条（32 KiB）——这是 P3（32³ 立方体存储）在**列内**的第一刀：
+        // 分配单元 = 16×16×32（= 1/4 个 32³ 立方体的竖直一片），为后续"跨 2×2 列共享立方体"铺路。
+        // 读取未租借的段返回"天光空气/0"（见 UntouchedSliceValue），写入会自动租借该段；
+        // 对外访问全部走 Get/SetCellValueFast，行为与原整块一致。
+        public const int ColumnSliceHeight = 32;
+        public const int ColumnSliceHeightBits = 5;             // log2(ColumnSliceHeight)
+        public const int ColumnSliceMask = ColumnSliceHeight - 1;
         public const int ColumnSlicesCount = Height / ColumnSliceHeight;
         public int[][] Cells;
 
@@ -214,7 +219,8 @@ namespace Game {
         //   * `CalculateCellIndex` 给的是"y 连续"的扁平索引：index = rel + x*Height + z*Height*Size
         //     （rel = y - MinHeight ∈ [0,Height)）。光照、顶面高度、切片内容哈希、方块扫描器
         //     以及地形生成器都按这个索引前后走动（index±1 就是 y±1）。
-        //   * 存储按 256 层分段：段 seg = rel>>8，段内偏移 = (rel&255) + x*ColumnSliceHeight
+        //   * 存储按 ColumnSliceHeight（=32）层分段：段 seg = rel>>ColumnSliceHeightBits，
+        //     段内偏移 = (rel&ColumnSliceMask) + x*ColumnSliceHeight
         //     + z*ColumnSliceHeight*Size（这样一个竖直带只租 1 段，才有 -87.5% 的省内存）。
         //
         // [v0.1.8 修复] 旧实现把 index 直接当"段号 = index>>16、偏移 = index&0xFFFF"用 —— 那是
@@ -228,8 +234,8 @@ namespace Game {
         static void SplitColumnIndex(int index, out int seg, out int offset) {
             int rel = index & (Height - 1);
             int column = index >> HeightBits;                 // = x + z * Size
-            seg = rel >> 8;                                   // / ColumnSliceHeight
-            offset = (rel & (ColumnSliceHeight - 1)) + (column & SizeMinusOne) * ColumnSliceHeight
+            seg = rel >> ColumnSliceHeightBits;               // / ColumnSliceHeight
+            offset = (rel & ColumnSliceMask) + (column & SizeMinusOne) * ColumnSliceHeight
                 + (column >> SizeBits) * (ColumnSliceHeight * Size);
         }
 
@@ -263,18 +269,18 @@ namespace Game {
 
         public virtual int GetCellValueFast(int x, int y, int z) {
             int rel = y - MinHeight;
-            int[] slice = Cells[rel >> 8];
+            int[] slice = Cells[rel >> ColumnSliceHeightBits];
             if (slice == null) {
                 return y > GetTopHeightFast(x, z) ? SkyLitAirValue : 0;
             }
-            return slice[(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size];
+            return slice[(rel & ColumnSliceMask) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size];
         }
 
         public virtual int GetCellValueFast(Point3 p) => GetCellValueFast(p.X, p.Y, p.Z);
 
         public virtual void SetCellValueFast(int x, int y, int z, int value) {
             int rel = y - MinHeight;
-            int seg = rel >> 8;
+            int seg = rel >> ColumnSliceHeightBits;
             if (Cells[seg] == null) {
                 // v0.1.4：向未分配段写"空气"= 无操作（竖直分节的省内存来源）。
                 // 注意判据用 `contents == 0` 而不是 `value == 0`——光照系统会把空气写成
@@ -285,7 +291,7 @@ namespace Game {
                 }
                 EnsureColumnSlice(seg);
             }
-            Cells[seg][(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size] = value;
+            Cells[seg][(rel & ColumnSliceMask) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size] = value;
         }
 
         public virtual void SetCellValueFast(Point3 p, int value) {
