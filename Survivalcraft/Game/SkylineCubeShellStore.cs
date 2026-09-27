@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -112,6 +113,35 @@ namespace Game {
         /// </summary>
         public static bool RequireNeighbors { get; set; } = false;
 
+        /// <summary>
+        /// [v0.1.55] **覆盖够了就自动打开四邻规则**：`BandCoverage ≥ MinBandCoverage` 时启用
+        /// （覆盖不足时强行启用会把功能关掉 —— v0.1.51 实测薄环上 40 个壳只有 2 个合格）。
+        /// </summary>
+        public static bool RequireNeighborsWhenCovered { get; set; } = true;
+        public static float MinBandCoverage { get; set; } = 0.6f;
+        public static float BandCoverage { get; private set; }
+        public static bool NeighborRuleActive { get; private set; }
+
+        // ---------------- [v0.1.55] 更宽的采集口径：区块 Valid 就采（不等卸载） ----------------
+        /// <summary>开关：区块刚 Valid 时把它所属的 32³ 立方体排进采集队列。</summary>
+        public static bool CaptureOnValid { get; set; } = true;
+        /// <summary>待采队列上限（超出就丢弃新的，记 `pendingDropped`）。</summary>
+        public static int MaxPending { get; set; } = 4096;
+        /// <summary>每 Tick 最多处理几个待采立方体。</summary>
+        public static int PendingPerTick { get; set; } = 8;
+        /// <summary>每 Tick 采壳的时间预算（毫秒）。</summary>
+        public static float HarvestBudgetMs { get; set; } = 4f;
+        /// <summary>兄弟区块还没就绪时的重试次数上限（之后就放弃这个立方体）。</summary>
+        public static int MaxPendingRetries { get; set; } = 8;
+
+        // 更新线程只允许碰这两个并发容器（`m_entries` 只在主线程动）
+        static readonly ConcurrentQueue<(int Cx, int Cy, int Cz)> m_pendingQueue = new();
+        static readonly ConcurrentDictionary<(int Cx, int Cy, int Cz), int> m_pendingSet = new();
+        public static int PendingCount => m_pendingQueue.Count;
+        public static long HarvestedOnValid { get; private set; }
+        public static long PendingDropped { get; private set; }
+        public static long PendingSkipped { get; private set; }
+
         sealed class Entry {
             public CubeSurface32 Shell;
             public CubeSurfaceMesh32 Mesh;
@@ -143,17 +173,120 @@ namespace Game {
         public static long SkippedIsolated { get; private set; }
         public static double LastHarvestMs { get; private set; }
         public static double LastMeshMs { get; private set; }
+        public static double LastPendingMs { get; private set; }
         public static string LastError { get; private set; } = "";
 
         static Terrain Terrain => GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
 
         /// <summary>"四邻都在"检查（`RequireNeighbors` 的判定体）。</summary>
         static bool NeighborhoodComplete(int cx, int cy, int cz) {
-            if (!RequireNeighbors) {
+            if (!NeighborRuleActive) {
                 return true;
             }
             return m_entries.ContainsKey((cx - 1, cy, cz)) && m_entries.ContainsKey((cx + 1, cy, cz))
                 && m_entries.ContainsKey((cx, cy, cz - 1)) && m_entries.ContainsKey((cx, cy, cz + 1));
+        }
+
+        /// <summary>
+        /// [v0.1.55] **区块刚 Valid**（进入加载范围）时由 `SkylineLod.NotifyChunkValid` 转发。
+        /// **这个钩子在更新线程上**（`TerrainUpdater.ThreadUpdateFunction` → `UpdateChunkSingleStep`），
+        /// 所以这里**只允许入队**：不读 `m_entries`、不碰地形；真正的采集在主线程 `Tick()` 里做。
+        /// （与 v0.1.36 修掉的那次"更新线程碰非并发集合"是同一类问题，这里是主动规避。）
+        /// </summary>
+        public static void OnChunkValid(TerrainChunk chunk) {
+            if (!Enabled || !CaptureOnValid || chunk == null) {
+                return;
+            }
+            try {
+                if (m_pendingSet.Count >= MaxPending) {
+                    PendingDropped++;
+                    return;
+                }
+                int minTop = int.MaxValue, maxTop = int.MinValue;
+                for (int x = 0; x < TerrainChunk.Size; x++) {
+                    for (int z = 0; z < TerrainChunk.Size; z++) {
+                        int top = chunk.GetTopHeightFast(x, z);
+                        if (top > maxTop) {
+                            maxTop = top;
+                        }
+                        if (top < minTop) {
+                            minTop = top;
+                        }
+                    }
+                }
+                if (maxTop < TerrainChunk.MinHeight) {
+                    return;                                  // 整块全空（例如高空立方体）
+                }
+                int cxc = chunk.Coords.X >> 1, czc = chunk.Coords.Y >> 1;
+                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                    (int Cx, int Cy, int Cz) key = (cxc, cy, czc);
+                    if (m_pendingSet.TryAdd(key, 0)) {
+                        m_pendingQueue.Enqueue(key);
+                    }
+                }
+            }
+            catch (Exception e) {
+                LastError = e.Message;                       // 只记字符串，不在这里抛
+            }
+        }
+
+        /// <summary>[v0.1.55] 主线程：按预算处理待采队列（兄弟区块没就绪就稍后重试，最多 `MaxPendingRetries` 次）。</summary>
+        static void HarvestPending() {
+            if (m_pendingQueue.IsEmpty) {
+                return;
+            }
+            Terrain terrain = Terrain;
+            if (terrain == null) {
+                return;
+            }
+            Stopwatch watch = Stopwatch.StartNew();
+            int budget = Math.Max(0, PendingPerTick);
+            int attempts = m_pendingQueue.Count;                 // 本轮最多看这么多（避免死循环）
+            while (budget > 0 && attempts-- > 0 && m_pendingQueue.TryDequeue(out var key)) {
+                if (watch.Elapsed.TotalMilliseconds > HarvestBudgetMs) {
+                    m_pendingQueue.Enqueue(key);                 // 预算用完：放回去，下帧再说
+                    break;
+                }
+                if (m_entries.ContainsKey(key)) {
+                    m_pendingSet.TryRemove(key, out _);
+                    PendingSkipped++;
+                    continue;
+                }
+                bool ready = true;
+                for (int dx = 0; dx < 2 && ready; dx++) {
+                    for (int dz = 0; dz < 2 && ready; dz++) {
+                        TerrainChunk sibling = terrain.GetChunkAtCoords(key.Cx * 2 + dx, key.Cz * 2 + dz);
+                        if (sibling == null || sibling.ThreadState < TerrainChunkState.Valid) {
+                            ready = false;
+                        }
+                    }
+                }
+                if (!ready) {
+                    int retries = m_pendingSet.TryGetValue(key, out int n) ? n + 1 : 1;
+                    if (retries > MaxPendingRetries) {
+                        m_pendingSet.TryRemove(key, out _);
+                        SkippedNotReady++;
+                        continue;                                // 放弃（下次区块再 Valid 时会重新入队）
+                    }
+                    m_pendingSet[key] = retries;
+                    m_pendingQueue.Enqueue(key);                 // 稍后重试（区块还在，数据不会丢）
+                    continue;
+                }
+                Stopwatch one = Stopwatch.StartNew();
+                CubeSurface32 shell = CubeSurface32.Extract(terrain, key.Cx, key.Cy, key.Cz);
+                one.Stop();
+                LastHarvestMs = one.Elapsed.TotalMilliseconds;
+                m_pendingSet.TryRemove(key, out _);
+                if (shell.QuadCount == 0) {
+                    continue;
+                }
+                m_entries[key] = new Entry { Shell = shell, LastUsed = Time.RealTime };
+                HarvestedTotal++;
+                HarvestedOnValid++;
+                MarkDirty();
+                budget--;
+            }
+            LastPendingMs = watch.Elapsed.TotalMilliseconds;
         }
 
         /// <summary>[v0.1.52] 距离（米）→ 本档的**最小体素边长**（1/2/4/8/16/32 m）。</summary>
@@ -320,13 +453,73 @@ namespace Game {
                     }
                     SaveTick();
                 }
+                HarvestPending();      // [v0.1.55] 更宽口径：区块 Valid 就采（更新线程只入队）
                 EvictIfNeeded();
                 BuildMeshes();
+                UpdateBandCoverage();
             }
             catch (Exception e) {
                 LastError = e.Message;
                 Log.Warning($"SkylineCubeShellStore.Tick: {e.Message}");
             }
+        }
+
+        public static int BandShellCubes { get; private set; }
+        public static int BandExpectedCubes { get; private set; }
+        public static int BandDrawableCubes { get; private set; }
+        public static int BandCompleteCubes { get; private set; }
+
+        /// <summary>
+        /// [v0.1.55] 统计交接带内的壳覆盖度 → 决定"四邻规则"要不要生效。
+        /// **只统计近带（第一档，默认视距−8…视距+48 m）**：整条 768 m 带面积太大
+        /// （`π(896²−120²)/32² ≈ 2,400` 个立方体），用它会永远达不到阈值、门控永远关着；
+        /// 而"整圈有壳、边界干净"要解决的正是**最近这一圈**。
+        /// 期望立方体数用环带面积估算：`π(far² − near²) / 32²`（一个立方体 32×32 m）。
+        /// </summary>
+        static void UpdateBandCoverage() {
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float viewRange = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+                ?? SettingsManager.VisibilityRange;
+            float near = MathF.Max(viewRange - BandInset, 0f);
+            float far = viewRange + BandMetres;
+            float nearSq = near * near, farSq = far * far;
+            int inside = 0, drawable = 0, complete = 0;
+            Terrain terrain = Terrain;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                float wx = kv.Key.Cx * CubeSize + CubeSize * 0.5f;
+                float wz = kv.Key.Cz * CubeSize + CubeSize * 0.5f;
+                float dx = wx - camera.X, dz = wz - camera.Z;
+                float d2 = dx * dx + dz * dz;
+                if (d2 >= nearSq && d2 <= farSq) {
+                    inside++;
+                }
+                // [v0.1.55] 覆盖度只统计**真正会画的那批**：带内 + 地形已释放（与 Draw 同一口径）
+                if (d2 < nearSq || d2 > farSq || terrain == null) {
+                    continue;
+                }
+                if (terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2) != null
+                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2) != null
+                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2 + 1) != null
+                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2 + 1) != null) {
+                    continue;
+                }
+                drawable++;
+                if (m_entries.ContainsKey((kv.Key.Cx - 1, kv.Key.Cy, kv.Key.Cz))
+                    && m_entries.ContainsKey((kv.Key.Cx + 1, kv.Key.Cy, kv.Key.Cz))
+                    && m_entries.ContainsKey((kv.Key.Cx, kv.Key.Cy, kv.Key.Cz - 1))
+                    && m_entries.ContainsKey((kv.Key.Cx, kv.Key.Cy, kv.Key.Cz + 1))) {
+                    complete++;
+                }
+            }
+            float expected = MathF.PI * (far * far - near * near) / (CubeSize * CubeSize);
+            BandShellCubes = inside;
+            BandExpectedCubes = (int)MathF.Round(expected);
+            BandDrawableCubes = drawable;
+            BandCompleteCubes = complete;
+            // 覆盖度 = "会画的壳里四邻齐全的比例"：四邻规则只会隐藏不齐的那些，所以这就是它的可用度
+            BandCoverage = drawable >= 4 ? complete / (float)drawable : 0f;
+            NeighborRuleActive = RequireNeighbors
+                || (RequireNeighborsWhenCovered && BandCoverage >= MinBandCoverage);
         }
 
         static void EvictIfNeeded() {
@@ -817,6 +1010,20 @@ namespace Game {
                 ["skippedOverBudget"] = SkippedOverBudget,
                 ["skippedBecauseLoaded"] = SkippedBecauseLoaded,
                 ["skippedIsolated"] = SkippedIsolated,
+                ["harvestedOnValid"] = HarvestedOnValid,
+                ["pending"] = PendingCount,
+                ["pendingDropped"] = PendingDropped,
+                ["pendingSkipped"] = PendingSkipped,
+                ["captureOnValid"] = CaptureOnValid,
+                ["bandShellCubes"] = BandShellCubes,
+                ["bandExpectedCubes"] = BandExpectedCubes,
+                ["bandDrawableCubes"] = BandDrawableCubes,
+                ["bandCompleteCubes"] = BandCompleteCubes,
+                ["bandCoverage"] = Math.Round(BandCoverage, 3),
+                ["bandCoverageMetres"] = new JsonArray(MathF.Max(0f, BandInset), TierMetres.Length > 0 ? TierMetres[0] : 48f),
+                ["neighborRuleActive"] = NeighborRuleActive,
+                ["requireNeighborsWhenCovered"] = RequireNeighborsWhenCovered,
+                ["minBandCoverage"] = MinBandCoverage,
                 ["lastHarvestMs"] = Math.Round(LastHarvestMs, 3),
                 ["lastMeshMs"] = Math.Round(LastMeshMs, 3),
                 ["bandMetres"] = BandMetres,
@@ -970,6 +1177,20 @@ namespace Game {
 
         /// <summary>[v0.1.53] 整仓摘要（重启前后比对用）。</summary>
         public static string CubeShellHash() => SkylineCubeShellStore.Hash();
+
+        /// <summary>[v0.1.55] 开关"区块 Valid 就采"（更宽的采集口径）。</summary>
+        public static string CubeShellCaptureOnValid(bool enabled) {
+            SkylineCubeShellStore.CaptureOnValid = enabled;
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>[v0.1.55] 手动把"覆盖度门控的四邻规则"参数调一下（取证/A-B 用）。</summary>
+        public static string CubeShellNeighborRule(bool requireNeighbors, float minCoverage) {
+            SkylineCubeShellStore.RequireNeighbors = requireNeighbors;
+            SkylineCubeShellStore.MinBandCoverage = minCoverage;
+            SkylineLod.RequestRebuild();
+            return SkylineCubeShellStore.Survey();
+        }
 
         /// <summary>
         /// [v0.1.52] 设档位表（相对视距的米数，最多 5 段，逗号分隔）。

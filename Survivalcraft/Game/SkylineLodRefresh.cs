@@ -172,6 +172,9 @@ namespace Game {
         /// 800+ 列时要十几秒）。可用 `SkylineRuntime.LodBackfillOnValid` 关闭做 A/B。
         /// </summary>
         public static void NotifyChunkValid(TerrainChunk chunk) {
+            // [v0.1.55] 更宽的壳采集口径：区块刚 Valid（还在加载范围内）就把它的 32³ 立方体排进采集队列。
+            // 注意本方法在**更新线程**上 → `SkylineCubeShellStore.OnChunkValid` 只入队，绝不碰主线程数据。
+            SkylineCubeShellStore.OnChunkValid(chunk);
             if (!Enabled || chunk == null || !SkylineRuntime.BackfillOnValid) {
                 return;
             }
