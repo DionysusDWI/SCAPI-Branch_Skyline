@@ -8,9 +8,17 @@
 
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力（面向 AI / agent 建造与创造模式工具）。
 
-**当前状态：v0.1.6** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
-补上**大规模 / 高空建造链路**的能力，并落地三层渲染路线的第一轮（多层家具 LOD + 超视距 LOD）：
+**当前状态：v0.1.7** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
+补上**大规模 / 高空建造链路**的能力，落地三层渲染路线的第一轮（多层家具 LOD + 超视距 LOD），
+并修掉两处交互缺陷（负高度不能手动放置、命令辅助棒对着空气会"选中自己"）：
 
+- **负高度手动放置修复**（v0.1.7）：`ComponentMiner.DoPlace` 的放置高度判定还是上游的 `num3 > 0`——
+  世界扩到 **-1024..1023** 后没同步，导致 **y<0 的格子无法手动放置**（挖掘/指令不受影响）。
+  改为 `num3 >= TerrainChunk.MinHeight && num3 < TerrainChunk.HeightMinusOne`；
+  两条通道各验一次（`op:place` 与真实 `PlayerInput.Interact` 都在负高度放下并读回）。
+- **命令辅助棒不再"对空自选自己"**（v0.1.7）：命令方块 mod 的 `OnUse` 在射线未命中时会回退记录
+  **玩家自身位置**（`m_recordEntityName="player"`），看起来像 bug。新增 `AllowPlayerFallback`
+  （**默认 false** = 未命中原样返回、不记录），A/B 双向验证。
 - **LOD 采样中位化**（v0.1.6）：单元高度从"最低顶面"改为"中位高度"（粗层 256 列 / 细层每子块 64 列
   各自取中位）——消除"单个深坑把整片地形画成下沉平板"的偏差。
 - **LOD 光影接口预适配**（v0.1.5）：`skyline.LodExternalShaderHooked` + `CustomDraw` 回调 +
@@ -81,6 +89,7 @@
 | v0.1.4 | **32³ 路线第 1 步：竖直分节**：`TerrainChunk` 整列存储拆为 8 个 256 层子列、按需分配（普通块 1 段 = -87.5% 内存；高空 1-2 段）；存档格式不变、旧档透明兼容（实测 SaveProject→重启逐格一致） | 2026-09-27 |
 | v0.1.5 | **LOD 光影接口预适配**：`LodExternalShaderHooked` + `CustomDraw` + `LodMeshMetadata()`（Dawnlight/Iris 式管线接管点）；`notes/73` 含两者接口对照与真接入路线图 | 2026-09-27 |
 | v0.1.6 | **LOD 采样中位化**：单元高度由"最低顶面"改为"中位高度"（粗层 256 列 / 细层 64 列各自取中位），消除深坑导致的"下沉平板"偏差；采样缓冲移出循环（0 警告） | 2026-09-27 |
+| v0.1.7 | **两处交互缺陷修复**：① `ComponentMiner.DoPlace` 高度判定 `num3 > 0` → `>= TerrainChunk.MinHeight`，负高度（y<0）恢复手动放置（`op:place` 与真实 `PlayerInput.Interact` 双通道验证）；② 命令辅助棒 `OnUse` 不再"未命中就选中玩家自己"（`AllowPlayerFallback` 默认 false，A/B 验证）；另修 AgentBridge 与 v0.1.4 字段签名的兼容（`MissingFieldException`） | 2026-09-27 |
 
 构建（Windows，仅 `Survivalcraft.Windows` 目标）：
 

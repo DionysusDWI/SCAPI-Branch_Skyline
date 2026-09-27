@@ -3,6 +3,26 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.7] - 2026-09-27
+
+第十七个版本：**两处交互缺陷修复（负高度手动放置 / 命令辅助棒对空自选）**，并修好被 v0.1.4
+字段变更打断的工具链（AgentBridge 与分支 DLL 的字段签名不兼容）。
+
+**本版相对 v0.1.6 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **修复 A（负高度放置）** | `ComponentMiner.DoPlace` 的放置目标高度判定仍是上游的 `num3 > 0`——世界扩到 **-1024..1023** 后这里没同步，导致 **y<0 的格子无法手动放置方块**（挖掘与 `op:place` 之外的指令放置路径不受影响）。改为 `num3 >= TerrainChunk.MinHeight && num3 < TerrainChunk.HeightMinusOne` |
+| **修复 B（命令辅助棒）** | 命令方块 mod（上游 v4.2.1 源码，本仓之外）`SubsystemCmdRodBlockBehavior.OnUse`：射线**未命中任何目标**时上游回退为"选中玩家自身位置"并写入 `m_recordPosition` / `m_recordEntityName="player"`，在正式玩法里表现为"对着空气右键就把自己记下来了"。新增静态开关 `AllowPlayerFallback`（**默认 false** = 未命中原样返回、不记录）；需要旧调试行为时显式置 true |
+| **修复 C（工具链）** | AgentBridge 从 NuGet `SurvivalcraftAPI.Survivalcraft 1.9.3` 改为**直接引用分支自编译产物**（`Survivalcraft`/`Engine`/`EntitySystem` + `0Harmony`，全部 `Private=false`）——v0.1.4 把 `TerrainChunk.Cells` 由 `int[]` 改为 `int[][]`，旧包的字段签名让 `teleport`/寻路直接抛 `MissingFieldException`（`Pathfinder.cs` / `TerrainIndex.cs` 只做 `== null` 判空，重编译即可） |
+
+### Verified
+
+* **修复 A**：同一目标区两条通道各验一次——① `op:place` 以箱子（2504,-1000,6774）为锚，在 **(2505,-1000,6774)** 放下花岗岩成功；② **真实输入通道**（`act` 写入 `PlayerInput.Interact`，即玩家右键同一条链）在 **y=-999** 放下花岗岩，`cell` 读回 `GraniteBlock`。修复前该分支落到 `Place() returned false`；
+* **修复 B**：手持命令辅助棒对空右键——`AllowPlayerFallback=false`（默认）时 `m_recordPosition` 保持 `null`；A/B 置 true 后同一动作记录 `[2504,-999,6774]` 且 `m_recordEntityName="player"`（缺陷复现）；再置回 false 并把玩家移到 (2507.5,-998.99,6774.5) 后右键，记录**未更新**（证明默认不再自选玩家）；
+* **修复 C**：重编译部署后 `teleport` 不再抛 `MissingFieldException`（返回正常业务结果），`cell`/`state`/寻路恢复可用；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.6] - 2026-09-27
 
 第十六个版本：**LOD 采样策略改进（最低顶面 → 中位高度）**。

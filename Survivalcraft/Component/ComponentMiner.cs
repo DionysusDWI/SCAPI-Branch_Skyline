@@ -419,7 +419,9 @@ namespace Game {
                             return false;
                         }
                     }
-                    if (num3 > 0
+                    // [负高度实验 v0.1.7 修复] 原来是 `num3 > 0`——下游分支把世界扩到 -1024..1023
+                    // 后这里没同步，导致"负数高度无法手动放置方块"（挖掘/指令放置不受影响）。
+                    if (num3 >= TerrainChunk.MinHeight
                         && num3 < TerrainChunk.HeightMinusOne
                         && (m_canJumpToPlace
                             || IsBlockPlacingAllowed(ComponentCreature.ComponentBody)
