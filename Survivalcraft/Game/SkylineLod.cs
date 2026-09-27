@@ -254,6 +254,81 @@ namespace Game {
 
         // ---------------- 网格 ----------------
 
+        /// <summary>[v0.1.15] 坡向明暗强度：0 = 关闭（回到 v0.1.14 的 flat 光），1 = 完全按法线明暗。</summary>
+        public static float SlopeShadingStrength { get; set; } = 0.45f;
+
+        /// <summary>
+        /// [v0.1.15] 用相邻单元高度估"该单元顶面法线"，再套 `LightingManager.CalculateLighting`
+        /// 得到相对"平地"的明暗系数（平地 = 1）。相邻单元缺失时按"同高"处理（不产生假坡度）。
+        /// </summary>
+        static float SlopeLightGain(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) {
+            int hx0 = NeighborHeight(dict, cx - 1, cz, height);
+            int hx1 = NeighborHeight(dict, cx + 1, cz, height);
+            int hz0 = NeighborHeight(dict, cx, cz - 1, height);
+            int hz1 = NeighborHeight(dict, cx, cz + 1, height);
+            float ddx = (hx1 - hx0) / (2f * cellSize);
+            float ddz = (hz1 - hz0) / (2f * cellSize);
+            Vector3 normal = Vector3.Normalize(new Vector3(-ddx, 1f, -ddz));
+            // 注意：游戏本身用**两盏镜像方向光**（DirectionToLight1/2），水平坡向会互相抵消 ——
+            // 直接用 `CalculateLighting` 得到的增益在实测里恒为 1（看不出起伏）。
+            // 所以这里只取**一盏太阳**（DirectionToLight1）做"坡向明暗"，与 Dawnlight/Iris 的单向太阳一致。
+            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float lit = Vector3.Dot(normal, sun) / MathF.Max(Vector3.Dot(Vector3.UnitY, sun), 0.0001f);
+            float gain = MathUtils.Lerp(1f, MathUtils.Clamp(lit, 0.35f, 1f), SlopeShadingStrength);
+            m_slopeStatMin = MathF.Min(m_slopeStatMin, gain);   // v0.1.15：诊断——全网格累计（几个浮点运算）
+            m_slopeStatMax = MathF.Max(m_slopeStatMax, gain);
+            m_slopeStatSum += gain;
+            m_slopeStatCount++;
+            return gain;
+        }
+
+        /// <summary>[v0.1.15] 坡向明暗的**确定性自检**（不依赖世界地形）：
+        /// 平地 → 增益 = 1；十格高的坡：**背光侧**增益 &lt; 1（更暗）、**迎光侧**被夹到 1（不炸亮）、
+        /// 两侧差异明显（说明确实是"单向太阳"而不是两盏镜像光抵消）。</summary>
+        public static string SlopeShadingSelfCheck() {
+            var flat = new Dictionary<long, Cell>();
+            var eastStep = new Dictionary<long, Cell>();
+            var westStep = new Dictionary<long, Cell>();
+            int cellSize = CellSize;
+            int height = 70;
+            flat[Key(0, 0)] = new Cell { Height = (short)height };
+            for (int d = -1; d <= 1; d++) {
+                flat[Key(d, 0)] = new Cell { Height = (short)height };
+                flat[Key(0, d)] = new Cell { Height = (short)height };
+                eastStep[Key(d, 0)] = new Cell { Height = (short)(d >= 0 ? height + 10 : height) };
+                eastStep[Key(0, d)] = new Cell { Height = (short)height };
+                westStep[Key(d, 0)] = new Cell { Height = (short)(d <= 0 ? height + 10 : height) };
+                westStep[Key(0, d)] = new Cell { Height = (short)height };
+            }
+            eastStep[Key(1, 1)] = new Cell { Height = (short)(height + 10) };
+            westStep[Key(-1, 1)] = new Cell { Height = (short)(height + 10) };
+            float gFlat = SlopeLightGain(flat, 0, 0, height, cellSize);
+            float gEast = SlopeLightGain(eastStep, 0, 0, height, cellSize);
+            float gWest = SlopeLightGain(westStep, 0, 0, height, cellSize);
+            float darker = MathF.Min(gEast, gWest);
+            float brighter = MathF.Max(gEast, gWest);
+            bool ok = MathF.Abs(gFlat - 1f) < 0.001f && darker < 0.96f
+                && brighter >= 0.999f && (brighter - darker) > 0.02f;
+            return $"slopeShadingSelfCheck strength={SlopeShadingStrength:0.##} "
+                + $"flat={gFlat:0.###} eastStep={gEast:0.###} westStep={gWest:0.###} ok={ok}";
+        }
+
+        static int NeighborHeight(Dictionary<long, Cell> dict, int cx, int cz, int fallback) =>
+            dict.TryGetValue(Key(cx, cz), out Cell cell) ? cell.Height : fallback;
+
+        // v0.1.15：坡向明暗的**可验证诊断**（只统计"网格里最后经过的那个 x 列"，成本可忽略）。
+        static float m_slopeStatMin;
+        static float m_slopeStatMax;
+        static double m_slopeStatSum;
+        static int m_slopeStatCount;
+
+        /// <summary>诊断：坡向明暗增益的 min/max/mean（最后一次网格重建里抽样的那一列）。</summary>
+        public static string SlopeShadingStats() =>
+            m_slopeStatCount == 0
+                ? "slopeShading: no samples"
+                : $"slopeShading strength={SlopeShadingStrength:0.##} samples={m_slopeStatCount} "
+                  + $"gain min={m_slopeStatMin:0.###} mean={m_slopeStatSum / m_slopeStatCount:0.###} max={m_slopeStatMax:0.###}";
+
         /// <summary>v0.1.6：把一组打包样本（height 在高 32 位、value 在低 32 位）排序取中位，
         /// 写入细层的高度/材质槽。</summary>
         static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, int index) {
@@ -299,6 +374,12 @@ namespace Game {
             float maxSq = maxDist * maxDist;
 
             var keys = new List<long>();
+            if (!fine) {                                     // v0.1.15：坡向明暗诊断只在粗层重置（避免细层覆盖）
+                m_slopeStatMin = float.MaxValue;
+                m_slopeStatMax = float.MinValue;
+                m_slopeStatSum = 0.0;
+                m_slopeStatCount = 0;
+            }
             for (int cx = ccx - radiusCells; cx <= ccx + radiusCells; cx++) {
                 for (int cz = ccz - radiusCells; cz <= ccz + radiusCells; cz++) {
                     long key = Key(cx, cz);
@@ -372,10 +453,24 @@ namespace Game {
                 float u0 = (slot % slotCount) / (float)slotCount;
                 float v0 = (slot / slotCount) / (float)slotCount;
                 float du = 1f / slotCount;
-                BlockGeometryGenerator.SetupVertex(x0, y, z0, light, u0, v0, ref vertices[vi]);
-                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0, light, u0 + du, v0, ref vertices[vi + 1]);
-                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0 + cellSize, light, u0 + du, v0 + du, ref vertices[vi + 2]);
-                BlockGeometryGenerator.SetupVertex(x0, y, z0 + cellSize, light, u0, v0 + du, ref vertices[vi + 3]);
+                // [v0.1.15] 坡向明暗：远景低模原来一律 flat 光（220,220,220），起伏完全看不出来。
+                // 这里用**相邻单元高度**估该单元法线，再套游戏自己的 `LightingManager.CalculateLighting`
+                // （环境光 + 两盏方向光），得到"与游戏光照模型一致"的明暗系数 —— 这是把 LOD 接进光照的
+                // 第一步（里程碑 5 的阴影/G-buffer 之前的最小可用版本，见 notes/85）。
+                Color cellLight = light;
+                if (SlopeShadingStrength > 0f) {
+                    float gain = SlopeLightGain(dict, cx, cz, cell.Height, cellSize);
+                    cellLight = new Color(
+                        (byte)MathUtils.Clamp(light.R * gain, 0f, 255f),
+                        (byte)MathUtils.Clamp(light.G * gain, 0f, 255f),
+                        (byte)MathUtils.Clamp(light.B * gain, 0f, 255f),
+                        light.A
+                    );
+                }
+                BlockGeometryGenerator.SetupVertex(x0, y, z0, cellLight, u0, v0, ref vertices[vi]);
+                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0, cellLight, u0 + du, v0, ref vertices[vi + 1]);
+                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0 + cellSize, cellLight, u0 + du, v0 + du, ref vertices[vi + 2]);
+                BlockGeometryGenerator.SetupVertex(x0, y, z0 + cellSize, cellLight, u0, v0 + du, ref vertices[vi + 3]);
                 if (bigIndices) {
                     indices32[ii] = vi; indices32[ii + 1] = vi + 1; indices32[ii + 2] = vi + 2;
                     indices32[ii + 3] = vi; indices32[ii + 4] = vi + 2; indices32[ii + 5] = vi + 3;

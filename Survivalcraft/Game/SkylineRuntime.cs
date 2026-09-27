@@ -179,6 +179,19 @@ namespace Game {
         /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>
         public static string LodMeshMetadata() => SkylineLod.MeshMetadata();
 
+        /// <summary>[v0.1.15] LOD 坡向明暗强度（0 = 关闭；默认 0.45）。改动后需重建网格才生效：
+        /// `skyline.LodReset()` 或等下一次 `MeshRebuildSeconds`。</summary>
+        public static float LodSlopeShadingStrength {
+            get => SkylineLod.SlopeShadingStrength;
+            set => SkylineLod.SlopeShadingStrength = Math.Clamp(value, 0f, 1f);
+        }
+
+        /// <summary>[v0.1.15] 坡向明暗增益诊断（min/mean/max，取最后一次网格重建里抽样的一列）。</summary>
+        public static string LodSlopeShadingStats() => SkylineLod.SlopeShadingStats();
+
+        /// <summary>[v0.1.15] 坡向明暗确定性自检（合成地形：平地 / 东坡 / 西坡）。</summary>
+        public static string LodSlopeShadingSelfCheck() => SkylineLod.SlopeShadingSelfCheck();
+
         public static string LodDescribe() => SkylineLod.Describe();
 
         public static string LodSurvey() => SkylineLod.Survey();

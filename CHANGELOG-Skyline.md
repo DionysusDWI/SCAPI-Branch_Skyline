@@ -3,6 +3,27 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.15] - 2026-09-27
+
+第二十五个版本：**LOD 坡向明暗**（里程碑 5 的第 2 步前置、同时服务里程碑 4.1 的交接带观感）——
+远景低模不再是一张平光氈子，而是按地形起伏有明暗。
+
+**本版相对 v0.1.14 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（坡向明暗）** | LOD 网格重建时，用**四个邻居单元高度**中心差分估顶面法线，再用**一盏太阳**（`LightingManager.DirectionToLight1`）算坡向亮度 `lit = dot(n,sun)/dot(up,sun)`（夹在 0.35~1.0），顶点色 = 固定光 × `lerp(1, lit, strength)`。开关/强度：`skyline.LodSlopeShadingStrength`（默认 **0.45**，0 = 回到 v0.1.14 平光） |
+| **为什么不用 `CalculateLighting`** | 游戏用**两盏镜像方向光**，水平坡向互相抵消（实测增益恒为 1.000 = 等于没做）；单太阳后同一场景增益分布 min 0.708 / mean 0.972 |
+| **诊断** | `skyline.LodSlopeShadingSelfCheck()`（合成地形：平地/东坡/西坡的确定性判据）、`skyline.LodSlopeShadingStats()`（最近一次网格重建全网格的增益 min/mean/max/样本数） |
+
+### Verified
+
+* **确定性自检**：`flat=1.000`、背光坡 `0.915`、迎光坡 `1.000`（夹住不炸亮）、`ok=True`；
+* **真实网格**：造 6 格高平台后走到 250 m 外读统计 → `samples=635, gain min=0.708, mean=0.972, max=1`；
+* **图像 A/B**（较平场景，strength 0 vs 1.0）：259 px（0.03%）变化——平场景本身坡度少，差异有限属预期，起伏场景由统计判据覆盖；
+* **关闭等价**：strength=0 时不进入明暗路径（诊断 `no samples`），网格与 v0.1.14 一致；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.14] - 2026-09-27
 
 第二十四个版本：**球形加载窗**（里程碑 3"球形视距 + 球形加载机制"的第一步）——
