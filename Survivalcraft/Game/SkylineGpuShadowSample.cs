@@ -16,6 +16,8 @@ namespace Game {
     /// 先用 A/B 定，默认 false）。诊断：`skyline.GpuShadowSampleDescribe()`。
     /// [v0.1.35] 深度图改为 **16 bit 双通道**（R 高字节 / G 低字节）后，采样侧按**捕获时**的编码解码；
     /// 量化步长 4096 m 范围下 16.1 m → 0.0625 m，才撑得住"米级矮墙的投影"。
+    /// [v0.1.38] **近/远两级级联**：片元先投影进近图（默认半径 128 m → 0.25 m/texel），
+    /// 命中近盒就用近图（接触阴影更锐），否则回退远图（512 m → 1 m/texel）。
     /// </summary>
     public static partial class SkylineRuntime {
         public static bool GpuShadowSampleEnabled { get; set; }
@@ -42,6 +44,7 @@ namespace Game {
             $"gpuShadowSample enabled={GpuShadowSampleEnabled} strength={GpuShadowSampleStrength:0.##} "
             + $"bias={GpuShadowSampleBias:0.####} flipY={GpuShadowFlipY} hasMap={m_gpuShadowHasMap} "
             + $"depth16={m_gpuShadowDepth16AtCapture} "
+            + $"cascade={GpuShadowCascadeEnabled} hasNearMap={m_gpuShadowHasNearMap} "
             + $"resolved={m_gpuShadowSampleResolved} fallbacks={m_gpuShadowSampleFallbacks} "
             + $"lastReason='{m_gpuShadowSampleLastReason}' debug={GpuShadowDebugMode} err='{m_gpuShadowSampleError}'";
 
@@ -91,6 +94,15 @@ namespace Game {
                 shader.GetParameter("u_eye", true).SetValue(m_gpuShadowEye);
                 shader.GetParameter("u_sunDir", true).SetValue(m_gpuShadowSun);
                 shader.GetParameter("u_depthMax", true).SetValue(m_gpuShadowDepthMax);
+                // [v0.1.38] 近图（级联）：没有近图时 u_nearCascade = 0，片元只走远图（行为同 v0.1.37）
+                shader.GetParameter("u_shadowMapNear", true).SetValue(m_gpuShadowRtNear ?? m_gpuShadowRt);
+                shader.GetParameter("u_shadowSamplerNear", true).SetValue(m_gpuShadowSampler);
+                shader.GetParameter("u_sunViewProjectionNear", true).SetValue(m_gpuShadowViewProjectionNear);
+                shader.GetParameter("u_sunOriginNear", true).SetValue(m_gpuShadowOriginNear);
+                shader.GetParameter("u_eyeNear", true).SetValue(m_gpuShadowEyeNear);
+                shader.GetParameter("u_depthMaxNear", true).SetValue(m_gpuShadowDepthMaxNear);
+                shader.GetParameter("u_nearCascade", true).SetValue(
+                    (m_gpuShadowHasNearMap && m_gpuShadowRtNear != null) ? 1f : 0f);
                 shader.GetParameter("u_shadowBias", true).SetValue(GpuShadowSampleBias);
                 shader.GetParameter("u_shadowStrength", true).SetValue(GpuShadowSampleStrength);
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
@@ -211,16 +223,45 @@ SamplerState u_samplerState;
 float3 u_fogColor;
 Texture2D u_shadowMap;
 SamplerState u_shadowSampler;
+Texture2D u_shadowMapNear;
+SamplerState u_shadowSamplerNear;
 float4x4 u_sunViewProjection;
+float4x4 u_sunViewProjectionNear;
 float2 u_sunOrigin;
+float2 u_sunOriginNear;
 float3 u_eye;
+float3 u_eyeNear;
 float3 u_sunDir;
 float u_depthMax;
+float u_depthMaxNear;
+float u_nearCascade;
 float u_shadowBias;
 float u_shadowStrength;
 float u_shadowFlipY;
 float u_shadowDepth16;
 float u_shadowDebug;
+
+// [v0.1.35] R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
+float decodeShadowDepth(float4 texel)
+{
+	if (u_shadowDepth16 > 0.5)
+	{
+		float hi = floor(texel.r * 255.0 + 0.5);
+		float lo = floor(texel.g * 255.0 + 0.5);
+		return (hi * 256.0 + lo) / 65535.0;
+	}
+	return texel.r;
+}
+
+float2 shadowUv(float4 clip, float flipY)
+{
+	float2 uv = float2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+	if (flipY > 0.5)
+	{
+		uv.y = 1.0 - uv.y;
+	}
+	return uv;
+}
 
 void main(
 	in float4 v_color : COLOR,
@@ -232,37 +273,44 @@ void main(
 {
 	float4 result = v_color;
 	result *= u_texture.Sample(u_samplerState, v_texcoord);
-	float3 sunShifted = float3(v_world.x - u_sunOrigin.x, v_world.y, v_world.z - u_sunOrigin.y);
-	float4 sunClip = mul(float4(sunShifted, 1.0), u_sunViewProjection);
-	float2 uv = float2(sunClip.x * 0.5 + 0.5, 0.5 - sunClip.y * 0.5);
-	if (u_shadowFlipY > 0.5)
-	{
-		uv.y = 1.0 - uv.y;
-	}
+	float3 sunShiftedFar = float3(v_world.x - u_sunOrigin.x, v_world.y, v_world.z - u_sunOrigin.y);
+	float2 uvFar = shadowUv(mul(float4(sunShiftedFar, 1.0), u_sunViewProjection), u_shadowFlipY);
+	float3 sunShiftedNear = float3(v_world.x - u_sunOriginNear.x, v_world.y, v_world.z - u_sunOriginNear.y);
+	float2 uvNear = shadowUv(mul(float4(sunShiftedNear, 1.0), u_sunViewProjectionNear), u_shadowFlipY);
 	float mapDepth = 1.0;
-	bool inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
-	if (inside)
+	bool insideFar = uvFar.x >= 0.0 && uvFar.x <= 1.0 && uvFar.y >= 0.0 && uvFar.y <= 1.0;
+	bool insideNear = u_nearCascade > 0.5 && uvNear.x >= 0.0 && uvNear.x <= 1.0 && uvNear.y >= 0.0 && uvNear.y <= 1.0;
+	bool inside = insideFar || insideNear;
+	// [v0.1.38] 近图优先：近图 texel 更细（128 m/1024² = 0.25 m），接触阴影更锐
+	if (insideNear)
 	{
-		float4 texel = u_shadowMap.Sample(u_shadowSampler, uv);
-		if (u_shadowDepth16 > 0.5)
-		{
-			// R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
-			float hi = floor(texel.r * 255.0 + 0.5);
-			float lo = floor(texel.g * 255.0 + 0.5);
-			mapDepth = (hi * 256.0 + lo) / 65535.0;
-		}
-		else
-		{
-			mapDepth = texel.r;
-		}
+		mapDepth = decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear));
+	}
+	else if (insideFar)
+	{
+		mapDepth = decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar));
 	}
 	if (u_shadowDebug > 0.5)
 	{
-		result.rgb = float3(mapDepth, mapDepth, mapDepth);
+		if (u_shadowDebug > 1.5)
+		{
+			// debug=2：蓝=用近图（级联），红=只用远图，绿=两张都不在范围
+			result.rgb = insideNear ? float3(0.1, 0.2, 1.0)
+				: insideFar ? float3(1.0, 0.15, 0.15)
+				: float3(0.1, 1.0, 0.2);
+		}
+		else
+		{
+			result.rgb = float3(mapDepth, mapDepth, mapDepth);
+		}
 	}
 	else if (inside)
 	{
-		float fragDepth = saturate(dot(u_eye - v_world, u_sunDir) / max(u_depthMax, 0.0001));
+		// 近图的深度是按「近图自己的 eye + depthMax」归一化的（两张图的太阳距离不同），
+		// 所以比较时必须换成对应的 eye/depthMax —— 用错会整片判成阴影（实测踩到）。
+		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
+		float3 eye = insideNear ? u_eyeNear : u_eye;
+		float fragDepth = saturate(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001));
 		if (mapDepth + u_shadowBias < fragDepth)
 		{
 			result.rgb *= (1.0 - u_shadowStrength);
@@ -281,15 +329,22 @@ precision highp float;   // [v0.1.35] 16 bit 深度解码需要 fp32（mediump �
 
 // <Sampler Name='u_samplerState' Texture='u_texture' />
 // <Sampler Name='u_shadowSampler' Texture='u_shadowMap' />
+// <Sampler Name='u_shadowSamplerNear' Texture='u_shadowMapNear' />
 
 uniform sampler2D u_texture;
 uniform sampler2D u_shadowMap;
+uniform sampler2D u_shadowMapNear;
 uniform vec3 u_fogColor;
 uniform mat4 u_sunViewProjection;
+uniform mat4 u_sunViewProjectionNear;
 uniform vec2 u_sunOrigin;
+uniform vec2 u_sunOriginNear;
 uniform vec3 u_eye;
+uniform vec3 u_eyeNear;
 uniform vec3 u_sunDir;
 uniform float u_depthMax;
+uniform float u_depthMaxNear;
+uniform float u_nearCascade;
 uniform float u_shadowBias;
 uniform float u_shadowStrength;
 uniform float u_shadowFlipY;
@@ -301,41 +356,69 @@ varying vec2 v_texcoord;
 varying vec3 v_world;
 varying float v_fog;
 
+// [v0.1.35] R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
+float decodeShadowDepth(vec4 texel)
+{
+	if (u_shadowDepth16 > 0.5)
+	{
+		float hi = floor(texel.r * 255.0 + 0.5);
+		float lo = floor(texel.g * 255.0 + 0.5);
+		return (hi * 256.0 + lo) / 65535.0;
+	}
+	return texel.r;
+}
+
+vec2 shadowUv(vec4 clip, float flipY)
+{
+	vec2 uv = vec2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+	if (flipY > 0.5)
+	{
+		uv.y = 1.0 - uv.y;
+	}
+	return uv;
+}
+
 void main()
 {
 	vec4 result = v_color;
 	result *= texture2D(u_texture, v_texcoord);
-	vec3 sunShifted = vec3(v_world.x - u_sunOrigin.x, v_world.y, v_world.z - u_sunOrigin.y);
-	vec4 sunClip = u_sunViewProjection * vec4(sunShifted, 1.0);
-	vec2 uv = vec2(sunClip.x * 0.5 + 0.5, 0.5 - sunClip.y * 0.5);
-	if (u_shadowFlipY > 0.5)
-	{
-		uv.y = 1.0 - uv.y;
-	}
+	vec3 sunShiftedFar = vec3(v_world.x - u_sunOrigin.x, v_world.y, v_world.z - u_sunOrigin.y);
+	vec2 uvFar = shadowUv(u_sunViewProjection * vec4(sunShiftedFar, 1.0), u_shadowFlipY);
+	vec3 sunShiftedNear = vec3(v_world.x - u_sunOriginNear.x, v_world.y, v_world.z - u_sunOriginNear.y);
+	vec2 uvNear = shadowUv(u_sunViewProjectionNear * vec4(sunShiftedNear, 1.0), u_shadowFlipY);
 	float mapDepth = 1.0;
-	bool inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
-	if (inside)
+	bool insideFar = uvFar.x >= 0.0 && uvFar.x <= 1.0 && uvFar.y >= 0.0 && uvFar.y <= 1.0;
+	bool insideNear = u_nearCascade > 0.5 && uvNear.x >= 0.0 && uvNear.x <= 1.0 && uvNear.y >= 0.0 && uvNear.y <= 1.0;
+	bool inside = insideFar || insideNear;
+	// [v0.1.38] 近图优先：近图 texel 更细（128 m/1024² = 0.25 m），接触阴影更锐
+	if (insideNear)
 	{
-		vec4 texel = texture2D(u_shadowMap, uv);
-		if (u_shadowDepth16 > 0.5)
-		{
-			// R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
-			float hi = floor(texel.r * 255.0 + 0.5);
-			float lo = floor(texel.g * 255.0 + 0.5);
-			mapDepth = (hi * 256.0 + lo) / 65535.0;
-		}
-		else
-		{
-			mapDepth = texel.r;
-		}
+		mapDepth = decodeShadowDepth(texture2D(u_shadowMapNear, uvNear));
+	}
+	else if (insideFar)
+	{
+		mapDepth = decodeShadowDepth(texture2D(u_shadowMap, uvFar));
 	}
 	if (u_shadowDebug > 0.5)
 	{
-		result.rgb = vec3(mapDepth, mapDepth, mapDepth);
+		if (u_shadowDebug > 1.5)
+		{
+			// debug=2：蓝=用近图（级联），红=只用远图，绿=两张都不在范围
+			result.rgb = insideNear ? vec3(0.1, 0.2, 1.0)
+				: insideFar ? vec3(1.0, 0.15, 0.15)
+				: vec3(0.1, 1.0, 0.2);
+		}
+		else
+		{
+			result.rgb = vec3(mapDepth, mapDepth, mapDepth);
+		}
 	}
 	else if (inside)
 	{
-		float fragDepth = clamp(dot(u_eye - v_world, u_sunDir) / max(u_depthMax, 0.0001), 0.0, 1.0);
+		// 近图深度按「近图自己的 eye + depthMax」归一化（两张图太阳距离不同）→ 比较时必须一起换。
+		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
+		vec3 eye = insideNear ? u_eyeNear : u_eye;
+		float fragDepth = clamp(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001), 0.0, 1.0);
 		if (mapDepth + u_shadowBias < fragDepth)
 		{
 			result.rgb *= (1.0 - u_shadowStrength);

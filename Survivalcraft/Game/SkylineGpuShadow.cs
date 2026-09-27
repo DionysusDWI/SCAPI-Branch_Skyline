@@ -46,6 +46,14 @@ namespace Game {
         /// 需要采样地形贴图并按 alpha&lt;0.5 丢弃，否则树叶会投出"整块方盒"的假阴影。</summary>
         public static bool GpuShadowIncludeAlphaTested { get; set; } = true;
 
+        /// <summary>[v0.1.38] 近/远两级级联：近场用**更小的正交盒**（texel 更细）投接触阴影，
+        /// 近盒之外回退到远图。关掉即回到 v0.1.37 的单图行为。</summary>
+        public static bool GpuShadowCascadeEnabled { get; set; } = true;
+
+        /// <summary>[v0.1.38] 近图半径（米）。texel = 2*半径/尺寸：128 m/1024² = 0.25 m/texel，
+        /// 是远图（512 m/1024² = 1 m/texel）的 4 倍细。</summary>
+        public static float GpuShadowNearRadius { get; set; } = 128f;
+
         const string GpuShadowVsh = @"#ifdef HLSL
 
 float2 u_origin;
@@ -264,6 +272,7 @@ void main()
         static Shader m_gpuShadowAlphaShader;
         static SamplerState m_gpuShadowAlphaSampler;
         static RenderTarget2D m_gpuShadowRt;
+        static RenderTarget2D m_gpuShadowRtNear;
         static string m_gpuShadowLast = "(never captured)";
         static int m_gpuShadowCaptures;
 
@@ -274,13 +283,108 @@ void main()
         static Vector3 m_gpuShadowSun = Vector3.UnitY;
         static float m_gpuShadowDepthMax = 4096f;
         static bool m_gpuShadowHasMap;
+        // [v0.1.38] 近图（级联）参数
+        static Matrix m_gpuShadowViewProjectionNear;
+        static Vector2 m_gpuShadowOriginNear;
+        static Vector3 m_gpuShadowEyeNear;
+        static float m_gpuShadowDepthMaxNear = 1024f;
+        static bool m_gpuShadowHasNearMap;
         // [v0.1.35] 最近一次捕获用的深度编码（采样侧据此解码，保证"图 ↔ 解码"一致）
         static bool m_gpuShadowDepth16AtCapture;
 
         public static string GpuShadowDescribe() =>
             $"gpuShadow enabled={GpuShadowEnabled} size={GpuShadowSize} radius={GpuShadowRadius:0} "
             + $"depth16={GpuShadowDepth16} alphaTested={GpuShadowIncludeAlphaTested} "
+            + $"cascade={GpuShadowCascadeEnabled} nearRadius={(GpuShadowCascadeEnabled ? GpuShadowNearRadius : 0):0} "
             + $"captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
+
+        /// <summary>[v0.1.38] 渲染一张太阳视角深度图（LOD 网格 + 真实区块不透明/alpha-tested 子集）。
+        /// 同时把该图自己的相机参数写回 out 参数（采样侧要用"捕获时"的矩阵/原点，见 notes/105）。</summary>
+        static void RenderDepthMap(SubsystemTerrain subsystemTerrain, Camera camera, RenderTarget2D rt, int size,
+                                   float radius, out Matrix viewProjectionShifted, out Vector2 origin2,
+                                   out Vector3 eye, out Vector3 sun, out float depthMax,
+                                   out int chunksDrawn, out int alphaChunksDrawn) {
+            Shader shader = EnsureGpuShadowShader();
+            Display.RenderTarget = rt;
+            Display.Viewport = new Viewport(0, 0, size, size);
+            Display.ScissorRectangle = new Rectangle(0, 0, size, size);
+            Display.Clear(new Vector4(1f, 1f, 1f, 1f), 1f, 0);       // 背景 = 最远（depth 1）
+
+            Vector3 center = camera.ViewPosition;
+            sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float distance = MathF.Max(radius * 4f, 512f);
+            depthMax = distance * 2f;
+            eye = center + sun * distance;
+            Matrix view = Matrix.CreateLookAt(eye, center, Vector3.UnitY);
+            Matrix projection = Matrix.CreateOrthographic(radius * 2f, radius * 2f, 1f, distance * 4f);
+            Vector3 origin3 = new(MathF.Floor(center.X), 0f, MathF.Floor(center.Z));
+            origin2 = new Vector2(origin3.X, origin3.Z);
+            Matrix viewShifted = Matrix.CreateTranslation(origin3) * view;
+            viewProjectionShifted = viewShifted * projection;
+            shader.GetParameter("u_origin", true).SetValue(origin2);
+            shader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
+            shader.GetParameter("u_eye", true).SetValue(eye);
+            shader.GetParameter("u_sunDir", true).SetValue(sun);
+            shader.GetParameter("u_depthMax", true).SetValue(depthMax);
+            shader.GetParameter("u_depth16", true).SetValue(GpuShadowDepth16 ? 1f : 0f);
+            Display.BlendState = BlendState.Opaque;
+            Display.DepthStencilState = DepthStencilState.Default;
+            Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
+            SkylineLod.DrawWithShader(shader);
+            // [v0.1.33] 真实区块几何：与 LOD 共用同一个深度 shader / 同一张深度图（不透明子集 0..4）。
+            chunksDrawn = 0;
+            alphaChunksDrawn = 0;
+            if (!GpuShadowIncludeChunks) {
+                return;
+            }
+            // [v0.1.36] alpha-tested 子集（5）：树叶/草等镂空方块，按贴图 alpha 丢弃
+            Shader alphaShader = null;
+            if (GpuShadowIncludeAlphaTested) {
+                alphaShader = EnsureGpuShadowAlphaShader();
+                alphaShader.GetParameter("u_origin", true).SetValue(origin2);
+                alphaShader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
+                alphaShader.GetParameter("u_eye", true).SetValue(eye);
+                alphaShader.GetParameter("u_sunDir", true).SetValue(sun);
+                alphaShader.GetParameter("u_depthMax", true).SetValue(depthMax);
+                alphaShader.GetParameter("u_alphaThreshold", true).SetValue(0.5f);
+                alphaShader.GetParameter("u_texture", true)
+                    .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
+                alphaShader.GetParameter("u_samplerState", true).SetValue(m_gpuShadowAlphaSampler);
+            }
+            int alphaChunks = 0;
+            foreach (TerrainChunk chunk in subsystemTerrain.Terrain.AllocatedChunks) {
+                if (chunk == null || chunk.State != TerrainChunkState.Valid || chunk.Buffers.Count == 0) {
+                    continue;
+                }
+                DrawChunkSubsets(shader, chunk, 0x1F);
+                chunksDrawn++;
+                if (alphaShader != null) {
+                    DrawChunkSubsets(alphaShader, chunk, 0x20);
+                    alphaChunks++;
+                }
+            }
+            if (alphaShader != null) {
+                alphaChunksDrawn = alphaChunks;
+            }
+        }
+
+        /// <summary>回读统计：非背景像素数（背景 = 纯白 65535/255）。</summary>
+        static int CountCovered(RenderTarget2D rt, int size) {
+            Image image = rt.GetData(new Rectangle(0, 0, size, size));
+            bool depth16 = m_gpuShadowDepth16AtCapture;
+            int backgroundCut = depth16 ? (65535 * 254 / 255) : 254;
+            int covered = 0;
+            for (int y = 0; y < size; y++) {
+                for (int x = 0; x < size; x++) {
+                    Color pixel = image.GetPixel(x, y);
+                    int d = depth16 ? (pixel.R * 256 + pixel.G) : pixel.R;
+                    if (d < backgroundCut) {
+                        covered++;
+                    }
+                }
+            }
+            return covered;
+        }
 
         static Shader EnsureGpuShadowShader() {
             if (m_gpuShadowShader == null) {
@@ -329,76 +433,42 @@ void main()
             Rectangle previousScissor = Display.ScissorRectangle;
             double start = Time.RealTime;
             try {
-                Shader shader = EnsureGpuShadowShader();
+                // ---- [v0.1.38] 远图（主图）----
                 if (m_gpuShadowRt == null || m_gpuShadowRt.Width != size) {
                     Utilities.Dispose(ref m_gpuShadowRt);
                     m_gpuShadowRt = new RenderTarget2D(size, size, 1, ColorFormat.Rgba8888, DepthFormat.Depth24Stencil8);
                 }
-                Display.RenderTarget = m_gpuShadowRt;
-                Display.Viewport = new Viewport(0, 0, size, size);
-                Display.ScissorRectangle = new Rectangle(0, 0, size, size);
-                Display.Clear(new Vector4(1f, 1f, 1f, 1f), 1f, 0);       // 背景 = 最远（depth 1）
-
-                Vector3 center = camera.ViewPosition;
-                Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
-                float distance = MathF.Max(radius * 4f, 512f);
-                float depthMax = distance * 2f;
-                Vector3 eye = center + sun * distance;
-                Matrix view = Matrix.CreateLookAt(eye, center, Vector3.UnitY);
-                Matrix projection = Matrix.CreateOrthographic(radius * 2f, radius * 2f, 1f, distance * 4f);
-                Vector3 origin3 = new(MathF.Floor(center.X), 0f, MathF.Floor(center.Z));
-                Matrix viewShifted = Matrix.CreateTranslation(origin3) * view;
-                Matrix viewProjectionShifted = viewShifted * projection;
+                RenderDepthMap(subsystemTerrain, camera, m_gpuShadowRt, size, radius,
+                    out Matrix viewProjectionShifted, out Vector2 origin2, out Vector3 eye, out Vector3 sun,
+                    out float depthMax, out int chunksDrawn, out int alphaChunksDrawn);
+                Vector3 origin3 = new(origin2.X, 0f, origin2.Y);
                 m_gpuShadowViewProjection = viewProjectionShifted;
-                m_gpuShadowOrigin = new Vector2(origin3.X, origin3.Z);
+                m_gpuShadowOrigin = origin2;
                 m_gpuShadowEye = eye;
                 m_gpuShadowSun = sun;
                 m_gpuShadowDepthMax = depthMax;
                 m_gpuShadowHasMap = true;
                 m_gpuShadowDepth16AtCapture = GpuShadowDepth16;
-                shader.GetParameter("u_origin", true).SetValue(new Vector2(origin3.X, origin3.Z));
-                shader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
-                shader.GetParameter("u_eye", true).SetValue(eye);
-                shader.GetParameter("u_sunDir", true).SetValue(sun);
-                shader.GetParameter("u_depthMax", true).SetValue(depthMax);
-                shader.GetParameter("u_depth16", true).SetValue(GpuShadowDepth16 ? 1f : 0f);
-                Display.BlendState = BlendState.Opaque;
-                Display.DepthStencilState = DepthStencilState.Default;
-                Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
-                SkylineLod.DrawWithShader(shader);
-                // [v0.1.33] 真实区块几何：与 LOD 共用同一个深度 shader / 同一张深度图（不透明子集 0..4）。
-                int chunksDrawn = 0;
-                int alphaChunksDrawn = 0;
-                if (GpuShadowIncludeChunks) {
-                    // [v0.1.36] alpha-tested 子集（5）：树叶/草等镂空方块，按贴图 alpha 丢弃
-                    Shader alphaShader = null;
-                    if (GpuShadowIncludeAlphaTested) {
-                        alphaShader = EnsureGpuShadowAlphaShader();
-                        alphaShader.GetParameter("u_origin", true).SetValue(new Vector2(origin3.X, origin3.Z));
-                        alphaShader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
-                        alphaShader.GetParameter("u_eye", true).SetValue(eye);
-                        alphaShader.GetParameter("u_sunDir", true).SetValue(sun);
-                        alphaShader.GetParameter("u_depthMax", true).SetValue(depthMax);
-                        alphaShader.GetParameter("u_alphaThreshold", true).SetValue(0.5f);
-                        alphaShader.GetParameter("u_texture", true)
-                            .SetValue(subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
-                        alphaShader.GetParameter("u_samplerState", true).SetValue(m_gpuShadowAlphaSampler);
+
+                // ---- [v0.1.38] 近图（级联）：更小的正交盒 → texel 更细，近场接触阴影更锐 ——
+                float nearRadius = 0f;
+                int nearCovered = 0;
+                float nearStepMeters = 0f;
+                if (GpuShadowCascadeEnabled) {
+                    nearRadius = Math.Clamp(GpuShadowNearRadius, 16f, radius);
+                    if (m_gpuShadowRtNear == null || m_gpuShadowRtNear.Width != size) {
+                        Utilities.Dispose(ref m_gpuShadowRtNear);
+                        m_gpuShadowRtNear = new RenderTarget2D(size, size, 1, ColorFormat.Rgba8888, DepthFormat.Depth24Stencil8);
                     }
-                    int alphaChunks = 0;
-                    foreach (TerrainChunk chunk in subsystemTerrain.Terrain.AllocatedChunks) {
-                        if (chunk == null || chunk.State != TerrainChunkState.Valid || chunk.Buffers.Count == 0) {
-                            continue;
-                        }
-                        DrawChunkSubsets(shader, chunk, 0x1F);
-                        chunksDrawn++;
-                        if (alphaShader != null) {
-                            DrawChunkSubsets(alphaShader, chunk, 0x20);
-                            alphaChunks++;
-                        }
-                    }
-                    if (alphaShader != null) {
-                        alphaChunksDrawn = alphaChunks;
-                    }
+                    RenderDepthMap(subsystemTerrain, camera, m_gpuShadowRtNear, size, nearRadius,
+                        out m_gpuShadowViewProjectionNear, out m_gpuShadowOriginNear, out m_gpuShadowEyeNear,
+                        out _, out m_gpuShadowDepthMaxNear, out _, out _);
+                    m_gpuShadowHasNearMap = true;
+                    nearCovered = CountCovered(m_gpuShadowRtNear, size);
+                    nearStepMeters = m_gpuShadowDepthMaxNear / (GpuShadowDepth16 ? 65535f : 255f);
+                }
+                else {
+                    m_gpuShadowHasNearMap = false;
                 }
 
                 Image image = m_gpuShadowRt.GetData(new Rectangle(0, 0, size, size));
@@ -430,6 +500,7 @@ void main()
                 // 采样点必须**确实在 LOD 网格里**：网格刻意跳过 ≤(视距+8 m) 的单元（近景走真实区块），
                 // 又只覆盖"采集过的列"，所以直接从 LOD 的粗层单元里抽（150~400 m 环带）。
                 // （2026-09-27 实测踩到两次：先用了近处点、又用了未加载的远点，都落在背景上。）
+                Vector3 center = camera.ViewPosition;
                 JsonArray probe = JsonNode.Parse(SkylineLod.ProbeCells(center.X, center.Z, 150f, 400f, 6)) as JsonArray
                     ?? [];
                 foreach (JsonNode node in probe) {
@@ -538,6 +609,14 @@ void main()
                 result["depth16"] = depth16;
                 result["depthUnits"] = depthUnits;
                 result["depthStepMeters"] = Math.Round(depthMax / depthUnits, 4);
+                result["texelMeters"] = Math.Round((radius * 2.0) / size, 4);
+                result["cascade"] = GpuShadowCascadeEnabled;
+                if (GpuShadowCascadeEnabled) {
+                    result["nearRadius"] = nearRadius;
+                    result["nearCovered"] = nearCovered;
+                    result["nearTexelMeters"] = Math.Round((nearRadius * 2.0) / size, 4);
+                    result["nearDepthStepMeters"] = Math.Round(nearStepMeters, 5);
+                }
                 result["covered"] = covered;
                 result["coverage"] = Math.Round((double)covered / (size * size), 5);
                 result["chunksDrawn"] = chunksDrawn;

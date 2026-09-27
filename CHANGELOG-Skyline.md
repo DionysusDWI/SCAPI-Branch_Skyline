@@ -3,6 +3,47 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.38] - 2026-09-27
+
+第四十八个版本：**近/远两级级联阴影贴图** —— 远图（512 m / 1024² = 1 m/texel）之外再加一张
+**近图（128 m / 1024² = 0.25 m/texel）**，片元命中近盒就用近图，接触阴影从"1 m 大斜块"变成细密结构。
+
+**本版相对 v0.1.37 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（双图捕获）** | `SkylineGpuShadow.cs`：把捕获主体抽成 `RenderDepthMap(...)`（LOD + 真实区块不透明/alpha-tested 一次画完，含自己的矩阵/原点/eye/depthMax），远图与近图各调一次；开关 `GpuShadowCascadeEnabled`（默认 true）、`GpuShadowNearRadius`（默认 128 m） |
+| **新增 B（近图优先采样）** | `SkylineGpuShadowSample.cs`：片元分别投影进两张图，`u_nearCascade` 且命中近盒 → 用近图（新增 `u_shadowMapNear/u_shadowSamplerNear/u_sunViewProjectionNear/u_sunOriginNear/u_eyeNear/u_depthMaxNear`），否则回退远图；`u_nearCascade=0` 时与 v0.1.37 逐位一致 |
+| **诊断 C** | `GpuShadowDescribe` 报 `cascade/nearRadius`；捕获 JSON 增 `nearCovered/nearTexelMeters/nearDepthStepMeters/texelMeters`；`GpuShadowDebugMode=2` 画"用了哪张图"（蓝=近 / 红=远 / 绿=都没命中） |
+
+### Verified（AgentLab；关雾；16 bit；strength 0.45 / bias 0.0002）
+
+| 项 | 远图 | 近图 |
+|---|---|---|
+| 半径 / texel / 深度步长 | 512 m / **1 m** / 0.0625 m | 128 m / **0.25 m** / 0.01563 m |
+| 覆盖率 / 自检 | 156,282 px / True | 785,073 px / True |
+
+采样 A/B（**1×1 格树叶棋盘棚**，2 m 周期，低头看地）：
+
+| | 单图（级联关） | 级联开 |
+|---|---|---|
+| 平均亮度 | 170.3 | 179.2 |
+| 像素差（>8） | — | **185,728 px**（变亮 **129,017** = 粗假阴影被纠掉；变暗 **56,711** = 细阴影被正确加上） |
+
+### 三个真实坑（已修并记录）
+
+1. **只绑纹理不绑采样器**（漏 `u_shadowSamplerNear`）→ 近图分支**静默不生效**（A/B 0 像素差），
+   靠 `GpuShadowDebugMode=2` 才定位；
+2. **两张图归一化基准不同**：比较时若仍用远图 `eye`，`fragDepth` 饱和成 1.0 → 近盒内**整片判成阴影**
+   （实测平均亮度 121.4、A/B 全变暗）→ 近图分支必须同时换 `eye` 与 `depthMax`（新增 `u_eyeNear`）；
+3. **C# verbatim 字符串里的注释不能用 ASCII 双引号**（会提前结束字符串，一次报 60 个语法错误）→ 用「」。
+
+边界（如实）：近盒（±128 m）之外仍走远图，交界处 texel 不同可能有细节跳变（下一步可做交接带混合/二级中图）；
+bias 未按 texel 缩放；家具/实体仍未进深度图。证据：`data/sessions/skyline-v0138/`、
+`heightlab/skyline-v0138-cascade.py`、`notes/111`。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.37] - 2026-09-27
 
 第四十七个版本：**家具写入侧护栏**（桥/AgentBridge 侧改动）—— 用户报过的"家具透明但有碰撞"
