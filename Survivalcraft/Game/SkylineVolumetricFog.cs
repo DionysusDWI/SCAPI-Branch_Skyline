@@ -57,6 +57,11 @@ namespace Game {
         /// <summary>雾色（默认取偏冷的浅灰蓝，和雪原/天空都能接上）。</summary>
         public static Vector3 FogColor { get; set; } = new(0.78f, 0.82f, 0.88f);
 
+        /// <summary>[v0.1.70] 雾色与**游戏按天空/天气算出来的雾色**（`u_fogColor`）的混合比例。
+        /// 0 = 只用上面的固定色；1 = 完全跟随天空/天气。默认 0.75 ——
+        /// 这样下雨/下雪/黄昏时雾会跟着变色，而不是永远一个灰蓝。</summary>
+        public static float FogSkyMix { get; set; } = 0.75f;
+
         /// <summary>步进最远距离（米）。雾是近程效果，不需要拉很远。</summary>
         public static float FogMaxDistance { get; set; } = 1200f;
 
@@ -80,6 +85,7 @@ namespace Game {
                 ["strength"] = (double)FogStrength,
                 ["wind"] = new JsonArray(FogWind.X, FogWind.Y),
                 ["color"] = new JsonArray(FogColor.X, FogColor.Y, FogColor.Z),
+                ["skyMix"] = (double)FogSkyMix,
                 ["maxDistance"] = (double)FogMaxDistance,
                 ["shear"] = (double)FogHeightShear,
                 ["steps"] = FogSteps,

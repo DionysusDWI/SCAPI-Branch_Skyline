@@ -217,6 +217,7 @@ namespace Game {
                     shader.GetParameter("u_vfThreshold", true).SetValue(Math.Clamp(FogThreshold, 0f, 0.99f));
                     shader.GetParameter("u_vfStrength", true).SetValue(Math.Clamp(FogStrength, 0f, 1f));
                     shader.GetParameter("u_vfColor", true).SetValue(FogColor);
+                    shader.GetParameter("u_vfSkyMix", true).SetValue(Math.Clamp(FogSkyMix, 0f, 1f));
                     shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
                     shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
                     m_volFogBound++;
@@ -392,6 +393,7 @@ float2 u_vfWind;
 float u_vfThreshold;
 float u_vfStrength;
 float3 u_vfColor;
+float u_vfSkyMix;
 float u_vfMaxDistance;
 float u_vfShear;
 float3 u_viewPosition;
@@ -588,7 +590,9 @@ void main(
 				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
 				vfOd *= vfDt * u_vfDensity;
 				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
-				result.rgb = lerp(result.rgb, u_vfColor, vfAlpha);
+				// [v0.1.70] 雾色与游戏按天空/天气算的 u_fogColor 混合：下雨/黄昏时雾会跟着变色
+				float3 vfCol = lerp(u_vfColor, max(u_fogColor, float3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				result.rgb = lerp(result.rgb, vfCol, vfAlpha);
 			}
 		}
 	}
@@ -643,6 +647,7 @@ uniform vec2 u_vfWind;
 uniform float u_vfThreshold;
 uniform float u_vfStrength;
 uniform vec3 u_vfColor;
+uniform float u_vfSkyMix;
 uniform float u_vfMaxDistance;
 uniform float u_vfShear;
 uniform vec3 u_viewPosition;
@@ -834,7 +839,9 @@ void main()
 				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
 				vfOd *= vfDt * u_vfDensity;
 				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
-				result.rgb = mix(result.rgb, u_vfColor, vfAlpha);
+				// [v0.1.70] 雾色与 u_fogColor 混合（与 HLSL 段同一算法）
+				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				result.rgb = mix(result.rgb, vfCol, vfAlpha);
 			}
 		}
 	}
