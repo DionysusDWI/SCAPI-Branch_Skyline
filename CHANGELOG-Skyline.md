@@ -3,6 +3,24 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.12] - 2026-09-27
+
+第二十二个版本：**32³ 立方区块影子原型（里程碑 3 的 P1）**——纯新增、不接入游戏路径，
+用来把"立方体寻址 / 稀疏分配 / 内存量级"三件事先钉死，再谈加载窗口与存储迁移。
+
+**本版相对 v0.1.11 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（影子原型）** | `CubeChunk32`：32×32×32 立方体（**128 KiB/个**，惰性分配——写"空气"不租内存，与 v0.1.4 同口径）、`CubeCoord/LocalCoord/LocalIndex/Key` 双向寻址、越界写入抛异常（把"写错立方体"变成显式错误而不是静默串台） |
+| **新增 B（原型自检）** | `CubeChunk32Invariants.Check()`：①世界坐标（含负数与跨立方体边界）写读往返 + 邻立方体必须为 0；②稀疏分配账（全空气不分配、写 1 格只分配 128 KiB）；③**内存对比**：64×64×8 的典型地表带 → 立方体 **512 KiB** vs v0.1.4 列式 **4 MiB**（比值 **0.125**）。桥入口：`type:CubeChunk32Invariants` |
+
+### Verified
+
+* `CubeChunk32Invariants.Check()` → `ok:true, checkedCells:486, mismatches:0, singleCellAllocatesBytes:131072, airOnlyAllocates:false, terrainSample:{cubes32Bytes:524288, columnSlicedBytes:4194304, ratio:0.125}`；
+* 与 v0.1.11 的 `SkylineInvariants.CheckChunkAddressing()`（现存储的寻址门禁）并存，互不影响；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**；未接入任何游戏路径（渲染/加载/存档行为不变）。
+
 ## [v0.1.11] - 2026-09-27
 
 第二十一个版本：**两个剩余里程碑的第一步** —— ①里程碑 3（32³ 立方区块）的可执行**寻址门禁**；
