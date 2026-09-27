@@ -165,6 +165,18 @@ namespace Game {
         public static bool SphereLoadingEnabled { get; set; }
 
         /// <summary>
+        /// [v0.1.22] **帧内地形更新预算**（毫秒；默认 10 = 引擎原本的硬编码值，范围 2~50）。
+        /// 每帧的地形状态机最多跑这么久。大规模建造时"几何追平"是瓶颈（`notes/91`：写 4096 格 100 ms
+        /// 但几何要 4~8 s），把预算调大能缩短等待、代价是这段时间帧时间上升。
+        /// </summary>
+        public static int TerrainUpdateBudgetMs {
+            get => m_terrainUpdateBudgetMs;
+            set => m_terrainUpdateBudgetMs = Math.Clamp(value, 2, 50);
+        }
+
+        static int m_terrainUpdateBudgetMs = 10;
+
+        /// <summary>
         /// [v0.1.16] 球形加载窗的**内容距离**（米）：0 = 沿用调用方的默认（64，即 content = max(64, visibility)）。
         /// 调大（例如 256）会让超视距 LOD 的**细环**也能被采到——LOD 只能采样"已加载"的区块，
         /// 而引擎默认的 content=64/视距=128 意味着 136~256 m 的细环平时根本没加载过，
@@ -183,6 +195,16 @@ namespace Game {
             float ym = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRangeYMultiplier ?? 1f;
             return $"sphereLoading enabled={SphereLoadingEnabled} allocatedChunks={AllocatedChunkCount} "
                 + $"bandCache={updater?.ColumnBandCacheCount ?? -1} yMultiplier={ym:0.##}";
+        }
+
+        /// <summary>[v0.1.22] "编辑 → 几何追平"的直接量测诊断（最近一次 / 平均值 / 样本数）。</summary>
+        public static string EditSettleDescribe() {
+            TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
+            if (updater == null) {
+                return "editSettle: no updater";
+            }
+            return $"editSettle budgetMs={TerrainUpdateBudgetMs} last={updater.LastEditSettleMs:0.0}ms "
+                + $"mean={updater.MeanEditSettleMs:0.0}ms samples={updater.EditSettleSamples}";
         }
 
         /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>

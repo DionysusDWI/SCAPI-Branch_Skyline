@@ -385,6 +385,8 @@ namespace Game {
                 MaintainColumnTopHeight(x, y, z, value);
                 // [v0.1.8] 超视距 LOD：把这一格所在的 16 m 单元标脏，远景低模才会跟着改（见 notes/75）
                 SkylineLod.NotifyCellChanged(x, z);
+                // [v0.1.22] 记下"刚被编辑的区块"，等它回到 Valid 时结算几何追平时延（见 notes/92）
+                TerrainUpdater?.NotifyChunkEdited(x, z);
                 TerrainUpdater.DowngradeChunkNeighborhoodState(chunkAtCell.Coords, 1, TerrainChunkState.InvalidLight, false);
             }
             m_modifiedCells[new Point3(x, y, z)] = true;

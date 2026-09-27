@@ -521,6 +521,28 @@ namespace Game {
 
         readonly Dictionary<long, int> m_columnBandCache = [];
 
+        // ============================================================================================
+        // [v0.1.22] **编辑 → 几何追平** 的直接量测（notes/91 的瓶颈：写 100 ms、几何 4~8 s）。
+        //   写入侧（SubsystemTerrain.ChangeCell）调用 NotifyChunkEdited 记下坐标与时刻；
+        //   该区块在状态机里再次到达 Valid 时结算时延（last/last10 平均/样本数）。
+        //   这样不受"切片哈希恰好相同 → 根本没重建"的干扰（那正是间接测量的坑：notes/92）。
+        // ============================================================================================
+        Point2? m_editCoords;
+        double m_editTime;
+        double m_lastEditSettleMs = -1;
+        double m_sumEditSettleMs;
+        int m_editSettleSamples;
+
+        public double LastEditSettleMs => m_lastEditSettleMs;
+        public double MeanEditSettleMs => m_editSettleSamples > 0 ? m_sumEditSettleMs / m_editSettleSamples : -1;
+        public int EditSettleSamples => m_editSettleSamples;
+
+        /// <summary>写入侧通知：某坐标的格子刚被改过（只记最近一次，够用且零分配）。</summary>
+        public void NotifyChunkEdited(int x, int z) {
+            m_editCoords = new Point2(x >> TerrainChunk.SizeBits, z >> TerrainChunk.SizeBits);
+            m_editTime = Time.RealTime;
+        }
+
         /// <summary>已缓存"内容带"的列数（诊断用）。</summary>
         public int ColumnBandCacheCount => m_columnBandCache.Count;
 
@@ -757,7 +779,10 @@ namespace Game {
                     UpdateChunkSingleStep(terrainChunk, m_subsystemSky.SkyLightValue);
                 }
                 while (terrainChunk.ThreadState < desiredState
-                    && Time.RealTime - realTime < 0.01);
+                    // [v0.1.22] 帧内地形更新预算可调（默认 10 ms = 原硬编码值）：
+                    // 大规模建筑/家具满场时几何重建是瓶颈（notes/91 实测 settle 4~8 s），
+                    // 把它调大能显著缩短"几何追平"的等待，代价是这段时间帧时间上升（fps 略降）。
+                    && Time.RealTime - realTime < SkylineRuntime.TerrainUpdateBudgetMs / 1000.0);
                 return false;
             }
             if (LogTerrainUpdateStats) {
@@ -982,6 +1007,13 @@ namespace Game {
                     // 区块 Valid），"就地补采"能把"玩家刚走过/刚加载出来的地形"立刻反映到远景，
                     // 直接改善视距边缘交接带的覆盖度（notes/86 §4）。
                     SkylineLod.NotifyChunkValid(chunk);
+                    // [v0.1.22] 编辑→几何追平 的直接结算（详见字段处注释）
+                    if (m_editCoords.HasValue && m_editCoords.Value == chunk.Coords) {
+                        m_lastEditSettleMs = (Time.RealTime - m_editTime) * 1000.0;
+                        m_sumEditSettleMs += m_lastEditSettleMs;
+                        m_editSettleSamples++;
+                        m_editCoords = null;
+                    }
                     double realTime2 = Time.RealTime;
                     ChunkUpdates++;
                     m_statistics.VerticesCount2++;
