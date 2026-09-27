@@ -3,6 +3,35 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.30] - 2026-09-27
+
+第四十个版本：**近景地形真阴影（CPU 第一刀）** —— 里程碑 5（Iris 真接入）把阴影判定从"只影响 LOD 低模"
+扩展到**游戏自己的地形渲染**：区块几何生成完成时，用 LOD 高度场（8/16 m）射线步进判定遮挡，
+把命中的 `TerrainVertex.Color` 按强度压暗。只改顶点颜色、不动方块/光照数据 → 重建一次即完全恢复。
+
+**本版相对 v0.1.29 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（阴影采样）** | `SkylineLod.TerrainShadowSample(x,y,z)`：世界坐标 → LOD 高度场射线步进（细 8 m 优先/粗 16 m），返回 1 受光 / 0 遮挡 |
+| **新增 B（顶点烘焙）** | `SkylineTerrainShadow.cs`（`SkylineRuntime` partial）：`ApplyTerrainShadow(chunk)` 遍历 `TerrainGeometry.Subsets[*].Vertices`（含 `Draws` 子几何），按 `TerrainShadowStrength`（默认 0.45）压暗顶点颜色；顶点级 memo 去重（≈4× 采样节省） |
+| **新增 C（钩子/开关）** | 钩子挂在 `TerrainUpdater.InvalidVertices2`（两次顶点生成后、`NewGeometryData=true` 前）→ 走引擎上传路径；开关 `skyline.TerrainShadowEnabled`（默认关）+ `TerrainShadowStrength`；诊断 `TerrainShadowDescribe()`；A/B `TerrainShadowApplyLoadedChunks()` |
+
+### Verified（AgentLab；测试墙 8×16×8 石砖；相机固定）
+
+| 项 | 结果 |
+|---|---|
+| 应用代价 | 200 区块 / 774,224 顶点 / 436,194 阴影，**228.8 ms（≈1.1 ms/区块）** |
+| 视觉 | 0.45：与基线差 25,359 px（>8）；**0.90：墙体投影 + 远景暗带清晰可见** |
+| fps | 29~31（无回归） |
+| 可逆性 | 关闭 + 强制几何重建后与基线仅差 **35 px**（雾/云量级） |
+| 数据安全 | 方块/光照数据不变（抽样 light=14 正常） |
+
+**踩坑（已写入 notes/100）**：顶点缓冲在"生成时"编译——对已上传几何"补一次"不会上屏，
+A/B 必须强制一次几何重建（`DowngradeAllChunksState(InvalidVertices1, true)`）。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.29] - 2026-09-27
 
 第三十九个版本：**列内 32 层分带存储**（里程碑 3 的 P3 第一刀）—— 竖直分配单元从 256 层改为 **32 层**

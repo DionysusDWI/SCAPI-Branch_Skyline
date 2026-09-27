@@ -331,6 +331,45 @@ namespace Game {
         }
 
         /// <summary>
+        /// [v0.1.30] **近景地形的阴影采样**：把任意世界坐标交给同一套 LOD 高度场射线步进
+        /// （细网格 8 m 优先，退回粗网格 16 m）。返回 1 = 受光、0 = 被遮挡；强度由调用方决定。
+        /// 供 `SkylineRuntime.ApplyTerrainShadow` 在区块几何生成后给顶点光照乘系数用。
+        /// </summary>
+        public static float TerrainShadowSample(float x, float y, float z) {
+            Dictionary<long, Cell> dict = null;
+            int cellSize = CellSize;
+            if (m_cellsFine.Count > 0) {
+                dict = m_cellsFine;
+                cellSize = FineSize;
+            }
+            else if (m_cells.Count > 0) {
+                dict = m_cells;
+            }
+            if (dict == null) {
+                return 1f;
+            }
+            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float step = cellSize * 0.5f;
+            for (int i = 0; i < 64; i++) {
+                x += sun.X * step;
+                y += sun.Y * step;
+                z += sun.Z * step;
+                if (y > TerrainChunk.HeightMinusOne) {
+                    break;
+                }
+                int nx = (int)MathF.Floor(x / cellSize);
+                int nz = (int)MathF.Floor(z / cellSize);
+                if (!dict.TryGetValue(Key(nx, nz), out Cell cell)) {
+                    continue;                                  // 未采集 → 不判遮挡（避免假阴影）
+                }
+                if (cell.Height + 1f > y + SelfShadowBias) {
+                    return 0f;
+                }
+            }
+            return 1f;
+        }
+
+        /// <summary>
         /// [v0.1.15] 用相邻单元高度估"该单元顶面法线"，再套 `LightingManager.CalculateLighting`
         /// 得到相对"平地"的明暗系数（平地 = 1）。相邻单元缺失时按"同高"处理（不产生假坡度）。
         /// </summary>

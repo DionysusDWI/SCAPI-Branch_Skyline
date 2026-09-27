@@ -1135,6 +1135,11 @@ namespace Game {
                                 return false;
                             }
                         );
+                        // [v0.1.30] 近景地形真阴影（CPU；默认关）：给刚生成的顶点光照乘 LOD 高度场的
+                        // 遮挡系数（只改顶点颜色、不改方块/光照数据 → 重建一次即恢复，见 SkylineTerrainShadow.cs）
+                        if (SkylineRuntime.TerrainShadowEnabled) {
+                            SkylineRuntime.ApplyTerrainShadow(chunk);
+                        }
                         chunk.NewGeometryData = true;
                     }
                     chunk.ThreadState = TerrainChunkState.Valid;
