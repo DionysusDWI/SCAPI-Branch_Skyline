@@ -590,15 +590,23 @@ namespace Game {
             if (mesh == null || mesh.VertexBuffer == null || mesh.IndexCount == 0) {
                 return;
             }
+            DrawMesh(camera, mesh, m_drawYOffset);
+        }
+
+        /// <summary>
+        /// 把地形不透明 pass 需要的 shader 参数与绘制状态都设好（与 `SkylineLod.Draw` 完全同口径）。
+        /// 返回 null = 现在不能画（没世界/没 shader/没相机）。
+        /// </summary>
+        public static Shader PrepareTerrainShader(Camera camera, float yOffset) {
             try {
                 SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
                 SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
                 if (subsystemTerrain == null || sky == null || TerrainRenderer.m_opaqueShader == null || camera == null) {
-                    return;
+                    return null;
                 }
                 Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
                 Vector3 v = new(MathF.Floor(viewPosition.X), 0f, MathF.Floor(viewPosition.Z));
-                Matrix matrix = Matrix.CreateTranslation(0f, m_drawYOffset, 0f)
+                Matrix matrix = Matrix.CreateTranslation(0f, yOffset, 0f)
                     * Matrix.CreateTranslation(v - viewPosition)
                     * camera.ViewMatrix.OrientationMatrix * camera.ProjectionMatrix;
                 Shader shader = TerrainRenderer.m_opaqueShader;
@@ -626,11 +634,30 @@ namespace Game {
                 Display.BlendState = BlendState.Opaque;
                 Display.DepthStencilState = DepthStencilState.Default;
                 Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
+                return shader;
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+                Log.Warning($"SkylineCubeSurfaceDemo.PrepareTerrainShader: {e.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>画一张壳网格（调用前先 `PrepareTerrainShader`）。</summary>
+        public static void DrawMesh(Camera camera, CubeSurfaceMesh32 mesh, float yOffset) {
+            if (mesh == null || mesh.VertexBuffer == null || mesh.IndexCount == 0) {
+                return;
+            }
+            Shader shader = PrepareTerrainShader(camera, yOffset);
+            if (shader == null) {
+                return;
+            }
+            try {
                 Display.DrawIndexed(PrimitiveType.TriangleList, shader, mesh.VertexBuffer, mesh.IndexBuffer, 0, mesh.IndexCount);
             }
             catch (Exception e) {
                 m_lastError = e.Message;
-                Log.Warning($"SkylineCubeSurfaceDemo.Draw: {e.Message}");
+                Log.Warning($"SkylineCubeSurfaceDemo.DrawMesh: {e.Message}");
             }
         }
     }

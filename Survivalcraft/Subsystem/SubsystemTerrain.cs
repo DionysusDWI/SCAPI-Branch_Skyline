@@ -518,6 +518,8 @@ namespace Game {
                     SkylineLod.Draw(camera);
                     // [v0.1.50] 32³ 表面壳网格实验层（默认关；见 Game/CubeSurface32Mesh.cs）
                     SkylineCubeSurfaceDemo.DrawIfEnabled(camera);
+                    // [v0.1.51] 32³ 表面壳的**生产层**：只画"已经离开加载范围"的立方体（交接带内）
+                    SkylineCubeShellStore.Draw(camera);
                     TerrainRenderer.DrawAlphaTested(camera);
                 }
                 else if (drawOrder == m_drawOrders[1]) {

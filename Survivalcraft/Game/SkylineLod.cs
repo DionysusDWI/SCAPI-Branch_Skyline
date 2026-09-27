@@ -84,6 +84,15 @@ namespace Game {
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
+
+        /// <summary>
+        /// [v0.1.51] 让 LOD 立刻重建一次网格 —— 壳仓新增/淘汰壳之后调用（壳一多，LOD 要让位的那片就变了，
+        /// 不立刻重建的话最多要等 `MeshRebuildSeconds`（默认 0.5 s）才生效）。
+        /// </summary>
+        public static void RequestRebuild() {
+            m_dirty = true;
+            m_nextRebuild = 0;
+        }
         static double m_nextSave;
         static string m_worldDir;
         static VertexBuffer m_vb;
@@ -269,6 +278,10 @@ namespace Game {
                 m_forceHarvestReason = ResampleReason.Unloading;
                 Harvest();
                 m_refreshedOnUnload++;
+                // [v0.1.51] 4.3 第三步的壳采集**不在这里**：卸载是逐个 Free 的，
+                // 轮到本区块时兄弟区块可能已经没了 → 采不到完整的 32³ 立方体。
+                // 改为在 `TerrainUpdater.AllocateAndFreeChunks` 里做一次"预扫"
+                // （见那里的 `SkylineCubeShellStore.OnChunksLeavingRange`）。
             }
             catch (Exception e) {
                 m_lastError = e.Message;
@@ -371,6 +384,8 @@ namespace Game {
                 // [v0.1.46] 近环层"立刻铺满"：相机移动一定距离就把交接带里的单元主动标脏，
                 // 否则近环只覆盖"恰好被轮转采样到"的区块（v0.1.45 实测 20 s 窗口只有 53% 覆盖）。
                 NearBandTick();
+                // [v0.1.51] 壳的生产路径：按预算采集 + 建模（采集在卸载钩子里排队）
+                SkylineCubeShellStore.Tick();
                 Harvest();
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();
@@ -875,13 +890,22 @@ namespace Game {
             for (int cx = ccx - radiusCells; cx <= ccx + radiusCells; cx++) {
                 for (int cz = ccz - radiusCells; cz <= ccz + radiusCells; cz++) {
                     long key = Key(cx, cz);
-                    if (!dict.ContainsKey(key)) {
+                    if (!dict.TryGetValue(key, out Cell cell)) {
                         continue;
                     }
                     float dx = (cx << cellShift) + cellSize * 0.5f - camera.X;
                     float dz = (cz << cellShift) + cellSize * 0.5f - camera.Z;
                     float d2 = dx * dx + dz * dz;
                     if (d2 <= minSq || d2 > maxSq) {
+                        continue;
+                    }
+                    // [v0.1.51] 32³ 表面壳**已经接管**的立方体 → 现有 LOD 层让位。
+                    // 否则两层在同一片地上互相穿插（壳是逐列真高、LOD 是 16 m 中位高），画面会发花。
+                    // 判定与 `SkylineCubeShellStore.Draw` 用**同一套带规则 + 同一个立方体中心**，所以不会出现
+                    // "LOD 让位了、壳却没画"的洞。
+                    if (SkylineCubeShellStore.RestrictLod
+                        && SkylineCubeShellStore.HasShellInBand(cx << cellShift, cell.Height, cz << cellShift,
+                            camera.X, camera.Z)) {
                         continue;
                     }
                     keys.Add(key);

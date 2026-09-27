@@ -762,6 +762,22 @@ namespace Game {
         public virtual bool AllocateAndFreeChunks(UpdateLocation[] locations) {
             bool result = false;
             TerrainChunk[] allocatedChunks = m_terrain.AllocatedChunks;
+            // [v0.1.51] 4.3 第三步的**预扫**：卸载是下面这个循环里逐个 `FreeChunk` 的，
+            // 轮到某个区块时它的兄弟区块往往已经被释放 → 32³ 立方体壳就采不全
+            // （v0.1.51 实测：逐个采时 197 次全部 skippedNotReady）。
+            // 所以先扫一遍"这一轮要离开的区块"，在**谁都还没被释放**的时候把壳采下来。
+            // 只是多一次只读扫描（200 个区块量级），不改任何释放语义（下面循环照旧逐块判断/释放）。
+            if (SkylineCubeShellStore.Enabled) {
+                List<TerrainChunk> leaving = null;
+                foreach (TerrainChunk terrainChunk in allocatedChunks) {
+                    if (!IsChunkInRangeForUpdate(terrainChunk.Center, locations)) {
+                        (leaving ??= []).Add(terrainChunk);
+                    }
+                }
+                if (leaving != null) {
+                    SkylineCubeShellStore.OnChunksLeavingRange(leaving);
+                }
+            }
             foreach (TerrainChunk terrainChunk in allocatedChunks) {
                 if (!IsChunkInRangeForUpdate(terrainChunk.Center, locations)) {
                     bool noToFree = false;
