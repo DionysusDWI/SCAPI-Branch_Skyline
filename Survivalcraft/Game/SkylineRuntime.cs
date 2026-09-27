@@ -165,6 +165,14 @@ namespace Game {
         public static bool SphereLoadingEnabled { get; set; }
 
         /// <summary>
+        /// [v0.1.28] 球形加载窗的**立方体粒度**判据（默认开；仅 `SphereLoadingEnabled` 打开时生效）：
+        /// 竖直方向不再只用"5 点采样内容带"，而是把区块的 256 列 top/bottom 聚合成 **32³ 分带内容掩码**，
+        /// 逐分带与椭球的竖直覆盖求交 —— 这是里程碑 3 的 P2 剩余（`notes/81`），为 P3 的 32³ 存储铺路。
+        /// 关掉它可退回 v0.1.14 的行为做 A/B（`skyline.CubeBands`）。
+        /// </summary>
+        public static bool SphereLoadingCubeBands { get; set; } = true;
+
+        /// <summary>
         /// [v0.1.22] **帧内地形更新预算**（毫秒；默认 10 = 引擎原本的硬编码值，范围 2~50）。
         /// 每帧的地形状态机最多跑这么久。大规模建造时"几何追平"是瓶颈（`notes/91`：写 4096 格 100 ms
         /// 但几何要 4~8 s），把预算调大能缩短等待、代价是这段时间帧时间上升。
@@ -194,6 +202,8 @@ namespace Game {
             TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
             float ym = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRangeYMultiplier ?? 1f;
             return $"sphereLoading enabled={SphereLoadingEnabled} allocatedChunks={AllocatedChunkCount} "
+                + $"cubeBands={SphereLoadingCubeBands} bandChecks={updater?.SphereBandChecks ?? -1} "
+                + $"bandDrops={updater?.SphereBandDrops ?? -1} "
                 + $"bandCache={updater?.ColumnBandCacheCount ?? -1} yMultiplier={ym:0.##}";
         }
 
@@ -205,6 +215,15 @@ namespace Game {
             }
             return $"editSettle budgetMs={TerrainUpdateBudgetMs} last={updater.LastEditSettleMs:0.0}ms "
                 + $"mean={updater.MeanEditSettleMs:0.0}ms samples={updater.EditSettleSamples}";
+        }
+
+        /// <summary>[v0.1.28] 球窗判定诊断：`skyline.ChunkWindowDecision(cx,cz)`（见 notes/98）。</summary>
+        public static string ChunkWindowDecision(int cx, int cz) {
+            TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
+            if (updater == null) {
+                return "chunkWindow: no updater";
+            }
+            return updater.DescribeChunkWindowDecision(cx, cz);
         }
 
         /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>

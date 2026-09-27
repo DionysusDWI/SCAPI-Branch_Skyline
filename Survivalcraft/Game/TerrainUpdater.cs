@@ -125,6 +125,10 @@ namespace Game {
             /// <summary>[v0.1.14] 是否对该更新地点启用**球形（椭球）加载窗**：竖直方向按"列内容带"裁剪。</summary>
             public bool SphereWindow;
 
+            // [v0.1.28] 球窗判据版本位：`SphereLoadingCubeBands` 改变时也要触发一次窗口重算
+            // （否则开关切换要等相机移动 >8 格才生效，A/B 会被"上一次的位置更新"污染）。
+            public bool CubeBands;
+
             public Vector2? LastChunksUpdateCenter;
 
             public float VisibilityDistance;
@@ -275,6 +279,7 @@ namespace Game {
                 value.Center = center;
                 value.CenterY = 0f;
                 value.SphereWindow = false;
+                value.CubeBands = false;
                 value.VisibilityDistance = visibilityDistance;
                 value.ContentDistance = contentDistance;
                 value.LastChunksUpdateCenter = center;
@@ -297,11 +302,13 @@ namespace Game {
                 || visibilityDistance != value.VisibilityDistance
                 || MathF.Abs(center.Y - value.CenterY) > 8f
                 || value.SphereWindow != SkylineRuntime.SphereLoadingEnabled
+                || value.CubeBands != SkylineRuntime.SphereLoadingCubeBands
                 || !value.LastChunksUpdateCenter.HasValue
                 || Vector2.DistanceSquared(centerXZ, value.LastChunksUpdateCenter.Value) > 64f) {
                 value.Center = centerXZ;
                 value.CenterY = center.Y;
                 value.SphereWindow = SkylineRuntime.SphereLoadingEnabled;
+                value.CubeBands = SkylineRuntime.SphereLoadingCubeBands;
                 value.VisibilityDistance = visibilityDistance;
                 value.ContentDistance = contentDistance;
                 value.LastChunksUpdateCenter = centerXZ;
@@ -521,6 +528,10 @@ namespace Game {
 
         readonly Dictionary<long, int> m_columnBandCache = [];
 
+        // [v0.1.28] 32³ 分带内容掩码的"列缓存"：区块被卸载/释放后仍能按新判据（分带）重新评估，
+        // 否则"被丢弃过一次"的列会因为拿不到掩码而永久丢掉（实测踩到，见 notes/98）。
+        readonly Dictionary<long, ulong> m_columnBandMask32Cache = [];
+
         // ============================================================================================
         // [v0.1.22] **编辑 → 几何追平** 的直接量测（notes/91 的瓶颈：写 100 ms、几何 4~8 s）。
         //   写入侧（SubsystemTerrain.ChangeCell）调用 NotifyChunkEdited 记下坐标与时刻；
@@ -559,15 +570,136 @@ namespace Game {
             }
             int cx = (int)MathF.Floor(chunkCenter.X) >> TerrainChunk.SizeBits;
             int cz = (int)MathF.Floor(chunkCenter.Y) >> TerrainChunk.SizeBits;
+            float m = MathF.Max(m_subsystemSky?.VisibilityRangeYMultiplier ?? 1f, 0.05f);
+            // [v0.1.28] 立方体粒度（默认开，见 notes/98）：用 32³ 分带内容掩码 ∩ 椭球竖直覆盖 求交。
+            // 掩码只在"内容 + 高度已就绪"（State >= InvalidVertices1）时可用；否则退回 v0.1.14 的老判据。
+            // 掩码可来自"存活区块"或"卸载时记住的列缓存"（后者让被丢弃的列仍能按新判据重新评估）。
+            if (SkylineRuntime.SphereLoadingCubeBands && TryGetContentBandMask32(cx, cz, out ulong bandMask)) {
+                float reach = MathF.Sqrt(MathUtils.Max(r * r - h2, 0f)) * m;
+                m_sphereBandChecks++;
+                if (!BandMaskHasContentInRange(bandMask, location.CenterY - reach, location.CenterY + reach)) {
+                    m_sphereBandDrops++;
+                    return false;
+                }
+                return true;
+            }
             if (!TryGetColumnBand(cx, cz, out int top, out int bottom)) {
                 return true;                                  // 高度未知（从未加载过）→ 保守
             }
             float dy = location.CenterY < bottom
                 ? bottom - location.CenterY
                 : (location.CenterY > top ? location.CenterY - top : 0f);
-            float m = MathF.Max(m_subsystemSky?.VisibilityRangeYMultiplier ?? 1f, 0.05f);
             dy /= m;
             return h2 + dy * dy <= r * r;
+        }
+
+        // ============================================================================================
+        // [v0.1.28] 32³ 分带内容掩码（里程碑 3 的 P2 剩余：球窗的"立方体粒度"判据，见 notes/98）
+        //   把区块 256 列的 top/bottom 聚合成 64 位掩码（每 bit = 一个 32 层高的分带是否有内容），
+        //   球窗竖直方向改成"掩码 ∩ 椭球竖直覆盖"求交：
+        //     * 比 v0.1.14 的"5 点采样内容带"细：不会被一个角的采样保留整列，也不会把"内容带之间
+        //       的空气分带"算成内容（浮空岛/中空场景省列）；
+        //     * 保守性：top/bottom 是内容带（含夹层空气），掩码只会多置位不会少置位 → 不会掉地。
+        // ============================================================================================
+
+        long m_sphereBandChecks;
+        long m_sphereBandDrops;
+
+        /// <summary>球窗分带判据的检查次数 / 丢弃次数（A/B 统计口径）。</summary>
+        public long SphereBandChecks => m_sphereBandChecks;
+
+        public long SphereBandDrops => m_sphereBandDrops;
+
+        /// <summary>分带内容掩码（惰性 + 缓存）：bit i = 该区块某列内容带与 [MinHeight+32i, +31] 相交。</summary>
+        ulong GetContentBandMask32(TerrainChunk chunk) {
+            int stamp = (int)chunk.State * 31 + chunk.ModificationCounter;
+            if (chunk.ContentBandMask32Stamp == stamp) {
+                return chunk.ContentBandMask32;
+            }
+            ulong mask = 0;
+            for (int lz = 0; lz < TerrainChunk.Size; lz++) {
+                for (int lx = 0; lx < TerrainChunk.Size; lx++) {
+                    int top = chunk.GetTopHeightFast(lx, lz);
+                    int bottom = chunk.GetBottomHeightFast(lx, lz);
+                    int i0 = MathUtils.Clamp((bottom - TerrainChunk.MinHeight) >> 5, 0, 63);
+                    int i1 = MathUtils.Clamp((top - TerrainChunk.MinHeight) >> 5, 0, 63);
+                    for (int i = i0; i <= i1; i++) {
+                        mask |= 1UL << i;
+                    }
+                }
+            }
+            chunk.ContentBandMask32 = mask;
+            chunk.ContentBandMask32Stamp = stamp;
+            return mask;
+        }
+
+        /// <summary>椭球在某个区块处的竖直覆盖 [yLo,yHi] 是否与"有内容的分带"相交。</summary>
+        static bool BandMaskHasContentInRange(ulong mask, float yLo, float yHi) {
+            int iLo = (int)MathF.Floor((yLo - TerrainChunk.MinHeight) / 32f);
+            int iHi = (int)MathF.Floor((yHi - TerrainChunk.MinHeight) / 32f);
+            if (iHi < 0 || iLo > 63) {
+                return false;                                 // 椭球竖直覆盖完全在世界之外 → 无内容
+            }
+            iLo = MathUtils.Max(iLo, 0);
+            iHi = MathUtils.Min(iHi, 63);
+            ulong window = iHi - iLo >= 63
+                ? ulong.MaxValue
+                : (((1UL << (iHi - iLo + 1)) - 1) << iLo);
+            return (mask & window) != 0;
+        }
+
+        /// <summary>取某列的分带掩码：存活且就绪的区块现场算（顺手更新缓存）；否则用卸载时记住的；
+        /// 都没有 → false（调用方退回老判据，保守）。</summary>
+        bool TryGetContentBandMask32(int cx, int cz, out ulong mask) {
+            long key = ((long)cx << 32) | (uint)cz;
+            TerrainChunk chunk = m_terrain.GetChunkAtCoords(cx, cz);
+            if (chunk != null && chunk.State >= TerrainChunkState.InvalidVertices1) {
+                mask = GetContentBandMask32(chunk);
+                if (m_columnBandMask32Cache.Count > 40000) {
+                    m_columnBandMask32Cache.Clear();
+                }
+                m_columnBandMask32Cache[key] = mask;
+                return true;
+            }
+            return m_columnBandMask32Cache.TryGetValue(key, out mask);
+        }
+
+        /// <summary>
+        /// [v0.1.28] 球窗判定诊断（notes/98）：对指定区块输出 allocated/state/掩码/采样列与标记列的
+        /// top·bottom、以及每个球形更新地点的 inRange 结果。用于 A/B 与"5 点采样盲区"取证。
+        /// </summary>
+        public virtual string DescribeChunkWindowDecision(int cx, int cz) {
+            System.Text.StringBuilder sb = new();
+            TerrainChunk chunk = m_terrain.GetChunkAtCoords(cx, cz);
+            sb.Append($"chunk=({cx},{cz}) allocated={chunk != null} ");
+            if (chunk != null) {
+                sb.Append($"state={chunk.State} mod={chunk.ModificationCounter} ");
+                sb.Append($"mask=0x{GetContentBandMask32(chunk):X16} ");
+                sb.Append($"sample(8,8) top={chunk.GetTopHeightFast(8, 8)} bottom={chunk.GetBottomHeightFast(8, 8)} ");
+                sb.Append($"col(3,3) top={chunk.GetTopHeightFast(3, 3)} bottom={chunk.GetBottomHeightFast(3, 3)} ");
+            }
+            sb.Append(TryGetContentBandMask32(cx, cz, out ulong knownMask)
+                ? $"maskKnown=0x{knownMask:X16} "
+                : "maskKnown=none ");
+            Vector2 center = new(cx * TerrainChunk.Size + TerrainChunk.Size / 2f,
+                                 cz * TerrainChunk.Size + TerrainChunk.Size / 2f);
+            foreach (KeyValuePair<int, UpdateLocation> kv in m_updateParameters.Locations) {
+                UpdateLocation location = kv.Value;
+                if (!location.SphereWindow) {
+                    continue;
+                }
+                bool inRange = IsChunkInRangeForUpdate(center, ref location);
+                float dx = center.X - location.Center.X;
+                float dz = center.Y - location.Center.Y;
+                float yMul = MathF.Max(m_subsystemSky?.VisibilityRangeYMultiplier ?? 1f, 0.05f);
+                float reach = MathF.Sqrt(MathUtils.Max(location.ContentDistance * location.ContentDistance - dx * dx - dz * dz, 0f)) * yMul;
+                bool bandOk = TryGetContentBandMask32(cx, cz, out ulong bandMask)
+                    && BandMaskHasContentInRange(bandMask, location.CenterY - reach, location.CenterY + reach);
+                sb.Append($"| loc[{kv.Key}] cy={location.CenterY:0.#} r={location.ContentDistance} ");
+                sb.Append($"yMul={yMul:0.##} reach={reach:0.#} ySlice=[{location.CenterY - reach:0.#},{location.CenterY + reach:0.#}] ");
+                sb.Append($"bandOk={bandOk} inRange={inRange} ");
+            }
+            return sb.ToString();
         }
 
         bool IsChunkInRangeForUpdate(Vector2 chunkCenter, UpdateLocation[] locations) {
@@ -619,6 +751,11 @@ namespace Game {
             }
             long key = ((long)chunk.Coords.X << 32) | (uint)chunk.Coords.Y;
             m_columnBandCache[key] = ((top - TerrainChunk.MinHeight) << 11) | (bottom - TerrainChunk.MinHeight);
+            // [v0.1.28] 同时记住 32³ 分带掩码（卸载后新判据仍可用）
+            if (m_columnBandMask32Cache.Count > 40000) {
+                m_columnBandMask32Cache.Clear();
+            }
+            m_columnBandMask32Cache[key] = GetContentBandMask32(chunk);
         }
 
         public virtual bool AllocateAndFreeChunks(UpdateLocation[] locations) {

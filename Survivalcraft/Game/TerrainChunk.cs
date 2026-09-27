@@ -70,6 +70,13 @@ namespace Game {
         public const int ColumnSlicesCount = Height / ColumnSliceHeight;
         public int[][] Cells;
 
+        // ===== v0.1.28：**32³ 分带内容掩码**（球形加载窗的"立方体粒度"判据，见 notes/98）=====
+        // bit i ↔ y ∈ [MinHeight + 32i, MinHeight + 32i + 31]：该区块任意一列的内容带（bottom..top）
+        // 与这个分带相交即置位。由 TerrainUpdater 惰性计算并缓存；stamp 在编辑（ModificationCounter）
+        // 或状态推进（State，含光照阶段写高度）后失效。
+        public ulong ContentBandMask32;
+        public int ContentBandMask32Stamp = int.MinValue;
+
         public long[] Shafts;                                  // [高度实验] int[] -> long[]（高度字段要 10 位）
 
         public static ArrayCache<int> m_cellsCache = new([Size * Size * ColumnSliceHeight], 0.66f, 60f, 0.33f, 5f);

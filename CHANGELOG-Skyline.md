@@ -3,6 +3,30 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.28] - 2026-09-27
+
+第三十八个版本：**球窗的 32³ 分带内容判据**（里程碑 3 的"P2 剩余"第一刀）—— 球形加载窗的竖直判据
+从"5 点采样内容带"升级为 **32³ 分带内容掩码**（256 列聚合），修掉"区块角上内容被误卸载"的盲区，
+为 P3（32³ 立方体存储）铺路。
+
+**本版相对 v0.1.27 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（分带判据）** | `TerrainChunk.ContentBandMask32`：64 位掩码（bit i ↔ y ∈ [MinHeight+32i, +31] 有内容，由该区块 256 列的 top/bottom 聚合）；球窗保留条件 = `掩码 ∩ 椭球竖直覆盖 [cy−reach, cy+reach] ≠ ∅`（reach = √(r²−h²)·m）；掩码带 stamp 缓存，并在区块卸载时写进列缓存（被丢过的列可按新判据复活） |
+| **新增 B（开关/诊断）** | `skyline.SphereLoadingCubeBands`（默认开；切换即时触发窗口重算 `UpdateLocation.CubeBands`）；`skyline.ChunkWindowDecision(cx,cz)`（allocated/state/掩码/采样列(8,8)与标记列(3,3)的 top·bottom/reach·ySlice·bandOk·inRange）；`SphereLoadingDescribe()` 增加 `cubeBands/bandChecks/bandDrops` |
+| **修复 C（5 点采样盲区）** | v0.1.14 的判据只看 5 个采样列：区块角上/非采样列的内容在窗口边缘会被误判"无内容"而被卸载 → 现在按 256 列聚合，不再漏（大规模建筑的边缘完整性） |
+
+### Verified
+
+| 场景（AgentLab，r=128，m=0.5~0.66） | 旧判据（cubeBands=OFF） | 新判据（cubeBands=ON） |
+|---|---|---|
+| 地表 y65 | 200 列 / 0 丢弃 | 200 列 / 0 丢弃（保守等价） |
+| 高空 y420 | 32 列 / 168 丢弃 | 32 列 / 168 丢弃（保守等价） |
+| **角上内容**：chunk(268,568) 的未采样列 local(3..5) 在 y250 放 3×3 石砖，相机 (4264,250,9094) | **5 列；该区块被误卸载**（`inRange=false`） | **8 列；保留**（`col(3,3) top=251`、`bandOk=true`、`inRange=true`），切换即时重算、被丢后能复活 |
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.27] - 2026-09-27
 
 第三十七个版本：**更正 v0.1.26 的"驻留区写得到、看不到"开放问题** —— 根因是**标记块选错**：
