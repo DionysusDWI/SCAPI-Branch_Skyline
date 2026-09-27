@@ -3,6 +3,27 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.1] - 2026-09-27
+
+第十一个版本：**性能 HUD 真实化 + LOD/视距边缘的雾统一**（本轮新里程碑的前两项交付）。
+用户反馈原文："显示性能信息……目前的占有仅针对单核；GPU 占用（存疑）"；
+"LOD 区块与视距边缘区块的交接感非常明显"、"玩家在雾下时，雾不会遮挡玩家对雾上 LOD 的视野"。
+
+**本版相对 v0.1.0 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（性能 HUD）** | 原 HUD 的 `CPU x%` 只是"**主线程耗时 / 帧时间**"（单核口径）；本版新增 **SYS（系统 CPU 总占用，`GetSystemTimes` P/Invoke 差分）**、**PROC x%/16 cores（游戏进程占全机 CPU，`Process.TotalProcessorTime` 差分）**、**GPU x%（NVAPI `NvAPI_GPU_GetDynamicPstatesInfoEx` 利用率，经 `SkylineNvidia`）**。实测一串：`CPUMEM 592MB, GPUMEM 176MB(5140), CPU 2% (main thread), SYS 10%, PROC 0.7%/16 cores, GPU 25%, 29.9 FPS`。仍可通过 `settings.DisplayFpsCounter` 开关 |
+| **修复 B（LOD 雾统一）** | 原版真实地形的视图雾在 `视距 × (0.8~1.0)` 处就 100% 雾化（实测 128 m 视距 → 102 m 全雾），而 `SkylineLod` 自算 `[0.55R, R]` 的雾带——**交接处"真实地形全雾消失 / LOD 无雾跳出"**，且"玩家在雾下看雾上 LOD"时两层雾行为不一致。现在 `SkylineAtmosphere.AdjustHazeSpan` 把**视图雾的跨度**拉远到 `LOD 半径 × 0.9`（默认 922 m），**LOD 层直接采用 `sky.ViewHazeStart/ViewHazeDensity`**——真实地形与 LOD 全程共用同一条雾曲线（交接连续、"雾下/雾上"行为一致）。A/B 实测：`LodFogExtend` 开/关的像素差 **182,634 px**（噪声 ~21k） |
+| 接口 | `skyline.LodFogExtend`（bool，默认 true）——可在运行中 A/B 对照 |
+
+### Verified
+
+* HUD 五项指标经桥读出核对（`type:PerformanceManager.m_statsString`），数值与系统观测一致
+  （30 fps 上限下 PROC≈0.7%/16 核、GPU≈25%、SYS≈10%）；
+* 雾统一：同一观察点（玩家 y=65，正处雾带 67.6~80.2 之下）拍 `LodFogExtend` 开/关/开三连，
+  差异 182,634 px、最大斑块 140,956 px，噪声 21k——**效果显著且画面无跳变**。
+
 ## [v0.1.0] - 2026-09-27
 
 第十个版本、**第二个小版本号**：三层渲染路线的第一轮完整落地——**多层家具 LOD（占位球）实装到渲染**

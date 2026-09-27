@@ -345,7 +345,11 @@ namespace Game {
                     float num8 = MathUtils.Lerp(0.5f, 0f, f);
                     float num9 = MathUtils.Lerp(1f, 0.8f, f);
                     m_viewHazeStart = VisibilityRange * num8;
-                    m_viewHazeDensity = 1f / ((num9 - num8) * VisibilityRange);
+                    float hazeSpan = (num9 - num8) * VisibilityRange;
+                    // v0.1.1：LOD 开启时把视图雾的跨度拉远（默认拉到 LOD 半径的 90%），
+                    // 让视距边缘的真实地形与 LOD 层共用同一条雾曲线——消除交接跳变（用户反馈）。
+                    hazeSpan = SkylineAtmosphere.AdjustHazeSpan(hazeSpan, viewPosition);
+                    m_viewHazeDensity = 1f / MathF.Max(hazeSpan, 1f);
                     Color color = CalculateSkyColor(new Vector3(1f, 0f, 0f), seasonalTemperature);
                     Color color2 = CalculateSkyColor(new Vector3(0f, 0f, 1f), seasonalTemperature);
                     Color color3 = CalculateSkyColor(new Vector3(-1f, 0f, 0f), seasonalTemperature);

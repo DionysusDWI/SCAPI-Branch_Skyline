@@ -129,6 +129,13 @@ namespace Game {
             set => SkylineLod.RadiusMetres = value;
         }
 
+        /// <summary>v0.1.1：LOD 开启时把视图雾的跨度拉远到 LOD 半径的 90%，
+        /// 让"视距边缘的真实地形"与 LOD 层共用同一条雾曲线（消除交接跳变）。</summary>
+        public static bool LodFogExtend {
+            get => SkylineAtmosphere.FogExtendEnabled;
+            set => SkylineAtmosphere.FogExtendEnabled = value;
+        }
+
         public static string LodDescribe() => SkylineLod.Describe();
 
         public static string LodSurvey() => SkylineLod.Survey();

@@ -54,6 +54,15 @@ namespace Game {
         static float m_cloudAltitudeBlend;
         static float m_fogAltitudeOffsetY;
         static float m_fogAltitudeBlend;
+
+        // v0.1.1：LOD 雾延伸——把"视图雾的跨度"拉大到 LOD 半径的 90%，
+        // 让"视距边缘的真实地形"与"LOD 层"共用同一条连续雾曲线（消除交接跳变）。
+        static bool m_fogExtendEnabled = true;
+
+        public static bool FogExtendEnabled {
+            get => m_fogExtendEnabled;
+            set => m_fogExtendEnabled = value;
+        }
         static readonly float[] m_layerHeightsOverride = new float[CloudLayers];
         static bool m_layerHeightsOverrideActive;
 
@@ -228,6 +237,27 @@ namespace Game {
             }
             catch (Exception ex) {
                 m_lastError = $"ApplyFogBand failed (vanilla value used): {ex.GetType().Name}: {ex.Message}";
+            }
+        }
+
+        /// <summary>
+        /// v0.1.1：视图雾的"跨度"（米）修正。原版视距边缘的雾在 `VisibilityRange × 0.8`
+        /// 处就已经 100%（实测 128 m 视距 → 102 m 全雾），而 LOD 层从 `视距 + 8 m` 起画——
+        /// 两者交界会出现"真实地形全雾消失 / LOD 无雾跳出"的明显接缝（用户反馈）。
+        /// 当 LOD 开启且 <see cref="FogExtendEnabled"/> 时，把雾跨度拉大到
+        /// `SkylineLod.RadiusMetres × 0.9`，真实地形与 LOD 便共享同一条线性雾曲线。
+        /// </summary>
+        public static float AdjustHazeSpan(float vanillaSpan, Vector3 viewPosition) {
+            try {
+                if (!m_fogExtendEnabled || !SkylineLod.Enabled) {
+                    return vanillaSpan;
+                }
+                float target = SkylineLod.RadiusMetres * 0.9f;
+                return MathF.Max(vanillaSpan, target);
+            }
+            catch (Exception ex) {
+                m_lastError = $"AdjustHazeSpan failed (vanilla value used): {ex.GetType().Name}: {ex.Message}";
+                return vanillaSpan;
             }
         }
 

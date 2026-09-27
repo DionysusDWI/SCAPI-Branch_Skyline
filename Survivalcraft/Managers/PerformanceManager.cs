@@ -39,6 +39,57 @@ namespace Game {
 
         public static readonly List<string> m_extraStats = [];
 
+        // ===== Skyline v0.1.1：性能 HUD 的 CPU/GPU 真实占用（用户反馈：原来只有单核口径）=====
+        // CPU：主线程占帧比（原有）+ 进程占全机 CPU 比（本组）+ 系统 CPU 总占用；
+        // GPU：NVAPI 利用率（SkylineNvidia.UtilizationPercent，-1=不可用）。
+        static float m_processCpuPercent = -1f;
+        static float m_systemCpuPercent = -1f;
+        static double m_lastCpuSampleWall = -1.0;
+        static System.TimeSpan m_lastProcessCpuTime;
+        static long m_lastSysIdle;
+        static long m_lastSysKernel;
+        static long m_lastSysUser;
+
+        public static float ProcessCpuPercent => m_processCpuPercent;
+        public static float SystemCpuPercent => m_systemCpuPercent;
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll")]
+        static extern bool GetSystemTimes(out long idleTime, out long kernelTime, out long userTime);
+
+        static void SampleCpuLoad() {
+            try {
+                double wall = Time.RealTime;
+                System.TimeSpan procCpu = System.Diagnostics.Process.GetCurrentProcess().TotalProcessorTime;
+                if (m_lastCpuSampleWall > 0.0 && wall - m_lastCpuSampleWall > 0.2) {
+                    double dCpu = (procCpu - m_lastProcessCpuTime).TotalSeconds;
+                    double dWall = wall - m_lastCpuSampleWall;
+                    m_processCpuPercent = (float)(dCpu / dWall / System.Environment.ProcessorCount * 100.0);
+                }
+                m_lastCpuSampleWall = wall;
+                m_lastProcessCpuTime = procCpu;
+            }
+            catch {
+                m_processCpuPercent = -1f;
+            }
+            try {
+                if (GetSystemTimes(out long idle, out long kernel, out long user)) {
+                    if (m_lastSysKernel != 0 || m_lastSysUser != 0) {
+                        long dIdle = idle - m_lastSysIdle;
+                        long dTotal = (kernel - m_lastSysKernel) + (user - m_lastSysUser);
+                        if (dTotal > 0) {
+                            m_systemCpuPercent = (float)((dTotal - dIdle) * 100.0 / dTotal);
+                        }
+                    }
+                    m_lastSysIdle = idle;
+                    m_lastSysKernel = kernel;
+                    m_lastSysUser = user;
+                }
+            }
+            catch {
+                m_systemCpuPercent = -1f;
+            }
+        }
+
         public static FrameData[] m_frameData;
 
         public static int m_frameDataIndex;
@@ -140,6 +191,7 @@ namespace Game {
                 m_totalMemoryUsed = GC.GetTotalMemory(false);
                 m_totalGpuMemoryUsed = Display.GetGpuMemoryUsage();
                 m_totalGraphicResourcesCount = GraphicsResource.m_resources.Count;
+                SampleCpuLoad();
             }
             m_stateMachine.Update();
         }
@@ -150,8 +202,17 @@ namespace Game {
             if (SettingsManager.DisplayFpsCounter) {
                 if (Time.PeriodicEvent(1.0, 0.0)
                     && ScreensManager.CurrentScreen != null) {
+                    string sysPart = m_systemCpuPercent >= 0f ? $"{m_systemCpuPercent:0}%" : "n/a";
+                    string procPart = m_processCpuPercent >= 0f
+                        ? $"{m_processCpuPercent:0.0}%" : "n/a";
+                    string gpuPart = SkylineNvidia.UtilizationPercent >= 0
+                        ? $"GPU {SkylineNvidia.UtilizationPercent}%"
+                        : "GPU n/a";
                     m_statsString =
-                        $"CPUMEM {TotalMemoryUsed / 1024f / 1024f:0}MB, GPUMEM {TotalGpuMemoryUsed / 1024f / 1024f:0}MB({TotalGraphicResourcesCount}), CPU {AverageCpuFrameTime / AverageFrameTime * 100f:0}%, {1f / AverageFrameTime:0.0} FPS";
+                        $"CPUMEM {TotalMemoryUsed / 1024f / 1024f:0}MB, GPUMEM {TotalGpuMemoryUsed / 1024f / 1024f:0}MB({TotalGraphicResourcesCount}), "
+                        + $"CPU {AverageCpuFrameTime / AverageFrameTime * 100f:0}% (main thread), "
+                        + $"SYS {sysPart}, PROC {procPart}/{System.Environment.ProcessorCount} cores, {gpuPart}, "
+                        + $"{1f / AverageFrameTime:0.0} FPS";
 #if DEBUG
                     string wname = ScreensManager.RootWidget.Input.MousePosition.HasValue
                         ? ScreensManager.RootWidget.HitTestGlobal(ScreensManager.RootWidget.Input.MousePosition.Value)?.GetType().Name
