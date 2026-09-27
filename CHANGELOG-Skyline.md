@@ -3,6 +3,35 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.23] - 2026-09-27
+
+第三十三个版本：**"全局追平"的相位拆解** —— 把 `notes/92 §5` 的下一步做完：用引擎自带的分段
+计时器量化 settle 的组成，结论再次精确化。
+
+**本版相对 v0.1.22 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **A（相位拆解脚本）** | `heightlab/skyline-v0123-phase-breakdown.py`：受控场地 → 清空并等追平 → 快照 `m_statistics` 全部计时/计数 → 批量写 4096 格（交替方块）→ 等全局追平 → 输出各相位增量（Loading / Contents1..4 / Light / LightSources / LightPropagate / Vertices1,2 / FindBest / GeneratedSlices） |
+| **B（结论）** | `notes/93-全局追平的相位拆解.md`：**光照链路 0.557 s（≈29%）** ＞ 写入 0.54 s ＞ 其余（轮询粒度等）；**几何只有 0.004 s** —— 优化顺序改为 ①光照链路 ②脏队列/LOD ③几何（已证明不慢） |
+
+### Verified（受控场地 (4200,9000)，4096 格，budget 10 ms）
+
+```
+write=0.54s  settle=1.9s  fpsMin=29.5
+  光照 Light        0.317 s (count 144)   ← 最大单项
+  光源 LightSources 0.198 s (count 96)
+  光传播 Propagate  0.042 s (count 96)
+  顶点1/2           0.003 / 0.001 s (各 18 片)
+  GeneratedSlices Δ=123   SkippedSlices Δ=2437
+```
+
+* 光照链路合计 **0.557 s**，与 `notes/71` 里"光照占地形更新 CPU 45~60%"的旧结论吻合；
+* **几何可忽略**（4 ms）——第三次确认 `notes/92` 的修正；
+* `SkippedSlices Δ=2437 ≫ GeneratedSlices Δ=123`：引擎的切片哈希跳过机制在正常工作，
+  这正是"几何便宜"的结构性原因；
+* 光照链路的两个候选优化（批量光源收集 / 大批写入期延迟光照）写进 `notes/93 §4`，并要求用本相位表做 A/B。
+
 ## [v0.1.22] - 2026-09-27
 
 第三十二个版本：**"几何追平"的直接量测** —— 给引擎加了一个**"编辑 → 该区块回到 Valid"**的指标，
