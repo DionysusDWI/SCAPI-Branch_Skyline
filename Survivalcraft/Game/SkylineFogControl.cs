@@ -29,6 +29,13 @@ namespace Game {
         public static Vector2 HazeStartDensity(Vector2 startDensity) =>
             FogDisabled ? new Vector2(0f, 0f) : startDensity;
 
+        /// <summary>
+        /// [v0.1.56] 壳采集时**把家具塌缩成设计主材质**（默认开）。家具的"长什么样"由 data 里的设计索引决定，
+        /// 而壳每格只有 14 位（contents+light）、存不下 data；塌缩成主材质后，LOD 里家具就画成
+        /// "该材质的占位方盒"，与 3.3 的非完整方块口径一致，且**壳仍是 16 KiB**。
+        /// </summary>
+        public static bool ShellFurnitureCollapse { get; set; } = true;
+
         public static string FogDescribe() =>
             $"fog disabled={FogDisabled} (density=0; 关掉开关即恢复)";
 

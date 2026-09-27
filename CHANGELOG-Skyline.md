@@ -3,6 +3,39 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.56] - 2026-09-28
+
+第六十六个版本：**家具 `data` 缺口 —— 采集时塌缩成"设计主材质"**（补齐 4.3 里唯一还没处理的材质来源）。
+
+**本版相对 v0.1.55 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **缺口** | 家具"长什么样"由 `data` 里的**设计索引**决定（`contents = FurnitureBlock.Index = 227`），而壳每格只有 14 位（contents+light）、**存不下 data** → 壳里的家具在 LOD 里只能是"227 这个方块"的材质 |
+| **做法** | **采集那一刻就把设计解析掉**：`FurnitureBlock.GetDesignIndex(data)` → `SubsystemFurnitureBlockBehavior.GetDesign(index)` → `SkylineFurniture.DominantMaterial(design)`（设计里出现次数最多的完整方块，带缓存）→ 壳里存**主材质**。于是家具在 LOD 里自然变成"该材质的**占位方盒**"（与 3.3 同口径），而且**壳仍是 16 KiB**（没加字段、没开 data 通道） |
+| **不静默** | 解析失败（设计在当前世界不存在 / 没有 behavior）**原样保留 227** 并计入 `furnitureUnresolved`；开关 `skyline.CubeShellFurnitureCollapse`（默认 true，只影响之后的采集） |
+| **对表口径跟着走** | 第一版没动对表口径 → 家具那几格**永远报 mismatch**（壳里主材质 vs 地形 227）→ 现在 `CubeSurfaceSample` 会**先按同一口径塌缩引擎值**再比，`topMismatches` 继续为 0 |
+
+### Verified（AgentLab）
+
+| 设计 | 地形里真实方块 | **塌缩开** → 壳里存什么 | 材质槽 | 形状 | 塌缩关 → 壳里存什么 |
+|---|---|---|---|---|---|
+| 0 | `FurnitureBlock(data=0)` | **MarbleBlock** | 7 | 顶面 + 2 侧壁（材质方盒） | `FurnitureBlock` |
+| 3 | `FurnitureBlock(data=12)` | **MarbleBlock** | 7 | 顶面 + 2 侧壁 | `FurnitureBlock` |
+| 4 | `FurnitureBlock(data=16)` | **PlanksBlock** | 4 | 顶面 + 3 侧壁 | `FurnitureBlock` |
+
+| 整立方体计数 | 值 |
+|---|---|
+| `furnitureCells / Resolved / Unresolved` | **3 / 3 / 0** |
+| `topChecked / topMismatches` | 1024 / **0** |
+| `lightChecked / lightMismatches` | 1024 / 0 |
+
+**顺带查清**：第一次摆的家具重启后变空气，**不是游戏 bug** —— `scripts/stop-game.ps1` 是 `Stop-Process -Force`
+（硬杀不存档），而**更早写**的测试件（栅栏/门/台阶板/楼梯）重启后全在；丢的只是"上次自动存档之后写入的那几格"。
+**边界**：塌缩不可逆（壳里只剩主材质），与"3.4 视距内家具 LOD 暂缓"的口径一致。
+**下一步**：①存档增量/差分写；②Iris 光影接入面；③回归清单加家具计数与塌缩字段。
+证据：`data/sessions/skyline-v0156/`、`notes/131`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.55] - 2026-09-28
 
 第六十五个版本：**更宽的采集口径（区块 Valid 就采）+ 覆盖度门控的四邻规则**（本轮新目标 3.2-2，

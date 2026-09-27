@@ -1140,6 +1140,21 @@ namespace Game {
                 root["shellTopHeight"] = shell.TopHeight[idx];
                 root["shellSurfaceY"] = shell.TopHeight[idx] + 1;
                 root["shellLight"] = Terrain.ExtractLight(shellValue);
+                // [v0.1.56] 家具塌缩：地形里那格真实方块 vs 壳里存了什么
+                int terrainValue = terrain.GetCellValue(cx * CubeSurface32.Size + (lx & 31),
+                                                        shell.TopHeight[idx],
+                                                        cz * CubeSurface32.Size + (lz & 31));
+                root["terrainContents"] = Terrain.ExtractContents(terrainValue);
+                root["terrainBlock"] = BlocksManager.Blocks[Terrain.ExtractContents(terrainValue)]?.GetType().Name ?? "";
+                root["terrainData"] = Terrain.ExtractData(terrainValue);
+                root["furnitureCollapsed"] = Terrain.ExtractContents(terrainValue) == FurnitureBlock.Index
+                    && contents != FurnitureBlock.Index;
+                if (Terrain.ExtractContents(terrainValue) == FurnitureBlock.Index) {
+                    int material = CubeSurface32.FurnitureMaterial(terrainValue);
+                    root["furnitureMaterialContents"] = Terrain.ExtractContents(material);
+                    root["furnitureMaterialBlock"] = material > 0
+                        ? BlocksManager.Blocks[Terrain.ExtractContents(material)]?.GetType().Name ?? "" : "";
+                }
                 root["textureSlot"] = block == null ? -1
                     : (block is CubeBlock ? block.GetFaceTextureSlot(4, shellValue)
                                           : block.GetFaceTextureSlot(0, shellValue));
@@ -1190,6 +1205,21 @@ namespace Game {
             SkylineCubeShellStore.MinBandCoverage = minCoverage;
             SkylineLod.RequestRebuild();
             return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.56] 家具塌缩开关（默认**开**）：采集壳时把家具（`contents=227`，设计索引在 data 里）
+        /// 塌缩成**设计的主材质**（`SkylineFurniture.DominantMaterial`），于是壳里存的是那个材质、
+        /// LOD 里自然画成"该材质的占位方盒"；关掉则保留 227（用于 A/B）。
+        /// **注意**：切换后需要重新采集才会生效（壳里已经存下的值不会变）。
+        /// </summary>
+        public static string CubeShellFurnitureCollapse(bool enabled) {
+            SkylineRuntime.ShellFurnitureCollapse = enabled;
+            return new System.Text.Json.Nodes.JsonObject {
+                ["ok"] = true,
+                ["furnitureCollapse"] = enabled,
+                ["note"] = "改这个开关只影响**之后的采集**；已存下的壳要重新采才会变"
+            }.ToJsonString();
         }
 
         /// <summary>

@@ -35,6 +35,14 @@ namespace Game {
         /// <summary>采样时"原始值带 data 位"的壳格数（量化上面这个缺口的规模）。</summary>
         public int DataCells;
 
+        // ---- [v0.1.56] 家具：设计索引在 data 里，壳只存 14 位 → **采集时把家具塌缩成"设计主材质"** ----
+        /// <summary>采样时遇到"顶面/底面/侧面第一个实心块是家具"的壳格数。</summary>
+        public int FurnitureCells;
+        /// <summary>其中成功解析成主材质的（壳里存的就是那个材质）。</summary>
+        public int FurnitureResolved;
+        /// <summary>解析失败的（设计索引在当前世界不存在 / 没有 behavior）→ 壳里保留 contents=227。</summary>
+        public int FurnitureUnresolved;
+
         /// <summary>顶面：每列最高实心方块的高度（`short.MinValue` = 空）与材质值。</summary>
         public readonly short[] TopHeight = new short[GridCells];
         public readonly ushort[] TopContents = new ushort[GridCells];
@@ -97,7 +105,7 @@ namespace Game {
                             if (Terrain.ExtractData(value) != 0) {
                                 surface.DataCells++;
                             }
-                            surface.TopContents[idx] = (ushort)(PackLight(value, light));
+                            surface.TopContents[idx] = (ushort)(PackLight(surface.CollapseFurniture(value), light));
                             break;
                         }
                     }
@@ -106,7 +114,7 @@ namespace Game {
                         if (Terrain.ExtractContents(value) != 0) {
                             surface.BottomHeight[idx] = (short)(oy + ly);
                             int light = SurfaceLight(terrain, wx, oy + ly - 1, wz, value);
-                            surface.BottomContents[idx] = (ushort)(PackLight(value, light));
+                            surface.BottomContents[idx] = (ushort)(PackLight(surface.CollapseFurniture(value), light));
                             break;
                         }
                     }
@@ -133,10 +141,54 @@ namespace Game {
                     // 侧面同样取"空气那一侧"（扫描路径上紧邻的前一格）的光照。
                     int light = SurfaceLight(terrain,
                         x + dAlongX * (i - 1), y, z + dAlongZ * (i - 1), value);
-                    return (ushort)(PackLight(value, light));
+                    return (ushort)(PackLight(CollapseFurnitureStatic(value), light));
                 }
             }
             return 0;
+        }
+
+        /// <summary>实例口径的家具塌缩（顺手记账）。</summary>
+        int CollapseFurniture(int value) {
+            if (!SkylineRuntime.ShellFurnitureCollapse || Terrain.ExtractContents(value) != FurnitureBlock.Index) {
+                return value;
+            }
+            FurnitureCells++;
+            int material = FurnitureMaterial(value);
+            if (material <= 0) {
+                FurnitureUnresolved++;
+                return value;                     // 解析不了就原样保留（至少还能画出"家具块"的材质）
+            }
+            FurnitureResolved++;
+            return material;                      // 返回的是完整方块值（contents|data|light），下面只取 contents
+        }
+
+        static int CollapseFurnitureStatic(int value) {
+            if (!SkylineRuntime.ShellFurnitureCollapse || Terrain.ExtractContents(value) != FurnitureBlock.Index) {
+                return value;
+            }
+            int material = FurnitureMaterial(value);
+            return material > 0 ? material : value;
+        }
+
+        /// <summary>
+        /// [v0.1.56] 把家具（`contents = 227`，设计索引在 data 里）塌缩成**设计的主材质**的完整方块值。
+        /// 解析路径与 `SkylineFurnitureDiag` 一致：`GetDesignIndex(data)` → `behavior.GetDesign(index)`
+        /// → `SkylineFurniture.DominantMaterial(design)`（带缓存）。返回 0 = 解析失败。
+        /// </summary>
+        public static int FurnitureMaterial(int value) {
+            try {
+                int designIndex = FurnitureBlock.GetDesignIndex(Terrain.ExtractData(value));
+                SubsystemFurnitureBlockBehavior behavior =
+                    GameManager.Project?.FindSubsystem<SubsystemFurnitureBlockBehavior>(true);
+                FurnitureDesign design = behavior?.GetDesign(designIndex);
+                if (design == null) {
+                    return 0;
+                }
+                return SkylineFurniture.DominantMaterial(design);
+            }
+            catch {
+                return 0;
+            }
         }
 
         /// <summary>
@@ -292,8 +344,17 @@ namespace Game {
                         int idx = lx + lz * CubeSurface32.Size;
                         int engineValue = terrain.GetCellValue(wx, engineTop, wz);
                         topChecked++;
+                        // [v0.1.56] 对表要跟着"家具塌缩"口径走：开着塌缩时，家具那一格**期望**就是设计主材质，
+                        // 否则这 3 格会永远报 mismatch（看起来像 bug，其实是故意）。
+                        int expectedContents = Terrain.ExtractContents(engineValue);
+                        if (SkylineRuntime.ShellFurnitureCollapse && expectedContents == FurnitureBlock.Index) {
+                            int furnitureMaterial = CubeSurface32.FurnitureMaterial(engineValue);
+                            if (furnitureMaterial > 0) {
+                                expectedContents = Terrain.ExtractContents(furnitureMaterial);
+                            }
+                        }
                         int shellValue = surface.TopContents[idx];
-                        if (Terrain.ExtractContents(engineValue) != Terrain.ExtractContents(shellValue)
+                        if (expectedContents != Terrain.ExtractContents(shellValue)
                             || engineTop != surface.TopHeight[idx]) {
                             topMismatch++;
                             if (firstMismatch == null) {
@@ -314,6 +375,9 @@ namespace Game {
                 result["lightChecked"] = lightChecked;
                 result["lightMismatches"] = lightMismatch;
                 result["dataCells"] = surface.DataCells;
+                result["furnitureCells"] = surface.FurnitureCells;
+                result["furnitureResolved"] = surface.FurnitureResolved;
+                result["furnitureUnresolved"] = surface.FurnitureUnresolved;
                 if (firstMismatch != null) {
                     result["firstMismatch"] = firstMismatch;
                 }
