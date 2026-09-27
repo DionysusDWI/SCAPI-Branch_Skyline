@@ -3,6 +3,30 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.41] - 2026-09-27
+
+第五十一个版本：**Axiom（用户给定仓库）对照归档 + `op:shape mode=spiral`** —— 学习项 #6 的首轮归档，
+并把该插件里我们缺的"螺旋楼梯"在桥里**原生**实现（逐格朝向）。
+
+**本版相对 v0.1.40 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（螺旋形状）** | `Bridge/Shapes.cs`：`op:shape mode=spiral` —— 绕 `center` 竖直轴，`height` 级、`turns` 圈；**每级朝向按切向**写进楼梯 data 低 2 位（映射取自游戏 `StairsBlock.GetPlacementValue`：0=−Z、1=−X、2=+Z、3=+X）；可选 `core`/`coreContents` 芯柱、`upsideDown`、额外 `data`、`dryRun`。`Shapes.Run` 为此新增**逐格 data** 通道（写入时优先用该格的 value） |
+| **归档 B（学习项 #6）** | `notes/106-Axiom能力对照与缺口.md`：先厘清 **用户给的 `kkroesch/axiom` 不是那个以贝塞尔笔刷闻名的 Axiom mod**（前者是 9 个 Java 文件的小型 PaperMC 插件，全仓库 `bezier|spline|curve` **0 命中**），逐命令给出对照表（cleararea/buildwall/digtunnel/spiralstair/buildportal/starterkit/mineshaft）与我们已有能力的映射；"贝塞尔曲线修建"那条我们**早已有** `SkylineBuilder.SweepBezier`（v0.0.6：贝塞尔→弧长采样→平行传输→profile 扫掠，1258 格/0.5 ms） |
+
+### Verified（AgentLab）
+
+| 项 | 值 |
+|---|---|
+| `dryRun` | `cellsPlanned=33`（16 级 + 17 芯柱） |
+| 实建 | `cellsWritten=33`、`cellsSkipped=0`、`chunksTouched=2`、**2.6 ms** |
+| 回读（`findBlock StoneStairsBlock` 半径 40） | 命中 **16 级**，朝向直方图 **{0:4, 1:4, 2:4, 3:4}**（整圈四向各 4 次 → 切向朝向正确） |
+| 视觉 | `data/sessions/skyline-v0141/spiral-view.png` |
+
+证据：`data/sessions/skyline-v0141/`、`notes/106`。桥工程构建：1 个既有警告 0 错误。
+源码包附带 `agentbridge/` 源码，形如 `Shapes.cs` 的本版改动都在里面。
+
 ## [v0.1.40] - 2026-09-27
 
 第五十个版本：**P3 分配计划 + 共享 32³ 页路由自检** —— 把 v0.1.39 的立方体级判据落成
