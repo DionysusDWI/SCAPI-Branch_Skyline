@@ -23,6 +23,14 @@
   对每列 ① 走既有通道强制 LOD 重采 ② 把该列的 32³ 立方体放进壳仓待采队列；
   **进度按真实下游完成度算**（LOD 单元不再脏 + 壳已入仓），HUD 画**进度条**（`PerformanceManager` 的 FlatBatch，
   左上角、性能信息下方）+ 一行 ASCII 状态（`LOD build 42% (85/203), eta 4s`） |
+| **表面体素壳进生产路径**（本轮新增） | 生产路径原来只有列顶高度场壳。现在：**采集**挂在两条采集路径后面（区块 Valid 就采 / 卸载前预扫），
+  只采 `rel ≤ 48 m`（`SurfaceVoxelRelMetres`）、总份数受 `SurfaceVoxelMaxCubes`（512 × 16 KiB = 8 MiB）门控；
+  **建网格**时 `wantVoxel = SurfaceVoxelEnabled && VoxelShell != null && step ≤ SurfaceVoxelMaxStep`（默认只最近一档）；
+  **预热/刷新** `PrewarmPass` 解决"壳是写一次的、老壳永远不会升级"这个结构性缺口（默认每 Tick 2 个 / 3 ms，
+  显式刷新走 `CubeShellSurfaceVoxelPrewarm(n, true)`） |
+| **顶点格式加属性**（里程碑 1.3 的地基） | `SkylineLodVertex`（28 B：`position/texcoord/color` **偏移与语义一字不动** + `NormalizedByte4 normal` + `float materialId`）
+  → 用 `TerrainVertex` 的旧 shader 照样能画同一个 buffer；`SkylineFaceShading`（CPU 面因子，**顶面恒 1** 可断言）、
+  `SkylineLodVolume`（GPU 侧用同一条公式、四个可视化通道）、`skyline.LodVolumeCapture/Compare` 对拍入口 |
 
 ### Verified（AgentLab）
 
@@ -42,6 +50,31 @@
 * **手动生成 LOD 实测**（半径 128 m）：**203 列 / 20.04 s 跑完**，进度曲线 `8 → 187`（3 s 内）→ 等最后 16 列到超时；
   **`skippedStuck = 16`（7.9%）如实报出** —— 这些列的 LOD 已重采，但它们的 32³ 立方体因**兄弟区块没就绪**始终采不到
   （不是假装完成）；HUD 进度条与状态行在运行期间可见（`manual-build-a-running.png` vs `-b-done.png`）。
+
+**表面体素壳接生产路径的实测**（AgentLab，视距 128 m，创造模式飞行；`data/sessions/skyline-v0160/voxel-prod.json`）：
+
+| 判据 | 值 |
+|---|---|
+| 体素壳份数 / 字节 | **164 个 / 2.562 MiB**（= 164 × 16,384 B，断言 `shellBytesMatch16KiB` 通过） |
+| 体素网格常驻 / 字节 | **11 个 / 1.685 MiB** |
+| **本帧画出的体素网格数** | **8**（`drawnVoxelLastFrame`） |
+| 单立方体采集耗时 / 每 Tick 预热耗时 | **0.32~0.84 ms** / **0.031 ms** |
+| 降级（裸露体素 > 3,072 被丢） | **10 / 164 = 6.1%**（当前普查；累计丢 6,891 个体素） |
+
+* **开关 A/B 7/7 断言通过**：`shellsCaptured / voxelMeshResidentOn / voxelMeshResidentZeroWhenOff /
+  voxelDrawnOn / voxelDrawnZeroWhenOff / restoredAfterToggle / shellBytesMatch16KiB` 全 true ——
+  `skyline.CubeShellSurfaceVoxel(false)` 确实把体素网格归零（不是"关不掉"）。
+* **修掉两个自造的坑**：①第一版 `wantVoxel` 漏了 `SurfaceVoxelEnabled` → 开关关不掉；②第一版预热把"补采"和"刷新"
+  混在一遍 → 同一批 12 个立方体被重采 14,005 次、白烧 1.3 ms/帧（改成一次性后 0.031 ms）。
+* **1.3 半成品经本轮补齐 + 实测**（并行代理起草，留了 7 个编译错误）：`FaceShadingSelfCheck` →
+  `factorMismatches=0 / topFactorIsOne=true / topColorUnchanged=true`，六面因子 `+Y 1.00 / -Y 0.50 / ±X 0.62 / ±Z 0.84`；
+  `LodVolumeCompare(256)` → CPU 烘焙与 GPU 属性路径**逐像素完全一致**（543/543，`meanAbsDiff 0`、`maxAbsDiff 0`）；
+  `LodVolumeCapture(true, 1|2, 256)` 的法线/材质 id 通道都有内容 → **属性确实到了片元着色器**。
+* **像素 A/B 如实降级**：天空云层与水面在动，同一状态拍两次就有 7.1%~17.9% 像素差，所以 on→off 的 12.1%
+  不能单独当证据；裁掉上部 35% 后两次对比都只剩 ~0.02%。**本轮以数值断言为准**，像素 A/B 待把相机摆到壳体正面再补。
+* **没做的**：远景 LOD 三层仍是列顶采样（1.6 只完成"最近一档交接带"这一半）；体素壳**不落盘**（记录仍是 12 B 坐标 +
+  16,384 B 列顶壳，重启后靠预热重采）；降级策略还是"记不下就丢"；壳的**光照缺口**（采集时区块光照未算 → `light=0`
+  画成黑、已算满 → 白）是**既有效应**，本轮截图里的黑白斑块属于它，不是本次改动的回归。
 
 ## [v0.1.59] - 2026-09-29
 

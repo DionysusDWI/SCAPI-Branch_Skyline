@@ -657,11 +657,29 @@ namespace Game {
         /// <summary>[v0.1.60] 用**表面体素壳**（有体积）而不是列顶高度场来建演示网格。</summary>
         static bool m_useVoxel;
         static readonly List<SurfaceVoxelMesh> m_voxelMeshes = [];
+        /// <summary>[v0.1.60] 同一组壳的**属性格式**网格（法线 + 材质 id，28 B/顶点），供 `skyline.LodVolume*` 对拍。</summary>
+        static readonly List<SurfaceVoxelMesh> m_voxelMeshesAttr = [];
         static readonly List<SurfaceVoxelShell32> m_voxelShells = [];
         static string m_lastError = "";
 
         public static bool DrawEnabled => m_draw;
         public static bool UseMerged => m_useMerged;
+        /// <summary>[v0.1.60] 当前整体抬高量（米）—— `SkylineLodVolume` 离屏对拍要用同一个偏移才能逐像素比较。</summary>
+        public static float DrawYOffset => m_drawYOffset;
+
+        /// <summary>
+        /// [v0.1.60] 取演示层**第一张体素壳网格**（`useAttributes=true` 取属性格式）——
+        /// 离屏对拍（`skyline.LodVolumeCapture / LodVolumeCompare`）只需要一张代表网格。
+        /// </summary>
+        public static SurfaceVoxelMesh FirstVoxelMesh(bool useAttributes) {
+            List<SurfaceVoxelMesh> list = useAttributes ? m_voxelMeshesAttr : m_voxelMeshes;
+            foreach (SurfaceVoxelMesh mesh in list) {
+                if (mesh != null && mesh.VertexBuffer != null && mesh.IndexCount > 0) {
+                    return mesh;
+                }
+            }
+            return null;
+        }
 
         /// <summary>[v0.1.60] 切换"演示层用表面体素壳"（默认关；切完要重新 `CubeSurfaceHarvest`）。</summary>
         public static string SetVoxelMode(bool enabled) {
@@ -728,20 +746,27 @@ namespace Game {
                 foreach (SurfaceVoxelMesh m in m_voxelMeshes) {
                     m.Dispose();
                 }
+                foreach (SurfaceVoxelMesh m in m_voxelMeshesAttr) {
+                    m.Dispose();
+                }
                 m_voxelMeshes.Clear();
+                m_voxelMeshesAttr.Clear();
                 m_voxelShells.Clear();
-                int voxelQuads = 0, voxelBytes = 0, voxelVertices = 0, voxelNaive = 0;
+                int voxelQuads = 0, voxelBytes = 0, voxelVertices = 0, voxelNaive = 0, voxelAttrBytes = 0;
                 int degraded = 0, voxelCount = 0;
                 for (int iz = 0; iz < nz; iz++) {
                     for (int ix = 0; ix < nx; ix++) {
                         SurfaceVoxelShell32 voxelShell =
                             SurfaceVoxelShell32.ExtractFrom(terrain, x0 + ix, cy, z0 + iz);
                         SurfaceVoxelMesh voxelMesh = SurfaceVoxelMesh.Build(voxelShell, true, true);
+                        SurfaceVoxelMesh voxelMeshAttr = SurfaceVoxelMesh.Build(voxelShell, true, true, true);
                         m_voxelShells.Add(voxelShell);
                         m_voxelMeshes.Add(voxelMesh);
+                        m_voxelMeshesAttr.Add(voxelMeshAttr);
                         voxelQuads += voxelMesh.Quads;
                         voxelBytes += (int)voxelMesh.VertexBytes;
                         voxelVertices += voxelMesh.Vertices;
+                        voxelAttrBytes += (int)voxelMeshAttr.VertexBytes;
                         voxelNaive += voxelMesh.NaiveFaces;
                         voxelCount += voxelShell.VoxelCount;
                         if (voxelShell.Degraded) {
@@ -777,6 +802,8 @@ namespace Game {
                     ["quads"] = voxelQuads,
                     ["vertices"] = voxelVertices,
                     ["vertexBytes"] = voxelBytes,
+                    ["attributeVertices"] = voxelVertices,
+                    ["attributeVertexBytes"] = voxelAttrBytes,
                     ["degradedCubes"] = degraded,
                     ["active"] = m_useVoxel
                 };

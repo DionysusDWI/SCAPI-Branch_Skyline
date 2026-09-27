@@ -72,6 +72,23 @@ namespace Game {
         /// <summary>[v0.1.52] 网格滑动窗口开关（关掉 = 网格一直常驻，相当于 v0.1.51 的行为）。</summary>
         public static bool MeshSlidingWindow { get; set; } = true;
 
+        // ---------------- 表面体素壳进生产路径（v0.1.60，目标 1.6 → 1.3「体积感」） ----------------
+        /// <summary>
+        /// [v0.1.60] 是否在**最近档**额外采"表面体素壳"（`SurfaceVoxelShell32`）并用六向贪心网格画它。
+        /// 关掉 = 逐位回到 v0.1.59 的列顶高度场行为。
+        /// </summary>
+        public static bool SurfaceVoxelEnabled { get; set; } = true;
+        /// <summary>
+        /// [v0.1.60] 只有档位 ≤ 这个值的立方体才用体素网格（默认 **1 = 只最近一档**）。
+        /// 理由（实测）：体素网格 ≈ 336 KiB/立方体（是列顶高度场的 ~2.4×），
+        /// 全档位放开会把常驻显存/内存拉高一个数量级；而"体积感"最需要表达的正是**眼前这一圈**。
+        /// </summary>
+        public static int SurfaceVoxelMaxStep { get; set; } = 1;
+        /// <summary>[v0.1.60] 持有体素壳的立方体上限（每份 16 KiB；512 份 = 8 MiB）。超出的记 `voxelSkippedByCap`。</summary>
+        public static int SurfaceVoxelMaxCubes { get; set; } = 512;
+        /// <summary>[v0.1.60] 体素壳的采集半径（米，相对视距）：`rel ≤ 此值` 才采（默认 48 = `TierMetres[0]`）。</summary>
+        public static float SurfaceVoxelRelMetres { get; set; } = 48f;
+
         // ---------------- 存档 P4（v0.1.53） ----------------
         /// <summary>存档开关。</summary>
         public static bool PersistenceEnabled { get; set; } = true;
@@ -163,6 +180,10 @@ namespace Game {
             public CubeSurface32 Shell;
             public CubeSurfaceMesh32 Mesh;
             public int MeshStep;                 // [v0.1.52] 当前网格是按哪一档建的
+            // [v0.1.60] 表面体素壳（只在最近档采；有它就优先画它 —— 网格互斥，见 DisposeMeshes）
+            public SurfaceVoxelShell32 VoxelShell;
+            public SurfaceVoxelMesh VoxelMesh;
+            public bool MeshIsVoxel;             // 当前常驻的是哪一类网格
             public double LastUsed;
         }
 
@@ -186,6 +207,8 @@ namespace Game {
         public static int MeshResident { get; private set; }
         public static string StepHistogram { get; private set; } = "";
         public static long DrawnLastFrame { get; private set; }
+        /// <summary>[v0.1.60] 其中有多少个是**表面体素网格**（其余是列顶高度场网格）。</summary>
+        public static long DrawnVoxelLastFrame { get; private set; }
         public static long SkippedBecauseLoaded { get; private set; }
         public static long SkippedIsolated { get; private set; }
         public static double LastHarvestMs { get; private set; }
@@ -193,7 +216,189 @@ namespace Game {
         public static double LastPendingMs { get; private set; }
         public static string LastError { get; private set; } = "";
 
+        // [v0.1.60] 表面体素壳的账（判据都从这里出）
+        /// <summary>持有体素壳的立方体数（每 Tick 在 `BuildMeshes` 里实数一遍，避免计数器漂移）。</summary>
+        public static int VoxelShellCubes { get; private set; }
+        public static long VoxelShellBytes => (long)VoxelShellCubes * SurfaceVoxelShell32.ShellBytes;
+        public static int VoxelMeshResident { get; private set; }
+        public static long VoxelMeshBytes { get; private set; }
+        public static long VoxelHarvestedTotal { get; private set; }
+        public static long VoxelSkippedByCap { get; private set; }
+        public static long VoxelDegradedCubes { get; private set; }
+        public static long VoxelDroppedVoxels { get; private set; }
+        public static long VoxelMeshedTotal { get; private set; }
+        public static double LastVoxelHarvestMs { get; private set; }
+        /// <summary>[v0.1.60] 每 Tick 最多**预热/刷新**几个立方体的体素壳（超出的留到下一 Tick）。</summary>
+        public static int VoxelPrewarmPerTick { get; set; } = 2;
+        /// <summary>[v0.1.60] 预热用的每 Tick 时间预算（毫秒）。</summary>
+        public static float VoxelPrewarmBudgetMs { get; set; } = 3f;
+        /// <summary>[v0.1.60] 刷新（覆盖已有体素壳）的次数 —— 与 `VoxelHarvestedTotal`（新建）分开记。</summary>
+        public static long VoxelRefreshedTotal { get; private set; }
+        /// <summary>[v0.1.60] 预热时因为"地形不在/未 Valid"跳过的次数（如实记，不当成错误）。</summary>
+        public static long VoxelPrewarmSkippedNoTerrain { get; private set; }
+        public static double LastPrewarmMs { get; private set; }
+        static int m_voxelShellCount;
+
         static Terrain Terrain => GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+        static float ViewRangeMetres => GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRange
+            ?? SettingsManager.VisibilityRange;
+
+        /// <summary>[v0.1.60] 释放一个条目的**两类网格**（体素网格与高度场网格互斥，释放时都清掉最省心）。</summary>
+        static void DisposeMeshes(Entry entry) {
+            entry.Mesh?.Dispose();
+            entry.Mesh = null;
+            entry.VoxelMesh?.Dispose();
+            entry.VoxelMesh = null;
+            entry.MeshIsVoxel = false;
+        }
+
+        /// <summary>
+        /// [v0.1.60] 丢弃一个条目（淘汰 / 清空 / 忘记都走这里）——
+        /// 保证"持有体素壳的立方体数"不会因为某个删除路径忘了减而漂移。
+        /// </summary>
+        static void ReleaseEntry(Entry entry) {
+            DisposeMeshes(entry);
+            if (entry.VoxelShell != null) {
+                entry.VoxelShell = null;
+                if (m_voxelShellCount > 0) {
+                    m_voxelShellCount--;
+                }
+            }
+        }
+
+        /// <summary>
+        /// [v0.1.60] 给一个**刚采到的**立方体补采"表面体素壳"（目标 1.6：采所有裸露在外的方块 → 1.3 的体积感）。
+        ///
+        /// 两道门控（都是为了内存与帧时间）：
+        ///   1. **只采最近档**：`rel = 距离 − 视距`，`rel > SurfaceVoxelRelMetres` 就不采
+        ///      —— 远的立方体用不到体素网格（档位 > `SurfaceVoxelMaxStep`）；
+        ///   2. **总份数上限** `SurfaceVoxelMaxCubes`（每份 16 KiB），超出的记 `voxelSkippedByCap` 如实报。
+        ///
+        /// **必须在地形还在的时候采**（与壳采集同一个理由：卸载后读回来是"假空"）。
+        /// </summary>
+        static void TryHarvestVoxelShell(Entry entry, Terrain terrain, int cx, int cy, int cz) {
+            if (!SurfaceVoxelEnabled || entry == null || terrain == null) {
+                return;
+            }
+            if (m_voxelShellCount >= SurfaceVoxelMaxCubes) {
+                VoxelSkippedByCap++;
+                return;
+            }
+            float rel = CubeDistance(cx, cz, SkylineLod.CameraViewPosition()) - ViewRangeMetres;
+            if (rel > SurfaceVoxelRelMetres) {
+                return;
+            }
+            HarvestVoxelShell(entry, terrain, cx, cy, cz);
+        }
+
+        /// <summary>
+        /// [v0.1.60] **真正抓一次**表面体素壳并挂到条目上（新建或**刷新**）。
+        /// 返回 true 表示这次抓到并写入了（`VoxelCount == 0` 的空立方体不算）。
+        /// </summary>
+        static bool HarvestVoxelShell(Entry entry, Terrain terrain, int cx, int cy, int cz) {
+            if (!SurfaceVoxelEnabled || entry == null || terrain == null) {
+                return false;
+            }
+            if (entry.VoxelShell == null && m_voxelShellCount >= SurfaceVoxelMaxCubes) {
+                VoxelSkippedByCap++;
+                return false;
+            }
+            Stopwatch watch = Stopwatch.StartNew();
+            SurfaceVoxelShell32 voxels = SurfaceVoxelShell32.ExtractFrom(terrain, cx, cy, cz);
+            watch.Stop();
+            LastVoxelHarvestMs = watch.Elapsed.TotalMilliseconds;
+            if (voxels.VoxelCount == 0) {
+                return false;                                 // 全空立方体：不占额度
+            }
+            bool had = entry.VoxelShell != null;
+            entry.VoxelShell = voxels;
+            if (had) {
+                VoxelRefreshedTotal++;
+            }
+            else {
+                m_voxelShellCount++;
+                VoxelHarvestedTotal++;
+            }
+            return true;
+        }
+
+        /// <summary>一个立方体覆盖的 2×2 区块是否**都已分配且已 Valid**（内容与光照都算好）。</summary>
+        static bool ChunksAllValid(Terrain terrain, int cx, int cz) {
+            if (terrain == null) {
+                return false;
+            }
+            for (int dx = 0; dx < 2; dx++) {
+                for (int dz = 0; dz < 2; dz++) {
+                    TerrainChunk chunk = terrain.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+                    if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// [v0.1.60] **体素壳预热 / 刷新**（每 Tick 受 `VoxelPrewarmPerTick` + `VoxelPrewarmBudgetMs` 限制）。
+        ///
+        /// 为什么必须有这一步（不是重复劳动）：
+        ///   1. **升级迁移**：v0.1.59 之前落盘的壳只有列顶高度场、没有体素数据；而壳是"**写一次**"的
+        ///      （`OnChunksLeavingRange` 遇到已有条目直接 `skippedDuplicate`），**不预热就永远不会升级**；
+        ///   2. **地形改动**：玩家在原地建/挖之后，壳要等地形**再次卸载**才会重采 —— 预热让"卸载那一刻"数据已经是对的；
+        ///   3. **只对最近档**（`rel ≤ SurfaceVoxelRelMetres`）且**地形已 Valid** 的立方体做 —— 远处用不到体素网格。
+        /// </summary>
+        static void PrewarmVoxelShells(Terrain terrain) {
+            PrewarmPass(terrain, VoxelPrewarmPerTick, VoxelPrewarmBudgetMs, refresh: false);
+        }
+
+        /// <summary>
+        /// [v0.1.60] **同步强制预热**（取证/手动生成用）：最多给 `maxCubes` 个"最近档 + 地形已 Valid"的条目
+        /// 补采/刷新体素壳；不受每 Tick 预算限制，但受 `maxCubes` 限制（避免一次卡很久）。返回本次成功几个。
+        /// </summary>
+        public static int PrewarmNow(int maxCubes, bool refresh = false) {
+            return PrewarmPass(Terrain, maxCubes, double.MaxValue, refresh);
+        }
+
+        /// <summary>
+        /// [v0.1.60] 预热/刷新的**唯一实现**。
+        /// `refresh: false`（每 Tick 的自动预热）= **只补没有体素壳的**条目 —— 一次性，不会反复重采同一个立方体
+        /// （v1 的第一版就踩过：同一批 12 个立方体被反复重采 1.4 万次，白烧 1~3 ms/帧）。
+        /// `refresh: true`（显式调用 / 手动生成）= 覆盖已有体素壳，用于"玩家建/挖之后刷新壳"。
+        /// 返回真正写入的个数。
+        /// </summary>
+        static int PrewarmPass(Terrain terrain, int maxCubes, double budgetMs, bool refresh) {
+            if (!SurfaceVoxelEnabled || terrain == null || maxCubes <= 0 || m_entries.Count == 0) {
+                return 0;
+            }
+            int done = 0;
+            Stopwatch watch = Stopwatch.StartNew();
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float viewRange = ViewRangeMetres;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                if (done >= maxCubes || watch.Elapsed.TotalMilliseconds > budgetMs) {
+                    break;
+                }
+                if (m_voxelShellCount >= SurfaceVoxelMaxCubes && kv.Value.VoxelShell == null) {
+                    VoxelSkippedByCap++;
+                    break;
+                }
+                if (!refresh && kv.Value.VoxelShell != null) {
+                    continue;                                 // 一次性补采：已有的不重采
+                }
+                if (CubeDistance(kv.Key.Cx, kv.Key.Cz, camera) - viewRange > SurfaceVoxelRelMetres) {
+                    continue;
+                }
+                if (!ChunksAllValid(terrain, kv.Key.Cx, kv.Key.Cz)) {
+                    VoxelPrewarmSkippedNoTerrain++;
+                    continue;
+                }
+                if (HarvestVoxelShell(kv.Value, terrain, kv.Key.Cx, kv.Key.Cy, kv.Key.Cz)) {
+                    done++;
+                }
+            }
+            LastPrewarmMs = watch.Elapsed.TotalMilliseconds;
+            return done;
+        }
 
         /// <summary>"四邻都在"检查（`RequireNeighbors` 的判定体）。</summary>
         static bool NeighborhoodComplete(int cx, int cy, int cz) {
@@ -346,7 +551,9 @@ namespace Game {
                 if (shell.QuadCount == 0) {
                     continue;
                 }
-                m_entries[key] = new Entry { Shell = shell, LastUsed = Time.RealTime };
+                Entry entry = new() { Shell = shell, LastUsed = Time.RealTime };
+                m_entries[key] = entry;
+                TryHarvestVoxelShell(entry, terrain, key.Cx, key.Cy, key.Cz);   // [v0.1.60] 最近档补采体素壳
                 HarvestedTotal++;
                 HarvestedOnValid++;
                 MarkCubeDirty(key);                  // [v0.1.57] 只把这一条标脏（增量存档）
@@ -484,7 +691,9 @@ namespace Game {
                         if (shell.QuadCount == 0) {
                             continue;
                         }
-                        m_entries[key] = new Entry { Shell = shell, LastUsed = Time.RealTime };
+                        Entry entry = new() { Shell = shell, LastUsed = Time.RealTime };
+                        m_entries[key] = entry;
+                        TryHarvestVoxelShell(entry, terrain, key.Cx, key.Cy, key.Cz);   // [v0.1.60] 最近档补采体素壳
                         HarvestedTotal++;
                         MarkCubeDirty(key);              // [v0.1.57] 增量存档只写这一条
                         budget--;
@@ -521,6 +730,7 @@ namespace Game {
                     SaveTick();
                 }
                 HarvestPending();      // [v0.1.55] 更宽口径：区块 Valid 就采（更新线程只入队）
+                PrewarmVoxelShells(Terrain);   // [v0.1.60] 最近档补采/刷新表面体素壳（升级迁移 + 地形改动）
                 EvictIfNeeded();
                 BuildMeshes();
                 UpdateBandCoverage();
@@ -633,7 +843,7 @@ namespace Game {
             list.Sort((a, b) => a.Value.LastUsed.CompareTo(b.Value.LastUsed));
             int drop = m_entries.Count - MaxCubes;
             for (int i = 0; i < drop && i < list.Count; i++) {
-                list[i].Value.Mesh?.Dispose();
+                ReleaseEntry(list[i].Value);
                 m_entries.Remove(list[i].Key);
                 MarkCubeRemoved(list[i].Key);        // [v0.1.57] 淘汰 → 存档写墓碑
                 EvictedTotal++;
@@ -656,10 +866,22 @@ namespace Game {
             Terrain terrain = Terrain;
             MeshVertexBytes = 0;
             MeshResident = 0;
+            VoxelMeshBytes = 0;                  // [v0.1.60]
+            VoxelMeshResident = 0;
+            VoxelShellCubes = 0;
+            VoxelDegradedCubes = 0;
+            VoxelDroppedVoxels = 0;
             int s1 = 0, s2 = 0, s4 = 0, s8 = 0, s16 = 0, s32 = 0;
             bool budgetHit = false;
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
                 Entry entry = kv.Value;
+                if (entry.VoxelShell != null) {
+                    VoxelShellCubes++;                       // [v0.1.60] 实数一遍，避免计数器漂移
+                    if (entry.VoxelShell.Degraded) {         // 降级/丢体素的**当前**普查（不是累计值）
+                        VoxelDegradedCubes++;
+                        VoxelDroppedVoxels += entry.VoxelShell.DroppedVoxels;
+                    }
+                }
                 float dist = CubeDistance(kv.Key.Cx, kv.Key.Cz, camera);
                 if (MeshSlidingWindow) {
                     bool terrainLoaded = terrain != null
@@ -668,29 +890,45 @@ namespace Game {
                             || terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2 + 1) != null
                             || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2 + 1) != null);
                     if (dist > releaseRange || terrainLoaded) {
-                        if (entry.Mesh != null) {
-                            entry.Mesh.Dispose();
-                            entry.Mesh = null;
+                        if (entry.Mesh != null || entry.VoxelMesh != null) {
+                            DisposeMeshes(entry);
                             MeshReleasedTotal++;
                         }
                         continue;
                     }
                 }
                 int step = StepForDistance(dist, viewRange);
+                // [v0.1.60] 最近档用**表面体素网格**（体积感），其余档位仍用列顶高度场（省内存）
+                bool wantVoxel = SurfaceVoxelEnabled && entry.VoxelShell != null && step <= SurfaceVoxelMaxStep;
+                bool hasMesh = entry.MeshIsVoxel ? entry.VoxelMesh != null : entry.Mesh != null;
                 if (!budgetHit && watch.Elapsed.TotalMilliseconds > MeshBudgetMs) {
                     budgetHit = true;                    // 本 Tick 预算用完：已有的继续统计，新的下帧再说
                 }
-                if (!budgetHit && (entry.Mesh == null || entry.MeshStep != step)) {
-                    entry.Mesh?.Dispose();
-                    CubeSurface32[] one = [entry.Shell];
-                    entry.Mesh = CubeSurfaceMesh32.Build(one, 1, 1, UseMergedMesh, true, step);
+                if (!budgetHit && (!hasMesh || entry.MeshStep != step || entry.MeshIsVoxel != wantVoxel)) {
+                    DisposeMeshes(entry);
+                    if (wantVoxel) {
+                        entry.VoxelMesh = SurfaceVoxelMesh.Build(entry.VoxelShell, true, true);
+                        entry.MeshIsVoxel = true;
+                        VoxelMeshedTotal++;
+                    }
+                    else {
+                        CubeSurface32[] one = [entry.Shell];
+                        entry.Mesh = CubeSurfaceMesh32.Build(one, 1, 1, UseMergedMesh, true, step);
+                        entry.MeshIsVoxel = false;
+                    }
                     entry.MeshStep = step;
                     MeshRebuiltTotal++;
                     MeshedTotal++;
                 }
-                if (entry.Mesh != null) {
-                    MeshVertexBytes += entry.Mesh.VertexBytes;
+                bool resident = entry.MeshIsVoxel ? entry.VoxelMesh != null : entry.Mesh != null;
+                if (resident) {
+                    long bytes = entry.MeshIsVoxel ? entry.VoxelMesh.VertexBytes : entry.Mesh.VertexBytes;
+                    MeshVertexBytes += bytes;
                     MeshResident++;
+                    if (entry.MeshIsVoxel) {
+                        VoxelMeshBytes += bytes;
+                        VoxelMeshResident++;
+                    }
                     switch (entry.MeshStep) {
                         case 1: s1++; break;
                         case 2: s2++; break;
@@ -708,6 +946,7 @@ namespace Game {
         /// <summary>由 `SubsystemTerrain.Draw` 调用（紧跟现有 LOD 层之后）。</summary>
         public static void Draw(Camera camera) {
             DrawnLastFrame = 0;
+            DrawnVoxelLastFrame = 0;
             if (!Enabled || !RenderEnabled || m_entries.Count == 0 || camera == null) {
                 return;
             }
@@ -748,7 +987,13 @@ namespace Game {
                         continue;
                     }
                     Entry entry = kv.Value;
-                    if (entry.Mesh == null || entry.Mesh.VertexBuffer == null || entry.Mesh.IndexCount == 0) {
+                    // [v0.1.60] 两类网格互斥：最近档是体素网格（体积感），其余是列顶高度场网格
+                    var vertexBuffer = entry.MeshIsVoxel ? entry.VoxelMesh?.VertexBuffer : entry.Mesh?.VertexBuffer;
+                    var indexBuffer = entry.MeshIsVoxel ? entry.VoxelMesh?.IndexBuffer : entry.Mesh?.IndexBuffer;
+                    int indexCount = entry.MeshIsVoxel
+                        ? (entry.VoxelMesh?.IndexCount ?? 0)
+                        : (entry.Mesh?.IndexCount ?? 0);
+                    if (vertexBuffer == null || indexBuffer == null || indexCount == 0) {
                         continue;
                     }
                     if (!NeighborhoodComplete(cx, kv.Key.Cy, cz)) {
@@ -757,7 +1002,10 @@ namespace Game {
                     }
                     entry.LastUsed = Time.RealTime;
                     Display.DrawIndexed(PrimitiveType.TriangleList, shader,
-                        entry.Mesh.VertexBuffer, entry.Mesh.IndexBuffer, 0, entry.Mesh.IndexCount);
+                        vertexBuffer, indexBuffer, 0, indexCount);
+                    if (entry.MeshIsVoxel) {
+                        DrawnVoxelLastFrame++;
+                    }
                     drawn++;
                 }
                 DrawnLastFrame = drawn;
@@ -771,7 +1019,7 @@ namespace Game {
         /// <summary>清空（换世界/测试收尾用）。</summary>
         public static void Clear() {
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
-                kv.Value.Mesh?.Dispose();
+                ReleaseEntry(kv.Value);
             }
             // [v0.1.57] 清空要留下"墓碑"，否则旧档里的记录会在下次读档时又冒出来
             foreach ((int Cx, int Cy, int Cz) key in m_entries.Keys) {
@@ -790,7 +1038,7 @@ namespace Game {
             if (!m_entries.TryGetValue(key, out Entry entry)) {
                 return false;
             }
-            entry.Mesh?.Dispose();
+            ReleaseEntry(entry);
             m_entries.Remove(key);
             MarkCubeRemoved(key);
             return true;
@@ -1210,6 +1458,28 @@ namespace Game {
                 ["meshRebuiltTotal"] = MeshRebuiltTotal,
                 ["meshReleasedTotal"] = MeshReleasedTotal,
                 ["stepHistogram"] = StepHistogram,
+                // [v0.1.60] 表面体素壳（目标 1.6 → 1.3「体积感」）
+                ["surfaceVoxelEnabled"] = SurfaceVoxelEnabled,
+                ["surfaceVoxelMaxStep"] = SurfaceVoxelMaxStep,
+                ["surfaceVoxelMaxCubes"] = SurfaceVoxelMaxCubes,
+                ["surfaceVoxelRelMetres"] = SurfaceVoxelRelMetres,
+                ["voxelShellCubes"] = VoxelShellCubes,
+                ["voxelShellBytes"] = VoxelShellBytes,
+                ["voxelShellMiB"] = Math.Round(VoxelShellBytes / 1048576.0, 3),
+                ["voxelMeshResident"] = VoxelMeshResident,
+                ["voxelMeshBytes"] = VoxelMeshBytes,
+                ["voxelMeshMiB"] = Math.Round(VoxelMeshBytes / 1048576.0, 3),
+                ["voxelHarvestedTotal"] = VoxelHarvestedTotal,
+                ["voxelRefreshedTotal"] = VoxelRefreshedTotal,
+                ["voxelMeshedTotal"] = VoxelMeshedTotal,
+                ["voxelSkippedByCap"] = VoxelSkippedByCap,
+                ["voxelPrewarmSkippedNoTerrain"] = VoxelPrewarmSkippedNoTerrain,
+                ["voxelDegradedCubes"] = VoxelDegradedCubes,
+                ["voxelDroppedVoxels"] = VoxelDroppedVoxels,
+                ["drawnVoxelLastFrame"] = DrawnVoxelLastFrame,
+                ["lastVoxelHarvestMs"] = Math.Round(LastVoxelHarvestMs, 3),
+                ["lastPrewarmMs"] = Math.Round(LastPrewarmMs, 3),
+                ["voxelPrewarmPerTick"] = VoxelPrewarmPerTick,
                 ["meshedCubes"] = MeshedTotal,
                 ["harvestedTotal"] = HarvestedTotal,
                 ["evictedTotal"] = EvictedTotal,
@@ -1273,6 +1543,52 @@ namespace Game {
             SkylineCubeShellStore.UseMergedMesh = greedy;
             return SkylineCubeShellStore.Survey();
         }
+
+        /// <summary>
+        /// [v0.1.60] **表面体素壳开关**（目标 1.6 → 1.3）：开 = 最近档用"采所有裸露方块"的体素网格，
+        /// 关 = 逐位回到 v0.1.59 的列顶高度场。
+        /// </summary>
+        public static string CubeShellSurfaceVoxel(bool enabled) {
+            SkylineCubeShellStore.SurfaceVoxelEnabled = enabled;
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>[v0.1.60] 允许多大档位用体素网格（1 = 只最近档，内存最省；2 = 最近两档 …）。</summary>
+        public static string CubeShellSurfaceVoxelStep(int maxStep) {
+            SkylineCubeShellStore.SurfaceVoxelMaxStep = Math.Clamp(maxStep, 1, SkylineCubeShellStore.CubeSize);
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>[v0.1.60] 体素壳的**份数上限**与**采集半径**（内存/耗时两道门控）；`relMetres &lt; 0` = 不改半径。</summary>
+        public static string CubeShellSurfaceVoxelCap(int maxCubes, float relMetres = -1f) {
+            SkylineCubeShellStore.SurfaceVoxelMaxCubes = Math.Max(0, maxCubes);
+            if (relMetres >= 0f) {
+                SkylineCubeShellStore.SurfaceVoxelRelMetres = relMetres;
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.60] **同步强制预热**一批体素壳（取证 / 手动刷新用），上限 128 个/次（避免一次卡太久）。
+        /// `refresh=true` = **覆盖已有体素壳**（玩家建/挖之后刷新），默认 false = 只补还没有的。
+        /// 返回体素壳统计 + `prewarmedNow`（本次成功几个）。
+        /// </summary>
+        public static string CubeShellSurfaceVoxelPrewarm(int maxCubes, bool refresh = false) {
+            int done = SkylineCubeShellStore.PrewarmNow(Math.Clamp(maxCubes, 0, 128), refresh);
+            JsonObject root = JsonNode.Parse(SkylineCubeShellStore.Survey()) as JsonObject ?? new JsonObject();
+            root["prewarmedNow"] = done;
+            return root.ToJsonString();
+        }
+
+        /// <summary>[v0.1.60] 预热节流参数：每 Tick 几个、每 Tick 几毫秒。</summary>
+        public static string CubeShellSurfaceVoxelPrewarmRate(int perTick, float budgetMs = -1f) {
+            SkylineCubeShellStore.VoxelPrewarmPerTick = Math.Max(0, perTick);
+            if (budgetMs >= 0f) {
+                SkylineCubeShellStore.VoxelPrewarmBudgetMs = budgetMs;
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
         /// <summary>壳接管后让现有 LOD 层让位（默认 true；false = 两层叠着画，用于 A/B 看穿插）。</summary>
         public static string CubeShellRestrictLod(bool restrict) {
             SkylineCubeShellStore.RestrictLod = restrict;
