@@ -54,6 +54,11 @@ namespace Game {
         /// 是远图（512 m/1024² = 1 m/texel）的 4 倍细。</summary>
         public static float GpuShadowNearRadius { get; set; } = 128f;
 
+        /// <summary>[v0.1.65] **太阳追踪**：太阳方向相对上次捕获转过这个角度就自动重捕一次深度图
+        /// （默认 10°；0 或负数 = 不自动重捕）。1200 s 一天下 10° ≈ 33 s 一次。
+        /// 自动重捕走**不读回**的轻量路径（`diagnostics skipped`），因为读回 1024² 才是那 ~90 ms 的大头。</summary>
+        public static float GpuShadowSunRecaptureDegrees { get; set; } = 10f;
+
         const string GpuShadowVsh = @"#ifdef HLSL
 
 float2 u_origin;
@@ -275,6 +280,9 @@ void main()
         static RenderTarget2D m_gpuShadowRtNear;
         static string m_gpuShadowLast = "(never captured)";
         static int m_gpuShadowCaptures;
+        // [v0.1.65] 太阳追踪的自动重捕获（轻量：不读回深度图）
+        static bool m_gpuShadowSkipDiagnostics;
+        static long m_gpuShadowAutoCaptures;
 
         // [v0.1.34] 深度图相机参数（采样侧用；每次 Capture 刷新）
         static Matrix m_gpuShadowViewProjection;
@@ -311,7 +319,9 @@ void main()
             Display.Clear(new Vector4(1f, 1f, 1f, 1f), 1f, 0);       // 背景 = 最远（depth 1）
 
             Vector3 center = camera.ViewPosition;
-            sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            // [v0.1.65] 太阳追踪：光源方向取**唯一的太阳真值**（与天上那个太阳同式），
+            // 而不是游戏本体的固定常量 DirectionToLight1（它是 readonly 的，昼夜不动）。
+            sun = SkylineRuntime.TrackedLightDirection();
             float distance = MathF.Max(radius * 4f, 512f);
             depthMax = distance * 2f;
             eye = center + sun * distance;
@@ -473,6 +483,29 @@ void main()
                 }
                 else {
                     m_gpuShadowHasNearMap = false;
+                }
+
+                if (m_gpuShadowSkipDiagnostics) {
+                    // [v0.1.65] **太阳追踪的自动重捕获**路径：不读回深度图、不做自检。
+                    // 为什么必须分出来：读回 1024² 两遍（远图计数 + 近图计数）实测占掉 ~90 ms 里的大头，
+                    // 那是"太阳一转过阈值就卡一下"的元凶；而跟踪太阳本来就不需要每帧统计覆盖率。
+                    m_gpuShadowCaptures++;
+                    m_gpuShadowAutoCaptures++;
+                    m_gpuShadowLast =
+                        $"gpuShadow(auto) size={size} radius={radius:0} nearRadius={nearRadius:0} "
+                        + $"sun=({sun.X:0.###},{sun.Y:0.###},{sun.Z:0.###}) "
+                        + $"captures={m_gpuShadowCaptures} auto={m_gpuShadowAutoCaptures} "
+                        + $"ms={(Time.RealTime - start) * 1000.0:0.0} (diagnostics skipped)";
+                    result["ok"] = true;
+                    result["auto"] = true;
+                    result["diagnostics"] = false;
+                    result["size"] = size;
+                    result["radius"] = radius;
+                    result["sun"] = new JsonArray(sun.X, sun.Y, sun.Z);
+                    result["chunksDrawn"] = chunksDrawn;
+                    result["alphaChunksDrawn"] = alphaChunksDrawn;
+                    result["ms"] = Math.Round((Time.RealTime - start) * 1000.0, 2);
+                    return result.ToJsonString();
                 }
 
                 Image image = m_gpuShadowRt.GetData(new Rectangle(0, 0, size, size));

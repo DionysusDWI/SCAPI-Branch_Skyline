@@ -7,6 +7,56 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.65] - 2026-09-28
+
+第七十五个版本：**里程碑 3.4 —— 太阳追踪**。用户口径（逐字）：
+"**太阳追踪功能很重要，不要让光源点偏离太阳**"。
+
+### 相对 v0.1.64 的变更
+
+| 项 | 内容 |
+|---|---|
+| **纠正一个会误导整条路线的判断** | 本项目自 v0.1.32 起把 `LightingManager.DirectionToLight1` 当"太阳方向"，而它是 `public static readonly` 的**常量** `(0.12, 0.25, 0.34)`；游戏本体的昼夜只体现在天空色/雾/太阳贴图上。⇒ **在此之前太阳转一整天，我们的阴影方向一动不动** |
+| **唯一的太阳真值** | 新 `SkylineSun.cs`：`SunDirectionToSky()` 与 `SubsystemSky.DrawSunAndMoon` **逐行同式**（`num = 2π(TimeOfDay − Midday)`；太阳 = `UnitY·Rz(−num)·Rx(seasonAngle)`），所以"我们的光源点"与"天上那个太阳"不可能偏离 |
+| **夜里按月亮** | `TrackedLightDirection()`：太阳落到水平线下时取月亮（= 太阳的正对面，与游戏同式）；`SunUseMoonAtNight` 默认开 |
+| **接进两处** | `SkylineGpuShadow.RenderDepthMap` 与 `SkylineTerrainShadow.TerrainShadowSun()`。第二处尤其关键：地形顶点阴影的重烘焙判据是"太阳转过阈值"，而固定光下 `sunDot ≡ 1` ⇒ **那条重烘焙自 v0.1.31 起从未触发** |
+| **自动重捕获** | `GpuShadowSunRecaptureDegrees`（默认 **10°**，1200 s 一天 ≈ 33 s 一次）。且自动重捕走**不读回深度图**的轻量路径（读回 1024² 两遍占 ~90 ms 里的大头），describe 报 `autoCaptures` |
+| **测试用拨钟** | `SunSetTimeOfDay(t)` / `SunSetTimeOfDayMode(m)`：会**同时**把 `TimeOfDayMode` 切成 `Changing` 并回报原模式（第一版只改 offset，而该世界是固定白天 ⇒ `TimeOfDay` 恒等于 `Midday`，拨了等于没拨） |
+| **诊断** | `SunDescribe()`：时刻/季节角/太阳与月亮的仰角方位角/**与固定光的点积**（这个数就是"偏离太阳多少"）；`GpuShadowSampleDescribe()` 增报 `sunRecaptureDeg` 与 `autoCaptures` |
+
+### 实测（AgentLab，关雾；世界原本 `TimeOfDayMode=Day`，测试临时切 `Changing`、结束还原）
+
+| 时刻 | 光源仰角 | 太阳方位角 | 与固定光点积 | autoCaptures |
+|---|---|---|---|---|
+| 0.20 | **+13.0°** | 173.5° | +0.307 | 1 |
+| 0.30 | +19.2° | 189.9° | **−0.192** | 2 |
+| 0.42 | +54.3° | 223.1° | +0.037 | 3 |
+| 0.55 | +56.6° | 311.8° | +0.258 | 4 |
+| 0.68 | +19.3° | 350.1° | +0.317 | 5 |
+| 正午 | **+63.9°** | 270.0° | +0.170 | — |
+
+* 相邻时刻的光源方向夹角 **144.0° / 43.2° / 46.8° / 46.8°** —— **真的在转**；
+* 与游戏固定光的点积在 **−0.19 ~ +0.32** ⇒ 最大偏离 **≈101°**；正午偏离 **80.2°**；
+* 相邻时刻画面差 **99.4% / 37.9% / 31.0% / 8.6%** 像素；**同状态重复截图差 0 像素**（噪声地板 0）；
+* A/B（同一时刻 `SunTracking` off vs on）：方向差 **71.7°**、画面差 **11.26%**；
+* 时刻与模式**均已还原**（`nowTimeOfDay=0.4920`、`restoreMode.now=Day`）。
+
+### 回归门禁
+
+**PASS 15 / FAIL 0 / SKIP 0 / KNOWN 1**（KNOWN 仍是既有的实验性 GPU 属性着色 `lod-attr-selfcheck`）。
+`defaults` 漂移门新增 `SunTracking=true` / `SunUseMoonAtNight=true` / `sunRecaptureDeg=10`。
+
+### 未做 / 风险（不粉饰）
+
+* **LOD 坡向明暗与六面明暗仍用固定光**：它们是**烘进网格**的，跟着太阳转会变成一直重建；
+  下一步应复用 `TerrainShadowSunThresholdDegrees` 那套"转过阈值才重烘焙"的限频机制。
+* 夜里按月亮取**方向**，但**没有按月亮降低阴影强度**（`SunUseMoonAtNight` 只解决方向）。
+* 自动重捕获阈值/开销是一对取舍（10° ≈ 33 s 一次），还没做帧时间对照，只测了单次捕获耗时。
+* `SunSetTimeOfDay` 改的是世界存档里的 `TimeOfDayOffset` 与 `TimeOfDayMode`；脚本会还原，
+  但**若进程在拨动期间被杀，世界会停在那个时刻**。
+
+详见 `notes/144-太阳追踪.md`；证据 `data/sessions/skyline-v0165/`。
+
 ## [v0.1.64] - 2026-09-28
 
 第七十四个版本：**里程碑 3.2（光影实装接入）第一步 —— 软阴影（PCF）**。

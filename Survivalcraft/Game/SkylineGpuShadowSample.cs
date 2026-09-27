@@ -92,7 +92,8 @@ namespace Game {
                 ["slopeBias"] = (double)GpuShadowSoftSlopeBias,
                 ["sunYFloor"] = (double)GpuShadowSoftSunYFloor,
                 ["bias"] = (double)GpuShadowSampleBias,
-                ["strength"] = (double)GpuShadowSampleStrength
+                ["strength"] = (double)GpuShadowSampleStrength,
+                ["sunRecaptureDeg"] = (double)GpuShadowSunRecaptureDegrees
             };
             return o.ToJsonString();
         }
@@ -107,12 +108,13 @@ namespace Game {
             + $"sunY={m_gpuShadowSun.Y:0.###} "
             + $"depth16={m_gpuShadowDepth16AtCapture} "
             + $"cascade={GpuShadowCascadeEnabled} hasNearMap={m_gpuShadowHasNearMap} "
+            + $"sunRecaptureDeg={GpuShadowSunRecaptureDegrees:0.#} autoCaptures={m_gpuShadowAutoCaptures} "
             + $"resolved={m_gpuShadowSampleResolved} fallbacks={m_gpuShadowSampleFallbacks} "
             + $"lastReason='{m_gpuShadowSampleLastReason}' debug={GpuShadowDebugMode} err='{m_gpuShadowSampleError}'";
 
         /// <summary>[v0.1.34] 每帧由 `SkylineRuntime.Tick()` 调用：启用采样但还没深度图时自动补一次捕获。</summary>
         public static void GpuShadowTick() {
-            if (!GpuShadowSampleEnabled || m_gpuShadowHasMap) {
+            if (!GpuShadowSampleEnabled) {
                 return;
             }
             if (GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain == null) {
@@ -122,7 +124,26 @@ namespace Game {
             if (!GpuShadowEnabled) {
                 GpuShadowEnabled = true;
             }
-            GpuShadowCapture();
+            if (!m_gpuShadowHasMap) {
+                GpuShadowCapture();
+                return;
+            }
+            // [v0.1.65] 太阳追踪：光源转过阈值就自动重捕一次（轻量路径，不读回深度图）。
+            // 没有这一条，"太阳追踪"只会在手动 `GpuShadowCapture()` 的那一刻成立 —— 影子不会跟着太阳转。
+            if (GpuShadowSunRecaptureDegrees <= 0f) {
+                return;
+            }
+            Vector3 now = TrackedLightDirection();
+            float thresholdCos = System.MathF.Cos(GpuShadowSunRecaptureDegrees * System.MathF.PI / 180f);
+            if (Vector3.Dot(now, m_gpuShadowSun) < thresholdCos) {
+                m_gpuShadowSkipDiagnostics = true;
+                try {
+                    GpuShadowCapture();
+                }
+                finally {
+                    m_gpuShadowSkipDiagnostics = false;
+                }
+            }
         }
 
         /// <summary>

@@ -60,8 +60,9 @@ namespace Game {
 
         /// <summary>当前太阳方向（指向光源的单位向量）。</summary>
         static Vector3 TerrainShadowSun() {
-            Vector3 sun = LightingManager.DirectionToLight1;
-            return sun.LengthSquared() > 1e-6f ? Vector3.Normalize(sun) : Vector3.UnitY;
+            // [v0.1.65] 太阳追踪：与阴影捕获取**同一个**真值，否则"太阳转过阈值就重烘焙"永远不触发
+            // （固定光下 sunDot 恒为 1 —— 这也是 v0.1.31 之后地形阴影看起来"没在跟太阳走"的原因）。
+            return SkylineRuntime.TrackedLightDirection();
         }
 
         /// <summary>
