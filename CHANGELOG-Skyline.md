@@ -3,6 +3,25 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.19] - 2026-09-27
+
+第二十九个版本：**LOD 自阴影（CPU 射线步进）+ 坡向明暗的昼夜调制**（里程碑 5 阴影路线的第 1 条）。
+
+**本版相对 v0.1.18 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（LOD 自阴影）** | 对每个 LOD 单元从顶面中心沿**太阳方向**（`DirectionToLight1`）步进（步长 = 单元/2、最多 64 步 ≈512 m），查 LOD 高度场：被更高单元挡住 → 该单元顶点色压暗 `1-Strength`。**未采集单元跳过**（不造假阴影）。开关 `skyline.LodSelfShadowStrength`（默认 **0.35**，0=关）、`SelfShadowBias`（默认 0.75） |
+| **新增 B（昼夜调制）** | 坡向明暗与自阴影都是"太阳"效应：每次网格重建取 `SubsystemSky.SkyLightValue/15` 作为日照量，按 `gain = lerp(1, gain, sunAmount)` 淡出（夜里远景不再有斜阳感，与近景随昼夜变暗一致） |
+| **诊断 C** | `skyline.LodSelfShadowStats()`（阴影单元数/采样数 + 当前日照量）、`skyline.LodSelfShadowSelfCheck()`（合成"低地 + 迎光侧高墙"的确定性自检） |
+
+### Verified
+
+* 确定性自检：`behindWall=0.650`（=1-0.35）、`sunSide=1.000`、`ok=True`；
+* 真实网格（AgentLab 雪原）：`shadowed=6/267 (2.2%) sun=1`；坡向明暗 `samples=267 gain min=0.713 mean=0.985 max=1`（两项叠加生效）；
+* 自检期望写错一次（高墙放在背光侧 → 射线不经过它），已在 `notes/89 §3` 记为该类自检的通用教训；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.18] - 2026-09-27
 
 第二十八个版本：**阴影阶段第一步 —— 太阳视角 pass + 回读验证**（里程碑 5）。

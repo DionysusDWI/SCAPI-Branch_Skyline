@@ -258,6 +258,79 @@ namespace Game {
         public static float SlopeShadingStrength { get; set; } = 0.45f;
 
         /// <summary>
+        /// [v0.1.19] **LOD 自阴影**强度：向太阳方向在 LOD 高度场里做射线步进（步长 = 单元/2，
+        /// 最远 64 步 ≈ 512 m），被更高的单元（山脊、高台）挡住就压暗。0 = 关闭。
+        /// 这是"阴影阶段"的 CPU 侧最短路径版本（`notes/88 §5` 建议先做的那条）：
+        /// 零 shader 改动、只在网格重建时算一次（≈1000~2000 单元 × ≤64 步的字典查询）。
+        /// </summary>
+        public static float SelfShadowStrength { get; set; } = 0.35f;
+
+        /// <summary>[v0.1.19] 自阴影射线在竖直方向上的偏置（格），避免自我遮挡（浮点/取整噪声）。</summary>
+        public static float SelfShadowBias { get; set; } = 0.75f;
+
+        static int m_selfShadowedCells;
+        static int m_selfShadowSampled;
+
+        /// <summary>[v0.1.19] 诊断：最近一次网格重建里被判为"在阴影中"的单元数/采样数。</summary>
+        public static string SelfShadowStats() =>
+            $"selfShadow strength={SelfShadowStrength:0.##} shadowed={m_selfShadowedCells}/{m_selfShadowSampled}"
+            + $" sun={m_sunAmount:0.##}"
+            + (m_selfShadowSampled > 0
+                ? $" ({100.0 * m_selfShadowedCells / m_selfShadowSampled:0.#}%)"
+                : "");
+
+        /// <summary>
+        /// 向太阳方向步进，判断该单元是否被 LOD 高度场里的更高地形遮挡。
+        /// 返回 1（无遮挡）或 1-strength（在阴影中）。字典里没有的单元按"无数据"跳过（不算遮挡）。
+        /// </summary>
+        static float SelfShadowFactor(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) {
+            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float step = cellSize * 0.5f;
+            float x = cx * cellSize + cellSize * 0.5f;
+            float y = height + 1f;
+            float z = cz * cellSize + cellSize * 0.5f;
+            for (int i = 0; i < 64; i++) {
+                x += sun.X * step;
+                y += sun.Y * step;
+                z += sun.Z * step;
+                if (y > TerrainChunk.HeightMinusOne) {
+                    break;
+                }
+                int nx = (int)MathF.Floor(x / cellSize);
+                int nz = (int)MathF.Floor(z / cellSize);
+                if (!dict.TryGetValue(Key(nx, nz), out Cell cell)) {
+                    continue;                                  // 未采集 → 不判遮挡（避免假阴影）
+                }
+                if (cell.Height + 1f > y + SelfShadowBias) {
+                    return MathUtils.Clamp(1f - SelfShadowStrength, 0.05f, 1f);
+                }
+            }
+            return 1f;
+        }
+
+        /// <summary>[v0.1.19] 自阴影确定性自检：一堵高墙的背光侧应判为阴影、迎光侧不判。</summary>
+        public static string SelfShadowSelfCheck() {
+            int cellSize = CellSize;
+            int low = 70, high = 100;
+            var dict = new Dictionary<long, Cell>();
+            // 在原点周围铺一圈低地
+            for (int dx = -8; dx <= 8; dx++) {
+                for (int dz = -8; dz <= 8; dz++) {
+                    dict[Key(dx, dz)] = new Cell { Height = (short)low };
+                }
+            }
+            // 太阳方向 ≈ (+0.27,+0.57,+0.78)（朝 +x/+z 升起）：**迎光侧**（+z 一格）放高墙，
+            // 射线从原点出发第 3 步（z≈27 格）正落在该格、此时高度 ≈85 < 100 → 应判为阴影；
+            // 而背光侧那一格（-z 方向）不看这堵墙 → 应判为受光。
+            dict[Key(0, 1)] = new Cell { Height = (short)high };
+            float shadowed = SelfShadowFactor(dict, 0, 0, low, cellSize);
+            float lit = SelfShadowFactor(dict, 0, -2, low, cellSize);
+            bool ok = shadowed < 0.999f && lit >= 0.999f;
+            return $"selfShadowSelfCheck strength={SelfShadowStrength:0.##} "
+                + $"behindWall={shadowed:0.###} sunSide={lit:0.###} ok={ok}";
+        }
+
+        /// <summary>
         /// [v0.1.15] 用相邻单元高度估"该单元顶面法线"，再套 `LightingManager.CalculateLighting`
         /// 得到相对"平地"的明暗系数（平地 = 1）。相邻单元缺失时按"同高"处理（不产生假坡度）。
         /// </summary>
@@ -322,6 +395,13 @@ namespace Game {
         static double m_slopeStatSum;
         static int m_slopeStatCount;
 
+        /// <summary>[v0.1.19] 当前"日照量"（0=夜 1=正午），来自 `SubsystemSky.SkyLightValue`：
+        /// 坡向明暗与自阴影都是"太阳"效应，夜里应淡出（近景会随光照变暗，远景不能还亮着）。</summary>
+        static float m_sunAmount = 1f;
+
+        /// <summary>[v0.1.19] 诊断：当前日照量。</summary>
+        public static float SunAmount => m_sunAmount;
+
         /// <summary>诊断：坡向明暗增益的 min/max/mean（最后一次网格重建里抽样的那一列）。</summary>
         public static string SlopeShadingStats() =>
             m_slopeStatCount == 0
@@ -346,6 +426,9 @@ namespace Game {
         static void RebuildMesh() {
             SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
             float visualRange = sky?.VisibilityRange ?? SettingsManager.VisibilityRange;
+            // v0.1.19：昼夜调制——坡向明暗/自阴影是"太阳"效应，夜里（SkyLightValue→0）应淡出，
+            // 否则远景观感与近景（由格子光照驱动、会随昼夜变暗）不一致。
+            m_sunAmount = MathUtils.Saturate((sky?.SkyLightValue ?? 15) / 15f);
             float skipRadius = visualRange + FineSize * 0.5f;                  // 视距内不画（v0.1.0 修复）
             float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
             RebuildMeshCore(m_cellsFine, FineShift, skipRadius, fineRange, true);
@@ -379,6 +462,8 @@ namespace Game {
                 m_slopeStatMax = float.MinValue;
                 m_slopeStatSum = 0.0;
                 m_slopeStatCount = 0;
+                m_selfShadowedCells = 0;                     // v0.1.19：自阴影诊断同样只在粗层重置
+                m_selfShadowSampled = 0;
             }
             for (int cx = ccx - radiusCells; cx <= ccx + radiusCells; cx++) {
                 for (int cz = ccz - radiusCells; cz <= ccz + radiusCells; cz++) {
@@ -458,8 +543,23 @@ namespace Game {
                 // （环境光 + 两盏方向光），得到"与游戏光照模型一致"的明暗系数 —— 这是把 LOD 接进光照的
                 // 第一步（里程碑 5 的阴影/G-buffer 之前的最小可用版本，见 notes/85）。
                 Color cellLight = light;
-                if (SlopeShadingStrength > 0f) {
-                    float gain = SlopeLightGain(dict, cx, cz, cell.Height, cellSize);
+                if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f) {
+                    float gain = SlopeShadingStrength > 0f
+                        ? SlopeLightGain(dict, cx, cz, cell.Height, cellSize)
+                        : 1f;
+                    gain = MathUtils.Lerp(1f, gain, m_sunAmount);      // v0.1.19：坡向明暗同样按日照量淡出
+                    if (SelfShadowStrength > 0f) {
+                        // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）
+                        float shadow = SelfShadowFactor(dict, cx, cz, cell.Height, cellSize);
+                        // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
+                        gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
+                        if (!fine) {
+                            m_selfShadowSampled++;
+                            if (shadow < 0.999f) {
+                                m_selfShadowedCells++;
+                            }
+                        }
+                    }
                     cellLight = new Color(
                         (byte)MathUtils.Clamp(light.R * gain, 0f, 255f),
                         (byte)MathUtils.Clamp(light.G * gain, 0f, 255f),

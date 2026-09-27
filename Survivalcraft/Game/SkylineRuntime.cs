@@ -201,6 +201,18 @@ namespace Game {
         /// <summary>[v0.1.15] 坡向明暗确定性自检（合成地形：平地 / 东坡 / 西坡）。</summary>
         public static string LodSlopeShadingSelfCheck() => SkylineLod.SlopeShadingSelfCheck();
 
+        /// <summary>[v0.1.19] LOD 自阴影强度（0 = 关闭，默认 0.35）。改后等下一次网格重建生效。</summary>
+        public static float LodSelfShadowStrength {
+            get => SkylineLod.SelfShadowStrength;
+            set => SkylineLod.SelfShadowStrength = Math.Clamp(value, 0f, 0.9f);
+        }
+
+        /// <summary>[v0.1.19] 自阴影统计（阴影中单元数/采样数）。</summary>
+        public static string LodSelfShadowStats() => SkylineLod.SelfShadowStats();
+
+        /// <summary>[v0.1.19] 自阴影确定性自检（高墙背光侧应判阴影）。</summary>
+        public static string LodSelfShadowSelfCheck() => SkylineLod.SelfShadowSelfCheck();
+
         /// <summary>
         /// [v0.1.17] 区块达到 Valid 时是否立刻通知超视距 LOD 补采该单元（默认 **true**）。
         /// 关闭后回到"只靠轮转游标 + 采样戳"的旧节奏，可用于 A/B（见 `notes/87`）。
