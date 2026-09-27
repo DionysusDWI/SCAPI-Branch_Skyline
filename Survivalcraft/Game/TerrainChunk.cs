@@ -229,13 +229,38 @@ namespace Game {
         public virtual int GetCellValueFast(int index) {
             SplitColumnIndex(index, out int seg, out int offset);
             int[] slice = Cells[seg];
-            return slice == null ? 0 : slice[offset];
+            if (slice == null) {
+                return UntouchedSliceValue(index);
+            }
+            return slice[offset];
+        }
+
+        /// <summary>
+        /// v0.1.9：**未租借的段**（= 该段从没写过任何东西）里，"顶面以上"的空气语义上是被天空照亮的空气
+        /// （light=15）。早先直接返回 0（无光空气）会把这一层语义丢掉：
+        ///   * 第一人称手持方块/手的取光 `Terrain.GetCellLightFast(eye)` 在高空/地表之上读到 0 → **手里方块全黑**
+        ///     （用户 2026-09-27 反馈的"高度超过 0-255 限制的光照问题"）；
+        ///   * 实体/环境的平滑取光同理偏暗。
+        /// 注意：只对"索引落在未租借段"的读取生效（热路径上只多一个 null 判断 + 一次 y 与顶面对比），
+        /// 写入侧"向未租借段写空气不租内存"的省内存策略不变（见 SetCellValueFast）。
+        /// </summary>
+        const int SkyLitAirValue = 15 << 10;                 // air + light 15（与光照系统写的值一致）
+
+        int UntouchedSliceValue(int index) {
+            int rel = index & (Height - 1);
+            int column = index >> HeightBits;                // = x + z * Size
+            int x = column & SizeMinusOne;
+            int z = column >> SizeBits;
+            return rel + MinHeight > GetTopHeightFast(x, z) ? SkyLitAirValue : 0;
         }
 
         public virtual int GetCellValueFast(int x, int y, int z) {
             int rel = y - MinHeight;
             int[] slice = Cells[rel >> 8];
-            return slice == null ? 0 : slice[(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size];
+            if (slice == null) {
+                return y > GetTopHeightFast(x, z) ? SkyLitAirValue : 0;
+            }
+            return slice[(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size];
         }
 
         public virtual int GetCellValueFast(Point3 p) => GetCellValueFast(p.X, p.Y, p.Z);
