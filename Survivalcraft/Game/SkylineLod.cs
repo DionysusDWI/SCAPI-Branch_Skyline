@@ -450,6 +450,10 @@ namespace Game {
 
         /// <summary>v0.1.6：把一组打包样本（height 在高 32 位、value 在低 32 位）排序取中位，
         /// 写入细层的高度/材质槽。</summary>
+        // [v0.1.43] 材质众数统计用的复用容器（不每次分配）
+        static readonly Dictionary<int, int> m_contentCounts = [];
+        static readonly long[] m_valueScratch = new long[TerrainChunk.Size * TerrainChunk.Size];
+
         static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, int index) {
             if (count <= 0) {
                 return;
@@ -458,7 +462,31 @@ namespace Game {
             sorted.Sort();
             long mid = sorted[count / 2];
             tops[index] = (int)(mid >> 32);
-            values[index] = (int)(uint)mid;
+            // [v0.1.43] **材质取众数**：原来取"中位高度那一列"的方块，单元内雪/石/草混杂时
+            // 那一列可能只是少数派 → 整格颜色跑偏（交接带实测材质命中率 83.6%）。
+            // 现在统计 content 频次取最高者，再从该 content 的样本里挑"中位高度"作代表；
+            // **高度仍是整体中位**，几何不变（只改材质选择）。
+            m_contentCounts.Clear();
+            for (int i = 0; i < count; i++) {
+                int contents = Terrain.ExtractContents((int)(uint)sorted[i]);
+                m_contentCounts.TryGetValue(contents, out int c);
+                m_contentCounts[contents] = c + 1;
+            }
+            int modeContents = -1;
+            int modeCount = -1;
+            foreach (KeyValuePair<int, int> kv in m_contentCounts) {
+                if (kv.Value > modeCount || (kv.Value == modeCount && kv.Key < modeContents)) {
+                    modeCount = kv.Value;
+                    modeContents = kv.Key;
+                }
+            }
+            int reps = 0;
+            for (int i = 0; i < count; i++) {
+                if (Terrain.ExtractContents((int)(uint)sorted[i]) == modeContents) {
+                    m_valueScratch[reps++] = sorted[i];
+                }
+            }
+            values[index] = reps > 0 ? (int)(uint)m_valueScratch[reps / 2] : (int)(uint)mid;
         }
 
         /// <summary>v0.1.1：重建入口——精细层（8 m，近环）+ 粗层（16 m，远环）两套网格。</summary>

@@ -3,6 +3,33 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.43] - 2026-09-27
+
+第五十三个版本：**LOD 交接带审计（可量化）+ 材质取众数** —— 把里程碑 4 里"LOD 很粗糙、材质不符"
+这条主观反馈变成逐列对照的数字，并先修掉其中的材质部分（+4.65 个百分点，几何不变）。
+
+**本版相对 v0.1.42 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（审计工具）** | `SkylineLodAudit.cs` + `SkylineLodBoundary.cs`：`skyline.LodBoundaryAudit(inner,outer,samples)`（环带）/ `skyline.LodRectAudit(x1,z1,x2,z2,samples)`（矩形，配驻留用）——环带/矩形内随机抽列，把 **LOD 单元的高度/材质**与**真实 `GetTopHeight`/顶面方块**逐列对照，输出平均/最大 \|Δh\|、\|Δh\|>1/>4 比例、**材质命中率**（细/粗层分列） |
+| **修复 B（材质取众数）** | `SkylineLod.MedianInto`：材质由"中位高度那一列的方块"改为**样本 content 频次最高的方块**（再从该 content 里挑中位高度作代表）；**高度仍取整体中位 → 几何不变** |
+
+### Verified（AgentLab；矩形 4540,9170→4660,9290；驻留 72 列；6,000 列样本）
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 平均 \|Δh\| | 1.433 m | **1.431 m**（不变） |
+| \|Δh\|>1 m / >4 m 比例 | 29.78% / 6.37% | **29.75% / 6.37%**（不变） |
+| **材质命中率** | 83.63% | **88.28%（+4.65 pp）** |
+
+**前提与坑**：128 m 外真实地形默认未加载（`GetTopHeight` 返回 MinHeight），第一次审计 `loadedColumns=0`；
+必须先 `ChunkResidencyMode=true` + `EnsureRegionLoaded` 并等 `contentsReady == chunks` 再审计（已在 `notes/116` 写成可复现步骤）。
+
+**仍存在的固有损失（如实）**：8 m 单元只有一个高度 → 平均 \|Δh\| 1.43 m、近三成列 >1 m、6.4% >4 m（山脊/树冠）。
+下一步候选：单元存 (min,max) 双高度 + 顶面用 max、skirt 拉到 min（几何改动，用本版审计工具 A/B）。
+证据：`data/sessions/skyline-v0143/`、`notes/116`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.42] - 2026-09-27
 
 第五十二个版本：**大规模建筑压测 #2 + `op:shape` 写入门禁**（桥侧修复）—— 压测顺手抓到并修掉
