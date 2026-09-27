@@ -382,6 +382,7 @@ namespace Game {
                 if (updateModificationCounter) {
                     chunkAtCell.ModificationCounter++;
                 }
+                MaintainColumnTopHeight(x, y, z, value);
                 // [v0.1.8] 超视距 LOD：把这一格所在的 16 m 单元标脏，远景低模才会跟着改（见 notes/75）
                 SkylineLod.NotifyCellChanged(x, z);
                 TerrainUpdater.DowngradeChunkNeighborhoodState(chunkAtCell.Coords, 1, TerrainChunkState.InvalidLight, false);
@@ -393,6 +394,36 @@ namespace Game {
             catch (Exception e) {
                 Log.Error($"Block behavior on terrain change execute error: {e}");
             }
+        }
+
+        /// <summary>
+        /// [v0.1.9] **就地维护列顶高度**：`chunk.Shafts` 里的"顶面高度"本来由光照阶段
+        /// （`TerrainUpdater.GenerateChunkSunLightAndHeight`）重算，但那要等区块状态机排队——
+        /// 实测编辑后约 0.3 s（负载高时可到数秒）。而**超视距 LOD**（`SkylineLod.Harvest` 用
+        /// `GetTopHeightFast`）、**寻找地表**（`Pathfinder.FindSurface`）、天气/降雪都直接读它；
+        /// 不就地维护就会出现"脏重采已经发生、读到的还是旧高度"，且之后没有第二次触发
+        /// （采样戳要等 `RefreshSeconds`）→ 用户报告的"挖/放之后 LOD 仍是旧数据"。
+        /// 这里只动"顶面"一个字段（底/阳光高度仍由光照阶段负责），语义与光照阶段一致：
+        /// * 放入非空气方块且 y 高于当前顶面 → 顶面 = y；
+        /// * 挖掉的正好是顶面 → 向下找下一个非空气方块（找不到则置 0，与光照阶段的初始值一致）。
+        /// </summary>
+        void MaintainColumnTopHeight(int x, int y, int z, int value) {
+            int top = Terrain.GetTopHeight(x, z);
+            if ((value & 0x3FF) != 0) {
+                if (y > top) {
+                    Terrain.SetTopHeight(x, z, y);
+                }
+                return;
+            }
+            if (y != top) {
+                return;                                  // 挖掉的不是列顶 → 顶面不变
+            }
+            int next = y - 1;
+            while (next >= TerrainChunk.MinHeight
+                   && (Terrain.GetCellValueFast(x, next, z) & 0x3FF) == 0) {
+                next--;
+            }
+            Terrain.SetTopHeight(x, z, next < TerrainChunk.MinHeight ? 0 : next);
         }
 
         public virtual void ChangeCellToBehavior(int x, int y, int z, int oldValue, int newValue, MovingBlock movingBlock) {

@@ -49,8 +49,10 @@ namespace Game {
         /// "顶面高度"字段），它由地形更新器的光照阶段重算——而光照阶段是**排队**跑的（实测编辑后
         /// 约 0.3 s 到位）。不等沉降就重采会采到旧顶面，而且采样戳随后会被当成"刚采过"，
         /// 一直错到保鲜期（2026-09-27 12:48 实测：顶面 0.3 s 更新、LOD 9 s+ 仍是旧值）。
+        /// v0.1.9 起 `SubsystemTerrain.ChangeCell` **就地维护顶面高度**（不等光照阶段），
+        /// 所以这里只需一个很短的安全间隔（默认 0.15 s）。
         /// </summary>
-        public static float DirtySettleSeconds { get; set; } = 0.5f;
+        public static float DirtySettleSeconds { get; set; } = 0.15f;
 
         /// <summary>
         /// 脏重采后的**复核期**（秒）：脏重采把采样戳的"保鲜起点"往后挪，使该单元在
