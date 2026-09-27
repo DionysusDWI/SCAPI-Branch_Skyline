@@ -3,6 +3,35 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.44] - 2026-09-27
+
+第五十四个版本：**LOD 基色改用采集时光照**（里程碑 4 交接带亮度）—— 近景顶点色由区块光照决定，
+而 LOD 一直用常数基色 `220`（≈光照 13），交界处因此有亮度台阶；本版把 LOD 基色改成**采集时的真实光照**。
+
+**本版相对 v0.1.43 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（光照字段）** | `SkylineLod.Cell` 增 `byte Light`；`MedianInto` 把**代表样本**的光照一并输出（打包的 `(uint)value` 已含光位，`Terrain.ExtractLight` 直接取）；粗/细层都写 |
+| **新增 B（基色）** | 网格基色 `light×17`（与游戏"光照→顶点色"同口径），再叠原有坡向/自阴影增益；开关 `skyline.LodLightFromSamples`（默认 true，false = 旧常数基色做 A/B） |
+| **存档 C（版本 2→3）** | 每项多一个 `Light` 字节；**旧版本 2 存档读回 `Light=15`**（亮度与改前一致，不会变黑），世界文件 `SkylineLod.bin` 向后兼容 |
+| **审计 D** | `SkylineLodAudit` 增加光照口径：`lightWithinOneRatio`（LOD 基色光照 vs 真实顶面光照差 ≤1 的比例）、`meanAbsLightDiff`、`maxAbsLightDiff`，以及**改前基线** `constantBaseLightWithinOneRatio` |
+
+### Verified（AgentLab；驻留 72 列；`LodRectAudit(4540,9170,4660,9290,6000)`）
+
+| 指标 | 值 |
+|---|---|
+| **`lightWithinOneRatio`（改后）** | **91.92%** |
+| **`constantBaseLightWithinOneRatio`（改前基线）** | **8.65%** |
+| `meanAbsLightDiff` / `max` | 1.028 / 15 |
+| 复核：`meanAbsHeightDiff` / `materialMatchRatio` | 1.413 m（v0.1.43：1.431）/ **88.55%**（88.28%） |
+
+**视觉 A/B 如实记录**：两个机位 off/on 的像素差只有 **160 / 232 个（>8）**——因为冬季雪原里绝大多数列真实光照是 15、
+与常数 13 只差 ~7% 亮度，且画面里 LOD 占比小；另外**旧存档单元默认 `Light=15`**，要等 Refresh 周期（默认 300 s）
+重采后才完全生效。该条的判据以审计指标为准（8.65% → 91.92%）。证据：`data/sessions/skyline-v0144/`、`notes/117`。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.43] - 2026-09-27
 
 第五十三个版本：**LOD 交接带审计（可量化）+ 材质取众数** —— 把里程碑 4 里"LOD 很粗糙、材质不符"

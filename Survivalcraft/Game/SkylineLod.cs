@@ -67,6 +67,9 @@ namespace Game {
         sealed class Cell {
             public short Height;
             public ushort Value;
+            /// <summary>[v0.1.44] 采集时该顶面方块的光照值（0..15）。近景地形顶点色由光照决定，
+            /// LOD 一直用常数基色 → 交界处出现"亮度台阶"（交接带口径，见 notes/117）。</summary>
+            public byte Light;
         }
 
         static readonly Dictionary<long, Cell> m_cells = [];
@@ -214,23 +217,23 @@ namespace Game {
                         }
                     }
                 }
-                int bestTop = int.MaxValue;
-                int bestValue = 0;
-                if (cCount > 0) {
-                    Span<long> sorted = coarseSamples.Slice(0, cCount);
-                    sorted.Sort();
-                    long mid = sorted[cCount / 2];
-                    bestTop = (int)(mid >> 32);
-                    bestValue = (int)(uint)mid;
-                }
+                Span<int> coarseTop = [int.MaxValue];
+                Span<int> coarseValue = [0];
+                Span<byte> coarseLight = [15];
+                MedianInto(coarseSamples, cCount, coarseTop, coarseValue, coarseLight, 0);
+                int bestTop = coarseTop[0];
+                int bestValue = coarseValue[0];
                 Span<int> fineTop = [int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue];
                 Span<int> fineValue = [0, 0, 0, 0];
-                MedianInto(fine0, f0, fineTop, fineValue, 0);
-                MedianInto(fine1, f1, fineTop, fineValue, 1);
-                MedianInto(fine2, f2, fineTop, fineValue, 2);
-                MedianInto(fine3, f3, fineTop, fineValue, 3);
+                Span<byte> fineLight = [15, 15, 15, 15];
+                MedianInto(fine0, f0, fineTop, fineValue, fineLight, 0);
+                MedianInto(fine1, f1, fineTop, fineValue, fineLight, 1);
+                MedianInto(fine2, f2, fineTop, fineValue, fineLight, 2);
+                MedianInto(fine3, f3, fineTop, fineValue, fineLight, 3);
                 if (bestTop != int.MaxValue) {
-                    m_cells[key] = new Cell { Height = (short)bestTop, Value = (ushort)bestValue };
+                    m_cells[key] = new Cell {
+                        Height = (short)bestTop, Value = (ushort)bestValue, Light = coarseLight[0]
+                    };
                     m_harvestedCells++;
                     m_dirty = true;
                 }
@@ -245,7 +248,9 @@ namespace Game {
                         }
                         continue;
                     }
-                    m_cellsFine[fkey] = new Cell { Height = (short)fineTop[k], Value = (ushort)fineValue[k] };
+                    m_cellsFine[fkey] = new Cell {
+                        Height = (short)fineTop[k], Value = (ushort)fineValue[k], Light = fineLight[k]
+                    };
                     m_dirty = true;
                 }
                 RecordSample(chunk, reason);          // v0.1.8：登记采样戳 + 清脏标记
@@ -454,7 +459,7 @@ namespace Game {
         static readonly Dictionary<int, int> m_contentCounts = [];
         static readonly long[] m_valueScratch = new long[TerrainChunk.Size * TerrainChunk.Size];
 
-        static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, int index) {
+        static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, Span<byte> lights, int index) {
             if (count <= 0) {
                 return;
             }
@@ -486,7 +491,10 @@ namespace Game {
                     m_valueScratch[reps++] = sorted[i];
                 }
             }
-            values[index] = reps > 0 ? (int)(uint)m_valueScratch[reps / 2] : (int)(uint)mid;
+            long representative = reps > 0 ? m_valueScratch[reps / 2] : mid;
+            values[index] = (int)(uint)representative;
+            // [v0.1.44] 光照跟着代表样本走（打包时低 32 位保留了完整 value，含 light 位）
+            lights[index] = (byte)Terrain.ExtractLight((int)(uint)representative);
         }
 
         /// <summary>v0.1.1：重建入口——精细层（8 m，近环）+ 粗层（16 m，远环）两套网格。</summary>
@@ -597,6 +605,11 @@ namespace Game {
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
                 float x0 = cx << cellShift, z0 = cz << cellShift;
                 float y = cell.Height + 1f;
+                // [v0.1.44] 基色改用**采集时的光照值**（0..15 → 0..255，与游戏光照→顶点色的口径一致）。
+                // 关掉开关即回到常数 220（= 光 13），用于 A/B（`skyline.LodLightFromSamples`）。
+                Color cellBase = SkylineRuntime.LodLightFromSamples
+                    ? new Color((byte)(cell.Light * 17), (byte)(cell.Light * 17), (byte)(cell.Light * 17))
+                    : light;
                 int contents = Terrain.ExtractContents(cell.Value);
                 int value = cell.Value;
                 Block block = BlocksManager.Blocks[contents];
@@ -609,7 +622,7 @@ namespace Game {
                 // 这里用**相邻单元高度**估该单元法线，再套游戏自己的 `LightingManager.CalculateLighting`
                 // （环境光 + 两盏方向光），得到"与游戏光照模型一致"的明暗系数 —— 这是把 LOD 接进光照的
                 // 第一步（里程碑 5 的阴影/G-buffer 之前的最小可用版本，见 notes/85）。
-                Color cellLight = light;
+                Color cellLight = cellBase;
                 if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f) {
                     float gain = SlopeShadingStrength > 0f
                         ? SlopeLightGain(dict, cx, cz, cell.Height, cellSize)
@@ -628,10 +641,10 @@ namespace Game {
                         }
                     }
                     cellLight = new Color(
-                        (byte)MathUtils.Clamp(light.R * gain, 0f, 255f),
-                        (byte)MathUtils.Clamp(light.G * gain, 0f, 255f),
-                        (byte)MathUtils.Clamp(light.B * gain, 0f, 255f),
-                        light.A
+                        (byte)MathUtils.Clamp(cellBase.R * gain, 0f, 255f),
+                        (byte)MathUtils.Clamp(cellBase.G * gain, 0f, 255f),
+                        (byte)MathUtils.Clamp(cellBase.B * gain, 0f, 255f),
+                        cellBase.A
                     );
                 }
                 BlockGeometryGenerator.SetupVertex(x0, y, z0, cellLight, u0, v0, ref vertices[vi]);
@@ -836,18 +849,20 @@ namespace Game {
             try {
                 using (var stream = Storage.OpenFile(path, OpenFileMode.Create)) {
                     var writer = new BinaryWriter(stream);
-                    writer.Write(2);                       // 版本 2：粗层 + 精细层两段
+                    writer.Write(3);                       // 版本 3：粗层 + 精细层两段，每项多一个 Light 字节
                     writer.Write(m_cells.Count);
                     foreach (KeyValuePair<long, Cell> pair in m_cells) {
                         writer.Write(pair.Key);
                         writer.Write(pair.Value.Height);
                         writer.Write(pair.Value.Value);
+                        writer.Write(pair.Value.Light);
                     }
                     writer.Write(m_cellsFine.Count);
                     foreach (KeyValuePair<long, Cell> pair in m_cellsFine) {
                         writer.Write(pair.Key);
                         writer.Write(pair.Value.Height);
                         writer.Write(pair.Value.Value);
+                        writer.Write(pair.Value.Light);
                     }
                 }
             }
@@ -876,7 +891,8 @@ namespace Game {
                         long key = reader.ReadInt64();
                         short height = reader.ReadInt16();
                         ushort value = reader.ReadUInt16();
-                        m_cells[key] = new Cell { Height = height, Value = value };
+                        byte cellLight = version >= 3 ? reader.ReadByte() : (byte)15;
+                        m_cells[key] = new Cell { Height = height, Value = value, Light = cellLight };
                     }
                     if (version >= 2) {
                         int countFine = reader.ReadInt32();
@@ -884,7 +900,8 @@ namespace Game {
                             long key = reader.ReadInt64();
                             short height = reader.ReadInt16();
                             ushort value = reader.ReadUInt16();
-                            m_cellsFine[key] = new Cell { Height = height, Value = value };
+                            byte cellLight = version >= 3 ? reader.ReadByte() : (byte)15;
+                            m_cellsFine[key] = new Cell { Height = height, Value = value, Light = cellLight };
                         }
                     }
                 }

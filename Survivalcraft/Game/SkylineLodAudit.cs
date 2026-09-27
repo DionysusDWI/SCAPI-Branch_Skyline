@@ -16,12 +16,14 @@ namespace Game {
     /// </summary>
     public static partial class SkylineLod {
         /// <summary>[v0.1.43] 只读取某列命中的 LOD 单元（先细层后粗层）。</summary>
-        public static bool TryGetCellAt(int x, int z, out int cellSize, out int height, out int contents, out bool fine) {
+        public static bool TryGetCellAt(int x, int z, out int cellSize, out int height, out int contents, out bool fine,
+                                        out int light) {
             long fineKey = Key(x >> FineShift, z >> FineShift);
             if (m_cellsFine.TryGetValue(fineKey, out Cell fineCell)) {
                 cellSize = FineSize;
                 height = fineCell.Height;
                 contents = Terrain.ExtractContents(fineCell.Value);
+                light = fineCell.Light;
                 fine = true;
                 return true;
             }
@@ -30,14 +32,21 @@ namespace Game {
                 cellSize = CellSize;
                 height = coarseCell.Height;
                 contents = Terrain.ExtractContents(coarseCell.Value);
+                light = coarseCell.Light;
                 fine = false;
                 return true;
             }
             cellSize = 0;
             height = 0;
             contents = 0;
+            light = 0;
             fine = false;
             return false;
+        }
+
+        /// <summary>旧签名（无光照）——保持兼容。</summary>
+        public static bool TryGetCellAt(int x, int z, out int cellSize, out int height, out int contents, out bool fine) {
+            return TryGetCellAt(x, z, out cellSize, out height, out contents, out fine, out _);
         }
 
         /// <summary>[v0.1.43] 交接带审计：环带 `[inner, outer]` 米内随机抽列，与真实地形逐列对照。</summary>
@@ -70,6 +79,8 @@ namespace Game {
                 int materialChecked = 0, materialMatch = 0;
                 int fineMaterialChecked = 0, fineMaterialMatch = 0;
                 int coarseMaterialChecked = 0, coarseMaterialMatch = 0;
+                int lightChecked = 0, lightMatch = 0, lightSumAbs = 0, maxLightDiff = 0;
+                int constant13Match = 0;      // [v0.1.44] "常数基色"（220 ≈ 光 13）与真实光照的吻合度 = 改前基线
                 for (int i = 0; i < n; i++) {
                     int x, z;
                     if (rect.HasValue) {
@@ -88,7 +99,8 @@ namespace Game {
                     }
                     loadedColumns++;
                     int realContents = Terrain.ExtractContents(terrain.GetCellValue(x, realTop, z));
-                    if (!TryGetCellAt(x, z, out int cellSize, out int lodHeight, out int lodContents, out bool fine)) {
+                    if (!TryGetCellAt(x, z, out int cellSize, out int lodHeight, out int lodContents, out bool fine,
+                                      out int lodLight)) {
                         continue;
                     }
                     lodHits++;
@@ -114,6 +126,20 @@ namespace Game {
                     bool match = lodContents == realContents;
                     if (match) {
                         materialMatch++;
+                    }
+                    // [v0.1.44] 光照口径：LOD 单元记录的光照 vs 真实顶面光照（近景顶点色由它决定）
+                    int realLight = Terrain.ExtractLight(terrain.GetCellValue(x, realTop, z));
+                    lightChecked++;
+                    int lightDiff = Math.Abs(lodLight - realLight);
+                    lightSumAbs += lightDiff;
+                    if (lightDiff > maxLightDiff) {
+                        maxLightDiff = lightDiff;
+                    }
+                    if (lightDiff <= 1) {
+                        lightMatch++;
+                    }
+                    if (Math.Abs(realLight - 13) <= 1) {
+                        constant13Match++;
                     }
                     if (fine) {
                         fineMaterialChecked++;
@@ -152,6 +178,14 @@ namespace Game {
                     ? Math.Round((double)fineMaterialMatch / fineMaterialChecked, 4) : 0;
                 result["coarseMaterialMatchRatio"] = coarseMaterialChecked > 0
                     ? Math.Round((double)coarseMaterialMatch / coarseMaterialChecked, 4) : 0;
+                result["lightWithinOneRatio"] = lightChecked > 0
+                    ? Math.Round((double)lightMatch / lightChecked, 4) : 0;
+                result["meanAbsLightDiff"] = lightChecked > 0
+                    ? Math.Round((double)lightSumAbs / lightChecked, 3) : 0;
+                result["maxAbsLightDiff"] = maxLightDiff;
+                result["constantBaseLightWithinOneRatio"] = lightChecked > 0
+                    ? Math.Round((double)constant13Match / lightChecked, 4) : 0;
+                result["constantBaseLightNote"] = "改前基线：LOD 基色是常数 220（≈光照 13），这里给出\"真实光照落在 13±1\"的比例";
                 result["note"] = "高度=LOD 单元记录值 vs 真实 GetTopHeight；材质=单元方块 vs 真实顶面方块";
             }
             catch (Exception e) {
