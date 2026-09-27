@@ -101,5 +101,44 @@ namespace Game {
                 Log.Warning($"SkylineLod.DrawWithShader: {e.Message}");
             }
         }
+
+        /// <summary>
+        /// [v0.1.32] 取证接口：抽出若干"距 (centerX,centerZ) 在 [minDist,maxDist] 米内"的 LOD 单元
+        /// （粗层 `m_cells`，正是当前网格的数据源）。用于 GPU 深度图自检：
+        /// 把单元的顶面点投影进深度图，与 CPU 公式算出的深度对照。
+        /// 返回 JSON 数组：[{ cx, cz, cellSize, height, contents }]。
+        /// </summary>
+        public static string ProbeCells(float centerX, float centerZ, float minDist, float maxDist, int max) {
+            System.Text.Json.Nodes.JsonArray list = [];
+            int cellSize = CellSize;
+            float min2 = minDist * minDist;
+            float max2 = maxDist * maxDist;
+            int limit = Math.Max(1, max);
+            int count = 0;
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                if (count >= limit) {
+                    break;
+                }
+                int cx = (int)(kv.Key >> 32);
+                int cz = (int)(kv.Key & 0xFFFFFFFF);
+                float wx = cx * cellSize + cellSize * 0.5f;
+                float wz = cz * cellSize + cellSize * 0.5f;
+                float dx = wx - centerX;
+                float dz = wz - centerZ;
+                float d2 = dx * dx + dz * dz;
+                if (d2 < min2 || d2 > max2) {
+                    continue;
+                }
+                list.Add(new System.Text.Json.Nodes.JsonObject {
+                    ["cx"] = cx,
+                    ["cz"] = cz,
+                    ["cellSize"] = cellSize,
+                    ["height"] = kv.Value.Height,
+                    ["contents"] = Terrain.ExtractContents(kv.Value.Value)
+                });
+                count++;
+            }
+            return list.ToJsonString();
+        }
     }
 }

@@ -3,6 +3,32 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.32] - 2026-09-27
+
+第四十二个版本：**GPU 阴影贴图第一步 —— 自编译深度 shader + 太阳视角深度图（逐点自检）**。
+
+**本版相对 v0.1.31 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（自编译 shader）** | 证实 `Engine.Graphics.Shader` 可直接用**字符串源码**构造（`new Shader(vsh,psh)`；`ShaderCodeManager.GetFast` 只是取文本的一条途径）→ **自定义 pass 无需改 Content.zip**；`SkylineGpuShadow.cs` 内嵌 vsh/psh（HLSL+GLSL 双份）。踩坑：GLSL 片元必须显式 `#ifdef GL_ES precision mediump float; #endif`（首轮编译失败即此因） |
+| **新增 B（深度图 pass）** | 太阳正交相机（`eye=center+sun·distance`、`CreateOrthographic(2R,2R,1,4·distance)`）画 LOD 粗+细网格；深度**与矩阵约定无关**：`d = dot(eye − worldPos, sunDir)` 归一化到 `[0,1]` 写进颜色（背景清 1）；`skyline.GpuShadowEnabled/Size(1024)/Radius(512)`、`GpuShadowCapture()`、`GpuShadowSavePng()` |
+| **新增 C（逐点自检）** | 从 LOD 粗层单元抽 6 个（150~400 m 环带，保证在网格里）→ 同点投影进深度图 → 与 CPU 公式对照；**6/6 absErr=0** |
+| **新增 D（取证接口）** | `SkylineLod.ProbeCells(centerX,centerZ,minDist,maxDist,max)`：抽"确实在当前网格里的"单元（自检采样点两次踩坑的产物：近处点/未加载远点都会落到背景） |
+
+### Verified
+
+| 项 | 值 |
+|---|---|
+| 覆盖 | **13.02%**（136,537 px / 1024²） |
+| 深度范围 | min 118 / max 173 / mean 146.3（8 bit，depthMax=4096 m） |
+| 逐点自检 | **6/6，absErr = 0**（例：cell(262,544) top=69 → expected 147 / map 147） |
+| 耗时 | **133.6 ms/次**（含 1024² 回读，按需 pass） |
+| fps | 30.1（不受影响） |
+| PNG | `ScreenCapture/skyline-gpushadow-20260927-154015.png`：太阳视角 LOD 岛屿 + 中间空洞（= 网格刻意跳过的 ≤视距+8 m 近景区 → 下一步把真实区块也画进深度图） |
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.31] - 2026-09-27
 
 第四十一个版本：**家具"透明但有碰撞"诊断（用户报告 bug 的机制确认）** + 地形阴影"随太阳重烘焙"预留。
