@@ -248,6 +248,21 @@ namespace Game {
             }
             return shell;
         }
+
+        /// <summary>
+        /// [v0.1.57] 空壳判定：**顶面所有列都空**即视为空。
+        /// 存档用它当"删除标记（墓碑）"——追加式存档里"后面的记录覆盖前面的"，写一条空壳就等于删掉那个立方体。
+        /// </summary>
+        public bool IsEmpty {
+            get {
+                for (int i = 0; i < GridCells; i++) {
+                    if (TopContents[i] != 0) {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
     }
 
     /// <summary>`CubeSurface32` 的桥接口与自检（`skyline.CubeSurface*`）。</summary>

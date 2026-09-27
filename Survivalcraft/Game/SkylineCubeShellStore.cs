@@ -84,6 +84,16 @@ namespace Game {
         const int SaveVersion = 1;
         /// <summary>一条记录的字节数：3×int 坐标（12 B）+ 壳（16,384 B）。</summary>
         public const int RecordBytes = 12 + CubeSurface32.SerializedBytes;
+        /// <summary>[v0.1.57] 删除标记（墓碑）用的全零壳。</summary>
+        static readonly CubeSurface32 m_emptyShell = new(0, 0, 0);
+        static readonly HashSet<(int Cx, int Cy, int Cz)> m_dirtyCubes = [];
+        static readonly HashSet<(int Cx, int Cy, int Cz)> m_tombstones = [];
+        static bool m_appendMode;
+        static bool m_fileHeaderValid;
+        static int m_fileRecords;
+        static long m_appendedRecords;
+        static long m_appendedBytes;
+        static long m_tombstonesWritten;
         static string m_worldDir, m_shellPath, m_saveTempPath;
         static Stream m_saveStream;
         static BinaryWriter m_saveWriter;
@@ -96,6 +106,13 @@ namespace Game {
         public static bool Dirty => m_dirty;
         public static long SavedRecordsTotal { get; private set; }
         public static long LoadedRecordsTotal { get; private set; }
+        public static long AppendedRecordsTotal => m_appendedRecords;
+        public static long AppendedBytes => m_appendedBytes;
+        public static long CompactRewrites => m_compactRewrites;
+        public static long TombstonesWritten => m_tombstonesWritten;
+        public static long TombstonesLoaded { get; private set; }
+        public static int FileRecords => m_fileRecords;
+        static long m_compactRewrites;
         public static double LastSaveMs { get; private set; }
         public static double LastLoadMs { get; private set; }
         public static long FileBytes { get; private set; }
@@ -283,7 +300,7 @@ namespace Game {
                 m_entries[key] = new Entry { Shell = shell, LastUsed = Time.RealTime };
                 HarvestedTotal++;
                 HarvestedOnValid++;
-                MarkDirty();
+                MarkCubeDirty(key);                  // [v0.1.57] 只把这一条标脏（增量存档）
                 budget--;
             }
             LastPendingMs = watch.Elapsed.TotalMilliseconds;
@@ -420,6 +437,7 @@ namespace Game {
                         }
                         m_entries[key] = new Entry { Shell = shell, LastUsed = Time.RealTime };
                         HarvestedTotal++;
+                        MarkCubeDirty(key);              // [v0.1.57] 增量存档只写这一条
                         budget--;
                         if (m_queued.Add(key)) {
                             m_meshQueue.Enqueue(key);
@@ -522,6 +540,11 @@ namespace Game {
                 || (RequireNeighborsWhenCovered && BandCoverage >= MinBandCoverage);
         }
 
+        /// <summary>[v0.1.57] 立刻按当前上限淘汰（取证用 `skyline.CubeShellEvictTo`）。</summary>
+        public static void EvictNow() {
+            EvictIfNeeded();
+        }
+
         static void EvictIfNeeded() {
             if (m_entries.Count <= MaxCubes) {
                 return;
@@ -533,6 +556,7 @@ namespace Game {
             for (int i = 0; i < drop && i < list.Count; i++) {
                 list[i].Value.Mesh?.Dispose();
                 m_entries.Remove(list[i].Key);
+                MarkCubeRemoved(list[i].Key);        // [v0.1.57] 淘汰 → 存档写墓碑
                 EvictedTotal++;
             }
             MarkDirty();
@@ -670,11 +694,27 @@ namespace Game {
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
                 kv.Value.Mesh?.Dispose();
             }
+            // [v0.1.57] 清空要留下"墓碑"，否则旧档里的记录会在下次读档时又冒出来
+            foreach ((int Cx, int Cy, int Cz) key in m_entries.Keys) {
+                m_tombstones.Add(key);
+            }
             m_entries.Clear();
             m_meshQueue.Clear();
             m_queued.Clear();
+            m_dirtyCubes.Clear();
             MeshVertexBytes = 0;
             MarkDirty();
+        }
+
+        /// <summary>[v0.1.57] 去掉一个立方体（LRU 淘汰 / 取证用 `skyline.CubeShellForget`）。</summary>
+        public static bool Forget((int Cx, int Cy, int Cz) key) {
+            if (!m_entries.TryGetValue(key, out Entry entry)) {
+                return false;
+            }
+            entry.Mesh?.Dispose();
+            m_entries.Remove(key);
+            MarkCubeRemoved(key);
+            return true;
         }
 
         // ---------------- 存档 P4：懒切世界 + 分帧增量写（v0.1.53） ----------------
@@ -698,22 +738,66 @@ namespace Game {
             m_dirty = true;
         }
 
-        /// <summary>开始一次增量存档：只写头 + 排队，正文在 `SaveTick` 里按预算分批写。</summary>
+        /// <summary>[v0.1.57] 记下"这个立方体变了"（主线程；增量存档只写它）。</summary>
+        static void MarkCubeDirty((int Cx, int Cy, int Cz) key) {
+            m_dirtyCubes.Add(key);
+            m_tombstones.Remove(key);
+            m_dirty = true;
+        }
+
+        /// <summary>[v0.1.57] 记下"这个立方体没了"（淘汰/忘记）——存档写一条**全零壳**当作删除标记。</summary>
+        static void MarkCubeRemoved((int Cx, int Cy, int Cz) key) {
+            m_dirtyCubes.Remove(key);
+            m_tombstones.Add(key);
+            m_dirty = true;
+        }
+
+        /// <summary>
+        /// [v0.1.53 全量重写 → **v0.1.57 增量的追加写**]
+        /// 只有存过档、且"要改的记录数"不到文件里一半时，才走**追加**：
+        /// 打开正式文件 seek 到末尾，只写脏立方体（+ 被淘汰的写成"全零壳"墓碑），最后把头上的记录数改掉；
+        /// 否则（首次 / 改动过半）走**全量重写**：写临时文件再安全换名。
+        /// 读档侧天然支持追加：按顺序读，**后面的记录覆盖前面的**，全零壳 = 删除。
+        /// </summary>
         static void StartSave() {
             string path = EnsureWorld();
             if (path == null) {
                 return;
             }
-            m_saveQueue = [.. m_entries.Keys];
+            int pending = m_dirtyCubes.Count + m_tombstones.Count;
+            if (pending == 0) {
+                m_dirty = false;                       // 没有要写的：别开档
+                return;
+            }
+            bool append = m_fileHeaderValid && m_fileRecords > 0
+                && pending * 2 < Math.Max(64, m_fileRecords);
+            m_appendMode = append;
+            m_saveQueue = [];
+            if (append) {
+                m_saveQueue.AddRange(m_tombstones);    // 墓碑先写（保险：删除先落地）
+                m_saveQueue.AddRange(m_dirtyCubes);
+            }
+            else {
+                m_saveQueue.AddRange(m_entries.Keys);
+            }
             m_saveTotal = m_saveQueue.Count;
             m_saveWritten = 0;
-            m_saveTempPath = path + ".tmp";
             try {
-                m_saveStream = Storage.OpenFile(m_saveTempPath, OpenFileMode.Create);
+                if (append) {
+                    m_saveStream = Storage.OpenFile(path, OpenFileMode.ReadWrite);
+                    m_saveStream.Seek(0, SeekOrigin.End);
+                }
+                else {
+                    m_saveTempPath = path + ".tmp";
+                    m_saveStream = Storage.OpenFile(m_saveTempPath, OpenFileMode.Create);
+                }
                 m_saveWriter = new BinaryWriter(m_saveStream);
-                m_saveWriter.Write(SaveMagic);
-                m_saveWriter.Write(SaveVersion);
-                m_saveWriter.Write(m_saveTotal);
+                if (!append) {
+                    m_saveWriter.Write(SaveMagic);
+                    m_saveWriter.Write(SaveVersion);
+                    m_saveWriter.Write(m_saveTotal);
+                    m_compactRewrites++;
+                }
             }
             catch (Exception e) {
                 PersistenceError = e.Message;
@@ -744,13 +828,18 @@ namespace Game {
                 while (budget-- > 0 && m_saveQueue.Count > 0) {
                     (int Cx, int Cy, int Cz) key = m_saveQueue[^1];
                     m_saveQueue.RemoveAt(m_saveQueue.Count - 1);
-                    if (!m_entries.TryGetValue(key, out Entry entry)) {
-                        continue;                        // 期间被淘汰：不写这条（Load 侧按实际写入量容错）
-                    }
                     m_saveWriter.Write(key.Cx);
                     m_saveWriter.Write(key.Cy);
                     m_saveWriter.Write(key.Cz);
-                    entry.Shell.WriteTo(m_saveWriter);
+                    if (m_entries.TryGetValue(key, out Entry entry)) {
+                        entry.Shell.WriteTo(m_saveWriter);
+                    }
+                    else {
+                        // [v0.1.57] 墓碑：这个立方体没了（淘汰/忘记）→ 写一条**全零壳**当删除标记，
+                        // 读档侧按"后面的记录覆盖前面的、全零壳即删除"处理。
+                        m_emptyShell.WriteTo(m_saveWriter);
+                        m_tombstonesWritten++;
+                    }
                     m_saveWritten++;
                 }
                 if (m_saveQueue.Count == 0) {
@@ -767,14 +856,29 @@ namespace Game {
             Stopwatch watch = Stopwatch.StartNew();
             try {
                 m_saveWriter.Flush();
+                if (m_appendMode) {
+                    // 追加：把头上的"记录总数"改掉（magic 4 + version 4 → 偏移 8）
+                    int total = m_fileRecords + m_saveWritten;
+                    m_saveStream.Seek(8, SeekOrigin.Begin);
+                    m_saveWriter.Write(total);
+                    m_saveWriter.Flush();
+                    m_fileRecords = total;
+                    m_appendedRecords += m_saveWritten;
+                    m_appendedBytes += (long)m_saveWritten * RecordBytes;
+                }
                 m_saveWriter.Dispose();
                 m_saveStream.Dispose();
                 m_saveStream = null;
                 m_saveWriter = null;
-                Storage.MoveFileSafely(m_saveTempPath, m_shellPath);   // 覆盖旧档（先写临时文件再换名）
-                // 每条记录 = 12 B 坐标（3×int）+ 16,384 B 壳；整个文件 = 12 B 头 + N 条
-                FileBytes = 12L + (long)m_saveWritten * RecordBytes;
+                if (!m_appendMode) {
+                    Storage.MoveFileSafely(m_saveTempPath, m_shellPath);   // 覆盖旧档（先写临时文件再换名）
+                    m_fileRecords = m_saveWritten;
+                }
+                m_fileHeaderValid = true;
+                FileBytes = 12L + (long)m_fileRecords * RecordBytes;
                 m_dirty = false;
+                m_dirtyCubes.Clear();
+                m_tombstones.Clear();
                 SavedRecordsTotal += m_saveWritten;
             }
             catch (Exception e) {
@@ -818,8 +922,11 @@ namespace Game {
                     int count = reader.ReadInt32();
                     if (magic != SaveMagic || version != SaveVersion) {
                         PersistenceError = $"bad header magic={magic:x8} version={version}";
+                        m_fileHeaderValid = false;
                         return;
                     }
+                    m_fileHeaderValid = true;
+                    TombstonesLoaded = 0;
                     for (int i = 0; i < count; i++) {
                         int cx, cy, cz;
                         try {
@@ -831,14 +938,26 @@ namespace Game {
                             break;                    // 上次写一半就被打断：读到哪算哪
                         }
                         CubeSurface32 shell = CubeSurface32.ReadFrom(reader);
+                        // [v0.1.57] 追加式存档：**后面的记录覆盖前面的**；全零壳 = 删除标记
+                        if (shell.IsEmpty) {
+                            m_entries.Remove((cx, cy, cz));
+                            TombstonesLoaded++;
+                            continue;
+                        }
                         m_entries[(cx, cy, cz)] = new Entry { Shell = shell, LastUsed = 0 };
                         LoadedRecordsTotal++;
                     }
+                    m_fileRecords = count;
                 }
                 // 注意：`path` 是引擎虚拟路径（`app:/doc/...`），不能用 `FileInfo` 取长度
-                // （实测报"文件名、目录名或卷标语法不正确"）→ 按本格式自己算：12 B 头 + N 条 × 16,396 B。
-                FileBytes = 12L + LoadedRecordsTotal * RecordBytes;
+                // （实测报"文件名、目录名或卷标语法不正确"）→ 优先用 `Storage.GetFileSize`，退化为按格式自算。
+                FileBytes = Storage.GetFileSize(path);
+                if (FileBytes <= 0) {
+                    FileBytes = 12L + m_fileRecords * RecordBytes;
+                }
                 m_dirty = false;
+                m_dirtyCubes.Clear();
+                m_tombstones.Clear();
             }
             catch (Exception e) {
                 PersistenceError = e.Message;
@@ -897,6 +1016,17 @@ namespace Game {
                 ["saveTotal"] = m_saveTotal,
                 ["savedRecordsTotal"] = SavedRecordsTotal,
                 ["loadedRecordsTotal"] = LoadedRecordsTotal,
+                ["fileRecords"] = m_fileRecords,
+                ["appendedRecordsTotal"] = m_appendedRecords,
+                ["appendedBytes"] = m_appendedBytes,
+                ["appendedMiB"] = Math.Round(m_appendedBytes / 1048576.0, 3),
+                ["compactRewrites"] = m_compactRewrites,
+                ["tombstonesWritten"] = m_tombstonesWritten,
+                ["tombstonesLoaded"] = TombstonesLoaded,
+                ["dirtyCubes"] = m_dirtyCubes.Count,
+                ["pendingTombstones"] = m_tombstones.Count,
+                ["appendMode"] = m_appendMode,
+                ["fileHeaderValid"] = m_fileHeaderValid,
                 ["lastSaveMs"] = Math.Round(LastSaveMs, 2),
                 ["lastLoadMs"] = Math.Round(LastLoadMs, 2),
                 ["recordsPerTick"] = SaveRecordsPerTick,
@@ -1189,6 +1319,34 @@ namespace Game {
 
         /// <summary>[v0.1.53] 存档状态：路径 / 文件字节 / 立方体数 / **整仓摘要** / 上次存取耗时。</summary>
         public static string CubeShellPersistence() => SkylineCubeShellStore.Persistence();
+
+        /// <summary>
+        /// [v0.1.57] 取证用：从壳仓里**去掉**一个立方体（会写一条"墓碑"记录，读档时等于删除）。
+        /// 正常路径上只有 LRU 淘汰会走到这里。
+        /// </summary>
+        public static string CubeShellForget(int cx, int cy, int cz) {
+            bool removed = SkylineCubeShellStore.Forget((cx, cy, cz));
+            return new System.Text.Json.Nodes.JsonObject {
+                ["ok"] = removed,
+                ["cube"] = new System.Text.Json.Nodes.JsonArray(cx, cy, cz),
+                ["cubes"] = SkylineCubeShellStore.CubeCount
+            }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.57] 取证用：把壳仓**淘汰到最多 N 个**（走 LRU 淘汰，每个淘汰都会写墓碑）。
+        /// 用来验证"改动过半 → 压缩重写"这条分支。`n &lt; 0` 表示恢复默认上限。
+        /// </summary>
+        public static string CubeShellEvictTo(int n) {
+            if (n >= 0) {
+                SkylineCubeShellStore.MaxCubes = n;
+                SkylineCubeShellStore.EvictNow();
+            }
+            else {
+                SkylineCubeShellStore.MaxCubes = 4096;
+            }
+            return SkylineCubeShellStore.Survey();
+        }
 
         /// <summary>[v0.1.53] 整仓摘要（重启前后比对用）。</summary>
         public static string CubeShellHash() => SkylineCubeShellStore.Hash();
