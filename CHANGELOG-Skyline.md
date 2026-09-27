@@ -7,6 +7,57 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.95] - 2026-09-28
+
+第一百零二个版本：**修一条正在变空的判据** —— `lod-attr-selfcheck` 必须"有东西可比"。
+这是 v0.1.94 跑门禁时暴露出来的：那条判据**没坏，是被前面的工作把"被判据的对象"挤没了**。
+
+### 发现
+
+v0.1.94 的门禁在 65 格塔上出现 **SKIP**：
+
+```
+[SKIP ] lod-attr-selfcheck  comparedPixels=0（当前视角没有 LOD 几何）→ 判据无效
+```
+
+回到地面变成 **PASS 但只比了 6 个像素**（`gt8=0/6`）。一条"GPU 与 CPU 两条路径必须一致"的判据，
+**只比 6 个像素**就宣布通过 —— 那是**空判据**，不是证据。
+
+### 根因
+
+`RestrictLod`（v0.1.51 起）让远景 LOD 在**有壳的立方体上让位**；而壳层覆盖率一路上涨
+（v0.1.85 的 16 m 粒度 + v0.1.94 的视锥剔除让该画的远处壳都画上）⇒ **画面里属于 LOD 的部分越来越小**，
+自检渲染出的 LOD 层几乎没有像素可采。
+
+### 改动
+
+* `SkylineLodAttrs.AttrSelfCheck`：自检期间**临时**把 `SkylineCubeShellStore.RestrictLod` 置 `false`
+  （让 LOD 把整条带画出来），结束时（**含异常路径**）连同网格一起还原；
+* `regression-skyline.py`：`lod-attr-selfcheck` 增加**样本门槛** —— `comparedPixels < 512` ⇒ **SKIP**
+  并在详情里提示"样本不足以支撑结论，检查 `RestrictLod`/LOD 网格是否又被盖住"；
+* `skyline-v0177-lod-gpu-shading.py`：`comparedPixels < 512` ⇒ **直接报失败**（不再"通过"）。
+
+### 实测（样本量回到千级）
+
+| 位姿 | 修前 | 修后 |
+|---|---|---|
+| 地面平视 | PASS，但**只比 6 px** | **2,174 px**（`gpuVsCpu` mean 0.94 / max 1） |
+| 65 格塔上（−12°） | **SKIP**（`comparedPixels=0`） | **7,369 px**（mean 0.648 / max 1） |
+
+### 没做 / 注意
+
+* 这是**测试脚手架**改动：生产渲染路径没变，只在自检那 ~100 ms 内临时不启用 `RestrictLod`；
+* 阈值 512 是实测（6 → 2,174/7,369）之后定的门槛，不是拟合值；若将来 LOD 层被完全取代，
+  这条判据应当**删掉或换样本源**，而不是一直用阈值吊着。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；塔上位姿单独复跑亦 **PASS**；
+* 功能验收巡检 **PASS 13 / FAIL 0**；
+* 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0195/`（`regression.json`、`regression-tower.json`、`sweep-final/`）、`notes/171`。
+
 ## [v0.1.94] - 2026-09-28
 
 第一百零一个版本：**壳绘制的视锥剔除** —— 把绘制预算从"整圈环带"收回到"画面里那一片"。

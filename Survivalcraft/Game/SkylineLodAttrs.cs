@@ -129,6 +129,12 @@ namespace Game {
             bool savedShader = SkylineRuntime.LodAttrShaderOn;
             float savedSlope = SkylineLod.SlopeShadingStrength;
             float savedShadow = SkylineLod.SelfShadowStrength;
+            // [v0.1.95] 自检**必须能看到 LOD 几何**，否则它是一条"空判据"：
+            //   `RestrictLod`（v0.1.51 起）让 LOD 在"有壳的立方体"上**让位**，而壳层覆盖越来越完整
+            //   ⇒ 平视时画面里几乎没有 LOD 可采。实测（v0.1.94 门禁）：塔上 `comparedPixels=0`（direct SKIP）、
+            //   地面 `PASS` 但**只比了 6 个像素** —— 那是"没东西可比的通过"，不是"两路一致"的证据。
+            //   这里在自检期间临时关掉它，让 LOD 把整条带画出来；结束时**连网格一起还原**。
+            bool savedRestrictLod = SkylineCubeShellStore.RestrictLod;
             try {
                 Camera camera = ActiveCamera;
                 if (camera == null) {
@@ -137,6 +143,7 @@ namespace Game {
                     return result.ToJsonString();
                 }
                 size = Math.Clamp(size <= 0 ? 256 : size, 64, Math.Min(Display.MaxTextureSize, 1024));
+                SkylineCubeShellStore.RestrictLod = false;
                 SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层
                 SkylineLod.SelfShadowStrength = 0f;
                 SkylineRuntime.LodAttrShaderOn = false;
@@ -173,6 +180,7 @@ namespace Game {
                 SkylineRuntime.LodAttrShaderOn = savedShader;
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
+                SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 RebuildNow();
                 if (attrImage == null || bakedImage == null || gpuImage == null) {
                     result["ok"] = false;
@@ -220,6 +228,7 @@ namespace Game {
                 SkylineRuntime.LodAttrShaderOn = savedShader;
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
+                SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;
