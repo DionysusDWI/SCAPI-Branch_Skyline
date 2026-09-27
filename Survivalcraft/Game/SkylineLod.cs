@@ -21,7 +21,7 @@ namespace Game {
     /// 已知限制（写进 notes/66）：单元内只保留"一个采样列"的高度与材质（粗糙）；跨单元只做裙边、不做真正的
     /// 多级 LOD 树；尚未与 `SkylineRender` 的占位球联动（家具在远景层里不单独渲染）。
     /// </summary>
-    public static class SkylineLod {
+    public static partial class SkylineLod {
         public const int CellShift = 4;                 // 16 格/单元
         public const int CellSize = 1 << CellShift;
         // v0.1.1：**精细层**——视距外近环用 8 m 单元（用户反馈"128 格视距下 LOD 非常粗糙"）。
@@ -99,6 +99,7 @@ namespace Game {
         public static void Reset() {
             m_cells.Clear();
             m_cellsFine.Clear();
+            ResetRefreshState();          // v0.1.8：采样戳/脏集合与单元数据同生命周期
             m_indexCount = 0;
             m_cellsInMesh = 0;
             m_indexCountFine = 0;
@@ -156,11 +157,35 @@ namespace Game {
             Span<long> fine1 = stackalloc long[64];
             Span<long> fine2 = stackalloc long[64];
             Span<long> fine3 = stackalloc long[64];
-            for (int n = 0; n < Math.Max(ChunksPerTick, 1); n++) {
-                m_harvestCursor = (m_harvestCursor + 1) % chunks.Length;
-                TerrainChunk chunk = chunks[m_harvestCursor];
-                if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
-                    continue;
+            // v0.1.8：脏重采（推通道）**不挤占**轮转采集的预算。原来两者共用一个预算，
+            // 一旦脏队列被"世界加载期的一批内容变更 / 大编辑"堆起来就要排队好几秒
+            // （12:45 实测：目标单元 7.2 s 才刷新，超出 1 s 判据）。现在：
+            //   本轮 = 最多 DirtyChunksPerTick 个脏重采 + 最多 ChunksPerTick 个轮转采集。
+            int rotationBudget = Math.Max(ChunksPerTick, 1);
+            int dirtyBudget = Math.Max(DirtyChunksPerTick, 0);
+            int rotationUsed = 0;
+            int dirtyUsed = 0;
+            for (int n = 0; n < rotationBudget + dirtyBudget; n++) {
+                TerrainChunk chunk;
+                ResampleReason reason;
+                if (dirtyUsed < dirtyBudget && TryTakeDirtyChunk(terrain, out chunk, out reason)) {
+                    dirtyUsed++;
+                }
+                else if (rotationUsed < rotationBudget) {
+                    rotationUsed++;
+                    m_harvestCursor = (m_harvestCursor + 1) % chunks.Length;
+                    chunk = chunks[m_harvestCursor];
+                    if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
+                        continue;
+                    }
+                    // v0.1.8：旧逻辑"粗层+细层都在字典里就跳过"→ 采过就永不重采（LOD 失效根因）。
+                    reason = NeedsResample(chunk);
+                    if (reason == ResampleReason.None) {
+                        continue;
+                    }
+                }
+                else {
+                    break;
                 }
                 // v0.1.0 改进（2026-09-27）：一个 16 m 单元原来只取"第一列"的高度，
                 // 采样落到树冠上时整格被抬高成"浮空平板"（取证 data/sessions/skyline-v010/lod-verify/post3）。
@@ -168,21 +193,6 @@ namespace Game {
                 int cx0 = chunk.Origin.X >> CellShift;
                 int cz0 = chunk.Origin.Y >> CellShift;
                 long key = Key(cx0, cz0);
-                // v0.1.1：粗层与 4 个细层子单元**都齐了**才跳过——否则补采缺的那层
-                // （v0.1.0 的旧数据只有粗层，升级后必须能补齐 8 m 精细层）。
-                bool coarseDone = m_cells.ContainsKey(key);
-                bool fineDone = true;
-                if (coarseDone) {
-                    for (int k = 0; k < 4; k++) {
-                        if (!m_cellsFine.ContainsKey(Key(cx0 * 2 + (k & 1), cz0 * 2 + (k >> 1)))) {
-                            fineDone = false;
-                            break;
-                        }
-                    }
-                    if (fineDone) {
-                        continue;
-                    }
-                }
                 // v0.1.6：采样从"最低顶面"改为**中位高度**——"最低"会被单个深坑拉低
                 // （整片地形画成下沉平板），中位对树冠/坑洞都稳健。一次扫描把每列的
                 // (height<<32|value) 打包进 5 组样本（粗层 256 + 4 个细子块各 64），
@@ -224,17 +234,21 @@ namespace Game {
                     m_harvestedCells++;
                     m_dirty = true;
                 }
+                else if (RemoveEmptiedCells && m_cells.Remove(key)) {
+                    m_dirty = true;                       // 整格被清空（默认关；见 SkylineLodRefresh.RemoveEmptiedCells）
+                }
                 for (int k = 0; k < 4; k++) {
-                    if (fineTop[k] == int.MaxValue) {
-                        continue;
-                    }
                     long fkey = Key(cx0 * 2 + (k & 1), cz0 * 2 + (k >> 1));
-                    if (m_cellsFine.ContainsKey(fkey)) {
+                    if (fineTop[k] == int.MaxValue) {
+                        if (RemoveEmptiedCells && m_cellsFine.Remove(fkey)) {
+                            m_dirty = true;
+                        }
                         continue;
                     }
                     m_cellsFine[fkey] = new Cell { Height = (short)fineTop[k], Value = (ushort)fineValue[k] };
                     m_dirty = true;
                 }
+                RecordSample(chunk, reason);          // v0.1.8：登记采样戳 + 清脏标记
             }
         }
 
@@ -586,6 +600,7 @@ namespace Game {
             // 上一个世界的内存数据（原来 `return` 在 `Clear` 之前，导致跨世界污染）。
             m_cells.Clear();
             m_cellsFine.Clear();
+            ResetRefreshState();          // v0.1.8：切世界/重载时不带旧采样戳与脏集合
             if (path == null || !Storage.FileExists(path)) {
                 m_dirty = true;
                 return;
@@ -625,7 +640,7 @@ namespace Game {
             $"lod:enabled={Enabled} cells={m_cells.Count}(+{m_cellsFine.Count}f) "
             + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f) indices={m_indexCount}(+{m_indexCountFine}f) "
             + $"radius={RadiusMetres:0}m cell={CellSize}/{FineSize} rebuilds={m_rebuilds} "
-            + $"err={(m_lastError.Length > 0 ? m_lastError : "-")}";
+            + $"err={(m_lastError.Length > 0 ? m_lastError : "-")} " + RefreshDescribe();
 
         public static string Survey() {
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
@@ -655,6 +670,7 @@ namespace Game {
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,
                 ["loadedChunks"] = loadedColumns,
+                ["refresh"] = RefreshSurveyJson(),
                 ["lastError"] = m_lastError
             }.ToJsonString();
         }

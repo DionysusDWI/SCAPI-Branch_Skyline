@@ -203,14 +203,33 @@ namespace Game {
             return 0;
         }
 
-        // v0.1.4：分段寻址——索引布局与原版一致（(y-MinHeight) + x*Height + z*Height*Size），
-        // 只是把"整块"映射到"段号(高 16 位) + 段内偏移(低 16 位)"。
-        const int SliceIndexShift = 16;                     // Size*Size*ColumnSliceHeight = 65536
-        const int SliceIndexMask = 0xFFFF;
+        // v0.1.4：分段寻址。**不变量**：索引访问器与 (x,y,z) 访问器必须落在同一格。
+        //   * `CalculateCellIndex` 给的是"y 连续"的扁平索引：index = rel + x*Height + z*Height*Size
+        //     （rel = y - MinHeight ∈ [0,Height)）。光照、顶面高度、切片内容哈希、方块扫描器
+        //     以及地形生成器都按这个索引前后走动（index±1 就是 y±1）。
+        //   * 存储按 256 层分段：段 seg = rel>>8，段内偏移 = (rel&255) + x*ColumnSliceHeight
+        //     + z*ColumnSliceHeight*Size（这样一个竖直带只租 1 段，才有 -87.5% 的省内存）。
+        //
+        // [v0.1.8 修复] 旧实现把 index 直接当"段号 = index>>16、偏移 = index&0xFFFF"用 —— 那是
+        // **另一套布局**（段内 x 步长 256、z 步长 4096），与 (x,y,z) 访问器（x 步长 2048、z 步长 32768）
+        // 不一致。后果：光照/顶面/切片哈希读写的格子与真实方块数据不是同一批 →
+        //   * `Terrain.GetTopHeight` 恒为 0（→ 超视距 LOD 采到"基岩高度"、地表寻路失效、
+        //     切片哈希区间只覆盖 y≈0 附近的段，地面几何永不重建 → "有碰撞、无渲染"）；
+        //   * 光照值写不进真实格子（→ 方块/手持物全黑）；
+        //   * 地形生成器（走索引通道）生成的新区块在 (x,y,z) 视角下"地面消失"（只剩水与基岩）。
+        // 现在显式换算一次：索引 → (rel, x, z) → (seg, offset)，两套通道从此一致。
+        static void SplitColumnIndex(int index, out int seg, out int offset) {
+            int rel = index & (Height - 1);
+            int column = index >> HeightBits;                 // = x + z * Size
+            seg = rel >> 8;                                   // / ColumnSliceHeight
+            offset = (rel & (ColumnSliceHeight - 1)) + (column & SizeMinusOne) * ColumnSliceHeight
+                + (column >> SizeBits) * (ColumnSliceHeight * Size);
+        }
 
         public virtual int GetCellValueFast(int index) {
-            int[] slice = Cells[index >> SliceIndexShift];
-            return slice == null ? 0 : slice[index & SliceIndexMask];
+            SplitColumnIndex(index, out int seg, out int offset);
+            int[] slice = Cells[seg];
+            return slice == null ? 0 : slice[offset];
         }
 
         public virtual int GetCellValueFast(int x, int y, int z) {
@@ -242,14 +261,14 @@ namespace Game {
         }
 
         public virtual void SetCellValueFast(int index, int value) {
-            int seg = index >> SliceIndexShift;
+            SplitColumnIndex(index, out int seg, out int offset);
             if (Cells[seg] == null) {
                 if ((value & 0x3FF) == 0) {
                     return;
                 }
                 EnsureColumnSlice(seg);
             }
-            Cells[seg][index & SliceIndexMask] = value;
+            Cells[seg][offset] = value;
         }
 
         public virtual int GetCellContentsFast(int x, int y, int z) => Terrain.ExtractContents(GetCellValueFast(x, y, z));

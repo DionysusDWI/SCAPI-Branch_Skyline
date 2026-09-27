@@ -3,6 +3,25 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.8] - 2026-09-27
+
+第十八个版本：**LOD 失效与按需重采（里程碑 4.2）** + 在验证过程中挖出的**区块存储布局不一致**
+回归修复（v0.1.4 竖直分节引入的"透明但有碰撞 / 顶面恒 0 / LOD 采到基岩"）。
+
+**本版相对 v0.1.7 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **修复 A（重大，存储寻址）** | v0.1.4 把 `TerrainChunk.Cells` 改成 `int[][]`（8×256 层惰性段）时，**索引访问器**被写成"段号=index>>16、偏移=index&0xFFFF"的**另一套布局**，与 (x,y,z) 访问器（`x*2048`、`z*32768`）不一致。凡是走 `CalculateCellIndex` + 索引访问器的路径（光照/顶面高度/切片内容哈希/方块扫描器/**地形生成器**）都读写了"别的格子"：顶面高度恒 0 → 切片哈希区间只覆盖 y≈0 附近 → **地面几何永不重建**（"有碰撞、无渲染"）、光照写不进真实格子（手持方块/地表全黑）、新生成区块"树在、地面不在"、LOD 采到"基岩高度"。修复：新增 `SplitColumnIndex` 显式换算，索引语义不变（全仓 ~50 处 `CalculateCellIndex`+`index±1` 循环无需改），存档格式不受影响 |
+| **新增 B（里程碑 4.2）** | `SkylineLod` 的"采过就永不重采"（v0.1.1 起的跳过逻辑）替换为**推 + 拉**双通道：`SubsystemTerrain.ChangeCell` → `SkylineLod.NotifyCellChanged` 标脏（推），`Harvest()` 里按采样戳（区块对象引用 + `ModificationCounter` + 保鲜期）兜底重采（拉）；细层（8 m）改为**覆盖更新**（旧行为"只在缺失时补"导致细层永远滞后）；`Reset/Load` 清空刷新状态 |
+| 调参（实测驱动） | ① 脏重采**不挤占**轮转预算（`DirtyChunksPerTick` 默认 8，独立预算）；② **沉降期** `DirtySettleSeconds=0.5 s`——LOD 的采样数据源（区块顶面高度）由光照阶段排队重算，不等沉降会采到旧值且被采样戳当成"刚采过"；③ 脏重采后 `DirtyVerifySeconds=2 s` 兜底复核一次；④ `LodDisabled` 期间不采集（沿用 v0.1.0 行为） |
+
+### Verified
+
+* **修复 A**：`GetTopHeight(3104,7937)` **0 → 68**；`cell(3104,68,7937)` 由"空气+light 0" → **SnowBlock + light 15**；新生成区块 (4200,8600) 由"只剩水+基岩" → **雪/草/土/花岗岩/砾石完整柱**；截图对照（修复前 `agentbridge-20260927-123952-113.png` 地面不可见+黑手 → 修复后 `agentbridge-20260927-124504-143.png` 雪原/树/沙滩全部正常）；
+* **新增 B**：`heightlab/staging/v018-lod-refresh/verify-v018-lod-refresh.py mark` —— 整层填平一个 16×16 单元后，LOD 单元高度在 **0.50 s** 内变成新平台高度（判据 ≤1.0 s **PASS**；修复 A 之前 7.2 s 才刷到、12:48 那次甚至 9 s+ 不刷新，因为采样源顶面高度还没沉降）；`watch` 20 s 内 `dirtyCells/pendingResamples` 回落 0、`lastDirtyLatencyMs≈0.5 s`；`persist`（`LodSaveNow`）写盘正常；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.7] - 2026-09-27
 
 第十七个版本：**两处交互缺陷修复（负高度手动放置 / 命令辅助棒对空自选）**，并修好被 v0.1.4
