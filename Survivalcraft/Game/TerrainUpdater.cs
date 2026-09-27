@@ -1868,5 +1868,89 @@ namespace Game {
             };
             return result.ToJsonString();
         }
+
+        /// <summary>
+        /// [v0.1.40] **P3 分配计划**：把 v0.1.39 的立方体级判据落到"真要分配多少页/多少字节"，
+        /// 并与当前**列式**（16×16 列 × 32 层分带，每段 32 KiB）对照。这是 P3 正式版决策的数字依据。
+        ///
+        /// 口径：
+        ///   * 立方体页：每个"保留的立方体"一页 128 KiB（`CubeChunk32.Bytes`）；
+        ///   * 列式分带：窗口内**需要**的分带数 × 32 KiB（`16×16×32` 单元格 = 32 KiB）；
+        ///   * `partialCubes`：在它那 4 个列里**只有部分列有内容**的立方体 —— 共享页在这种地方是浪费，
+        ///     浪费量 = 共享页字节 − 列式分带字节（输出里的 `wasteBytes`）。
+        /// </summary>
+        public virtual string CubeAllocationPlan(int pcx, int pcy, int pcz, int radiusCubes, int yRadius) {
+            int inSphere = 0, kept = 0, columnRuleKeep = 0;
+            int ref1 = 0, ref2 = 0, ref3 = 0, ref4 = 0;
+            HashSet<long> columnBandKeys = [];
+            HashSet<long> columnKeys = [];
+            for (int cx = pcx - radiusCubes; cx <= pcx + radiusCubes; cx++) {
+                for (int cz = pcz - radiusCubes; cz <= pcz + radiusCubes; cz++) {
+                    for (int cy = pcy - yRadius; cy <= pcy + yRadius; cy++) {
+                        CubeWindowDecide(cx, cy, cz, out bool iS, out bool hC, out bool cR, out bool k, out _);
+                        if (iS) {
+                            inSphere++;
+                        }
+                        if (cR) {
+                            columnRuleKeep++;
+                        }
+                        if (!k) {
+                            continue;
+                        }
+                        kept++;
+                        int colsWithContent = 0;
+                        CubeColumns(cx, cz, out int colX0, out int colX1, out int colZ0, out int colZ1);
+                        int bandIndex = CubeBandIndex(cy);
+                        for (int colX = colX0; colX <= colX1; colX++) {
+                            for (int colZ = colZ0; colZ <= colZ1; colZ++) {
+                                if (!TryGetContentBandMask32(colX, colZ, out ulong columnMask)
+                                    || bandIndex < 0 || bandIndex >= 64
+                                    || ((columnMask >> bandIndex) & 1UL) == 0) {
+                                    continue;
+                                }
+                                colsWithContent++;
+                                long columnKey = ((long)colX << 32) | (uint)colZ;
+                                columnKeys.Add(columnKey);
+                                columnBandKeys.Add((columnKey << 6) | (uint)bandIndex);
+                            }
+                        }
+                        switch (colsWithContent) {
+                            case 1: ref1++; break;
+                            case 2: ref2++; break;
+                            case 3: ref3++; break;
+                            default: ref4++; break;
+                        }
+                    }
+                }
+            }
+            long pageBytes = (long)kept * CubeChunk32.Bytes;
+            long columnBytes = (long)columnBandKeys.Count * 32L * 1024L;
+            JsonObject result = new() {
+                ["ok"] = true,
+                ["cameraCube"] = new JsonArray(pcx, pcy, pcz),
+                ["radiusCubes"] = radiusCubes,
+                ["yRadius"] = yRadius,
+                ["inSphere"] = inSphere,
+                ["keptCubes"] = kept,
+                ["columnRuleKeep"] = columnRuleKeep,
+                ["columnsTouched"] = columnKeys.Count,
+                ["columnBands"] = columnBandKeys.Count,
+                ["cubePages"] = kept,
+                ["cubePageBytes"] = pageBytes,
+                ["columnBytes"] = columnBytes,
+                ["differenceBytes"] = pageBytes - columnBytes,
+                ["ratio"] = columnBytes > 0 ? Math.Round((double)pageBytes / columnBytes, 3) : 0,
+                ["refCounts"] = new JsonObject {
+                    ["oneColumnWithContent"] = ref1,
+                    ["twoColumns"] = ref2,
+                    ["threeColumns"] = ref3,
+                    ["fourColumns"] = ref4
+                },
+                ["wasteNote"] = "共享页在'只有部分列有内容'的立方体上是浪费：waste = cubePageBytes − columnBytes",
+                ["pageBytesPerCube"] = CubeChunk32.Bytes,
+                ["columnBandBytes"] = 32 * 1024
+            };
+            return result.ToJsonString();
+        }
     }
 }
