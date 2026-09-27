@@ -24,12 +24,18 @@ namespace Game {
     public static class SkylineLod {
         public const int CellShift = 4;                 // 16 格/单元
         public const int CellSize = 1 << CellShift;
+        // v0.1.1：**精细层**——视距外近环用 8 m 单元（用户反馈"128 格视距下 LOD 非常粗糙"）。
+        // 采集时每个 16 m 单元同时填 4 个 8 m 子单元；重建时近环用细网格、远环用粗网格。
+        public const int FineShift = 3;                 // 8 格/单元
+        public const int FineSize = 1 << FineShift;
 
         public static bool Enabled { get; set; } = true;
         public static float RadiusMetres { get; set; } = 1024f;
         public static int ChunksPerTick { get; set; } = 2;
         public static float MeshRebuildSeconds { get; set; } = 3f;
         public static int MaxCells { get; set; } = 24000;
+        /// <summary>精细层（8 m）覆盖到"视距 × 本系数"为止，之后交给 16 m 粗层。</summary>
+        public static float FineRangeFactor { get; set; } = 2.0f;
 
         sealed class Cell {
             public short Height;
@@ -37,6 +43,7 @@ namespace Game {
         }
 
         static readonly Dictionary<long, Cell> m_cells = [];
+        static readonly Dictionary<long, Cell> m_cellsFine = [];        // 8 m 精细层
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
@@ -46,6 +53,10 @@ namespace Game {
         static IndexBuffer m_ib;
         static int m_indexCount;
         static int m_cellsInMesh;
+        static VertexBuffer m_vbFine;
+        static IndexBuffer m_ibFine;
+        static int m_indexCountFine;
+        static int m_cellsInMeshFine;
         static int m_harvestedCells;
         static int m_rebuilds;
         static string m_lastError = "";
@@ -60,11 +71,16 @@ namespace Game {
 
         public static void Reset() {
             m_cells.Clear();
+            m_cellsFine.Clear();
             m_indexCount = 0;
             m_cellsInMesh = 0;
+            m_indexCountFine = 0;
+            m_cellsInMeshFine = 0;
             m_harvestedCells = 0;
             Utilities.Dispose(ref m_vb);
             Utilities.Dispose(ref m_ib);
+            Utilities.Dispose(ref m_vbFine);
+            Utilities.Dispose(ref m_ibFine);
             m_dirty = true;
         }
 
@@ -119,19 +135,41 @@ namespace Game {
                 int cx0 = chunk.Origin.X >> CellShift;
                 int cz0 = chunk.Origin.Y >> CellShift;
                 long key = Key(cx0, cz0);
-                if (m_cells.ContainsKey(key)) {
-                    continue;
+                // v0.1.1：粗层与 4 个细层子单元**都齐了**才跳过——否则补采缺的那层
+                // （v0.1.0 的旧数据只有粗层，升级后必须能补齐 8 m 精细层）。
+                bool coarseDone = m_cells.ContainsKey(key);
+                bool fineDone = true;
+                if (coarseDone) {
+                    for (int k = 0; k < 4; k++) {
+                        if (!m_cellsFine.ContainsKey(Key(cx0 * 2 + (k & 1), cz0 * 2 + (k >> 1)))) {
+                            fineDone = false;
+                            break;
+                        }
+                    }
+                    if (fineDone) {
+                        continue;
+                    }
                 }
                 int bestTop = int.MaxValue;
                 int bestValue = 0;
+                // v0.1.1：同一次扫描顺便填 4 个 8 m 精细子单元（各 8×8 列取最低顶面）
+                int[] fineTop = [int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue];
+                int[] fineValue = [0, 0, 0, 0];
                 for (int x = 0; x < TerrainChunk.Size; x++) {
                     for (int z = 0; z < TerrainChunk.Size; z++) {
                         int top = chunk.GetTopHeightFast(x, z);
-                        if (top < TerrainChunk.MinHeight || top >= bestTop) {
-                            continue;
+                        if (top < TerrainChunk.MinHeight) {
+                            continue;                       // 空列
                         }
-                        bestTop = top;
-                        bestValue = chunk.GetCellValueFast(x, top, z);
+                        if (top < bestTop) {
+                            bestTop = top;
+                            bestValue = chunk.GetCellValueFast(x, top, z);
+                        }
+                        int sub = (x >> 3) | ((z >> 3) << 1);
+                        if (top < fineTop[sub]) {
+                            fineTop[sub] = top;
+                            fineValue[sub] = chunk.GetCellValueFast(x, top, z);
+                        }
                     }
                 }
                 if (bestTop != int.MaxValue) {
@@ -139,51 +177,71 @@ namespace Game {
                     m_harvestedCells++;
                     m_dirty = true;
                 }
+                for (int k = 0; k < 4; k++) {
+                    if (fineTop[k] == int.MaxValue) {
+                        continue;
+                    }
+                    long fkey = Key(cx0 * 2 + (k & 1), cz0 * 2 + (k >> 1));
+                    if (m_cellsFine.ContainsKey(fkey)) {
+                        continue;
+                    }
+                    m_cellsFine[fkey] = new Cell { Height = (short)fineTop[k], Value = (ushort)fineValue[k] };
+                    m_dirty = true;
+                }
             }
         }
 
         // ---------------- 网格 ----------------
 
+        /// <summary>v0.1.1：重建入口——精细层（8 m，近环）+ 粗层（16 m，远环）两套网格。</summary>
         static void RebuildMesh() {
+            SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
+            float visualRange = sky?.VisibilityRange ?? SettingsManager.VisibilityRange;
+            float skipRadius = visualRange + FineSize * 0.5f;                  // 视距内不画（v0.1.0 修复）
+            float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
+            RebuildMeshCore(m_cellsFine, FineShift, skipRadius, fineRange, true);
+            RebuildMeshCore(m_cells, CellShift, fineRange, RadiusMetres, false);
+            m_rebuilds++;
+            m_dirty = false;
+            // v0.1.0 修复保留：相机未就位（建出空网格）时保持 dirty，等相机就位后重建。
+            if (m_indexCount == 0 && m_indexCountFine == 0
+                && (m_cells.Count > 0 || m_cellsFine.Count > 0)) {
+                m_dirty = true;
+            }
+        }
+
+        static void RebuildMeshCore(Dictionary<long, Cell> dict, int cellShift,
+                                    float minDist, float maxDist, bool fine) {
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
                 return;
             }
             Vector3 camera = CameraViewPosition();
-            int radiusCells = Math.Max(1, (int)(RadiusMetres / CellSize));
-            int ccx = (int)MathF.Floor(camera.X / CellSize);
-            int ccz = (int)MathF.Floor(camera.Z / CellSize);
-
-            // v0.1.0 修复（2026-09-27 实测）：**跳过视距内的单元**。
-            // 视距内（平面 `VisibilityRange`）由真实几何渲染；若 LOD 也画同位置的 16 m 粗平面，
-            // 两者深度相当 → LOD 后画覆盖真实几何，近处细节被抹平（取证：
-            // data/sessions/skyline-v010/lod-verify/pre，on/off 差异 50,903 px、单一斑块 40,780 px）。
-            SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
-            float visualRange = sky?.VisibilityRange ?? SettingsManager.VisibilityRange;
-            float skipRadius = visualRange + CellSize * 0.5f;   // 半格余量，避免接缝裂缝
-            float skipRadiusSq = skipRadius * skipRadius;
+            int cellSize = 1 << cellShift;
+            int radiusCells = Math.Max(1, (int)(maxDist / cellSize));
+            int ccx = (int)MathF.Floor(camera.X / cellSize);
+            int ccz = (int)MathF.Floor(camera.Z / cellSize);
+            float minSq = minDist * minDist;
+            float maxSq = maxDist * maxDist;
 
             var keys = new List<long>();
             for (int cx = ccx - radiusCells; cx <= ccx + radiusCells; cx++) {
                 for (int cz = ccz - radiusCells; cz <= ccz + radiusCells; cz++) {
                     long key = Key(cx, cz);
-                    if (!m_cells.ContainsKey(key)) {
+                    if (!dict.ContainsKey(key)) {
                         continue;
                     }
-                    float dx = (cx << CellShift) + CellSize * 0.5f - camera.X;
-                    float dz = (cz << CellShift) + CellSize * 0.5f - camera.Z;
-                    if (dx * dx + dz * dz <= skipRadiusSq) {
+                    float dx = (cx << cellShift) + cellSize * 0.5f - camera.X;
+                    float dz = (cz << cellShift) + cellSize * 0.5f - camera.Z;
+                    float d2 = dx * dx + dz * dz;
+                    if (d2 <= minSq || d2 > maxSq) {
                         continue;
                     }
                     keys.Add(key);
                 }
             }
             if (keys.Count > MaxCells) {
-                keys.Sort((a, b) => {
-                    float da = Dist2(a, camera);
-                    float db = Dist2(b, camera);
-                    return da.CompareTo(db);
-                });
+                keys.Sort((a, b) => Dist2(a, camera, cellShift).CompareTo(Dist2(b, camera, cellShift)));
                 keys.RemoveRange(MaxCells, keys.Count - MaxCells);
             }
 
@@ -191,31 +249,34 @@ namespace Game {
             // 双面"裙边墙"，消除浮空平板之间的断层/黑洞（post3 取证）。
             var walls = new List<(int x0, int z0, float yHigh, float yLow, int side, int value)>();
             foreach (long key in keys) {
-                Cell cell = m_cells[key];
+                Cell cell = dict[key];
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
                 float yHigh = cell.Height + 1f;
                 for (int side = 0; side < 4; side++) {
                     long nk = Key(cx + s_sideDx[side], cz + s_sideDz[side]);
-                    if (!m_cells.TryGetValue(nk, out Cell neighbor)) {
+                    if (!dict.TryGetValue(nk, out Cell neighbor)) {
                         continue;                          // 缺邻居：不画（避免无边长裙）
                     }
                     float yLow = neighbor.Height + 1f;
                     if (yHigh - yLow < 0.5f) {
                         continue;
                     }
-                    walls.Add((cx << CellShift, cz << CellShift, yHigh, yLow, side, cell.Value));
+                    walls.Add((cx << cellShift, cz << cellShift, yHigh, yLow, side, cell.Value));
                 }
             }
 
             int indexCount = keys.Count * 6 + walls.Count * 12;
             int vertexCount = keys.Count * 4 + walls.Count * 4;
             if (vertexCount == 0) {
-                m_indexCount = 0;
-                m_cellsInMesh = 0;
-                // v0.1.0 修复：世界加载早期相机还在原点（CameraViewPosition=Zero），按相机过滤会
-                // 建出"空网格"；原来这里直接把 m_dirty 清掉 → 相机就位后也不再重建（实测
-                // inMesh=0 直到有新采集）。改为"还有数据就保持 dirty"，下一轮（相机已就位）重建。
-                m_dirty = m_cells.Count > 0;
+                // 空网格：由外层 RebuildMesh 统一决定是否保持 dirty（v0.1.0 修复的逻辑移到外层）。
+                if (fine) {
+                    m_indexCountFine = 0;
+                    m_cellsInMeshFine = 0;
+                }
+                else {
+                    m_indexCount = 0;
+                    m_cellsInMesh = 0;
+                }
                 return;
             }
             var vertices = new TerrainVertex[vertexCount];
@@ -225,9 +286,9 @@ namespace Game {
             var light = new Color((byte)220, (byte)220, (byte)220);
             int vi = 0, ii = 0, built = 0;
             foreach (long key in keys) {
-                Cell cell = m_cells[key];
+                Cell cell = dict[key];
                 int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
-                float x0 = cx << CellShift, z0 = cz << CellShift;
+                float x0 = cx << cellShift, z0 = cz << cellShift;
                 float y = cell.Height + 1f;
                 int contents = Terrain.ExtractContents(cell.Value);
                 int value = cell.Value;
@@ -238,9 +299,9 @@ namespace Game {
                 float v0 = (slot / slotCount) / (float)slotCount;
                 float du = 1f / slotCount;
                 BlockGeometryGenerator.SetupVertex(x0, y, z0, light, u0, v0, ref vertices[vi]);
-                BlockGeometryGenerator.SetupVertex(x0 + CellSize, y, z0, light, u0 + du, v0, ref vertices[vi + 1]);
-                BlockGeometryGenerator.SetupVertex(x0 + CellSize, y, z0 + CellSize, light, u0 + du, v0 + du, ref vertices[vi + 2]);
-                BlockGeometryGenerator.SetupVertex(x0, y, z0 + CellSize, light, u0, v0 + du, ref vertices[vi + 3]);
+                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0, light, u0 + du, v0, ref vertices[vi + 1]);
+                BlockGeometryGenerator.SetupVertex(x0 + cellSize, y, z0 + cellSize, light, u0 + du, v0 + du, ref vertices[vi + 2]);
+                BlockGeometryGenerator.SetupVertex(x0, y, z0 + cellSize, light, u0, v0 + du, ref vertices[vi + 3]);
                 if (bigIndices) {
                     indices32[ii] = vi; indices32[ii + 1] = vi + 1; indices32[ii + 2] = vi + 2;
                     indices32[ii + 3] = vi; indices32[ii + 4] = vi + 2; indices32[ii + 5] = vi + 3;
@@ -254,7 +315,7 @@ namespace Game {
                 built++;
             }
             foreach ((int wx, int wz, float yHigh, float yLow, int side, int wallValue) in walls) {
-                float x0 = wx, z0 = wz, x1 = wx + CellSize, z1 = wz + CellSize;
+                float x0 = wx, z0 = wz, x1 = wx + cellSize, z1 = wz + cellSize;
                 Block wallBlock = BlocksManager.Blocks[Terrain.ExtractContents(wallValue)];
                 int wallSlotCount = Math.Max(wallBlock.GetTextureSlotCount(wallValue), 1);
                 int wallSlot = wallBlock.GetFaceTextureSlot(1, wallValue);       // 侧面
@@ -303,27 +364,38 @@ namespace Game {
                 vi += 4;
                 ii += 12;
             }
-            Utilities.Dispose(ref m_vb);
-            Utilities.Dispose(ref m_ib);
-            m_vb = new VertexBuffer(TerrainVertex.VertexDeclaration, vertexCount);
-            m_vb.SetData(vertices, 0, vertexCount);
-            m_ib = new IndexBuffer(bigIndices ? IndexFormat.ThirtyTwoBits : IndexFormat.SixteenBits, ii);
+            var vb = new VertexBuffer(TerrainVertex.VertexDeclaration, vertexCount);
+            vb.SetData(vertices, 0, vertexCount);
+            var ib = new IndexBuffer(bigIndices ? IndexFormat.ThirtyTwoBits : IndexFormat.SixteenBits, ii);
             if (bigIndices) {
-                m_ib.SetData(indices32, 0, ii);
+                ib.SetData(indices32, 0, ii);
             }
             else {
-                m_ib.SetData(indices, 0, ii);
+                ib.SetData(indices, 0, ii);
             }
-            m_indexCount = ii;
-            m_cellsInMesh = built;
-            m_rebuilds++;
-            m_dirty = false;
+            if (fine) {
+                Utilities.Dispose(ref m_vbFine);
+                Utilities.Dispose(ref m_ibFine);
+                m_vbFine = vb;
+                m_ibFine = ib;
+                m_indexCountFine = ii;
+                m_cellsInMeshFine = built;
+            }
+            else {
+                Utilities.Dispose(ref m_vb);
+                Utilities.Dispose(ref m_ib);
+                m_vb = vb;
+                m_ib = ib;
+                m_indexCount = ii;
+                m_cellsInMesh = built;
+            }
         }
 
-        static float Dist2(long key, Vector3 camera) {
+        static float Dist2(long key, Vector3 camera, int cellShift) {
+            int cellSize = 1 << cellShift;
             int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
-            float dx = (cx << CellShift) + CellSize * 0.5f - camera.X;
-            float dz = (cz << CellShift) + CellSize * 0.5f - camera.Z;
+            float dx = (cx << cellShift) + cellSize * 0.5f - camera.X;
+            float dz = (cz << cellShift) + cellSize * 0.5f - camera.Z;
             return dx * dx + dz * dz;
         }
 
@@ -338,7 +410,7 @@ namespace Game {
         }
 
         public static void Draw(Camera camera) {
-            if (!Enabled || m_vb == null || m_ib == null || m_indexCount == 0) {
+            if (!Enabled || (m_indexCount == 0 && m_indexCountFine == 0)) {
                 return;
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
@@ -381,7 +453,13 @@ namespace Game {
                 Display.BlendState = BlendState.Opaque;
                 Display.DepthStencilState = DepthStencilState.Default;
                 Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
-                Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vb, m_ib, 0, m_indexCount);
+                // v0.1.1：先画粗层（远环），再画精细层（近环）
+                if (m_vb != null && m_ib != null && m_indexCount > 0) {
+                    Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vb, m_ib, 0, m_indexCount);
+                }
+                if (m_vbFine != null && m_ibFine != null && m_indexCountFine > 0) {
+                    Display.DrawIndexed(PrimitiveType.TriangleList, shader, m_vbFine, m_ibFine, 0, m_indexCountFine);
+                }
             }
             catch (Exception e) {
                 m_lastError = e.Message;
@@ -411,9 +489,15 @@ namespace Game {
             try {
                 using (var stream = Storage.OpenFile(path, OpenFileMode.Create)) {
                     var writer = new BinaryWriter(stream);
-                    writer.Write(1);                       // 版本
+                    writer.Write(2);                       // 版本 2：粗层 + 精细层两段
                     writer.Write(m_cells.Count);
                     foreach (KeyValuePair<long, Cell> pair in m_cells) {
+                        writer.Write(pair.Key);
+                        writer.Write(pair.Value.Height);
+                        writer.Write(pair.Value.Value);
+                    }
+                    writer.Write(m_cellsFine.Count);
+                    foreach (KeyValuePair<long, Cell> pair in m_cellsFine) {
                         writer.Write(pair.Key);
                         writer.Write(pair.Value.Height);
                         writer.Write(pair.Value.Value);
@@ -430,6 +514,7 @@ namespace Game {
             // v0.1.0 修复：**无条件先清空**——文件不存在（新世界/没有 LOD 数据的世界）时也必须清掉
             // 上一个世界的内存数据（原来 `return` 在 `Clear` 之前，导致跨世界污染）。
             m_cells.Clear();
+            m_cellsFine.Clear();
             if (path == null || !Storage.FileExists(path)) {
                 m_dirty = true;
                 return;
@@ -445,9 +530,18 @@ namespace Game {
                         ushort value = reader.ReadUInt16();
                         m_cells[key] = new Cell { Height = height, Value = value };
                     }
+                    if (version >= 2) {
+                        int countFine = reader.ReadInt32();
+                        for (int i = 0; i < countFine && i < MaxCells * 8; i++) {
+                            long key = reader.ReadInt64();
+                            short height = reader.ReadInt16();
+                            ushort value = reader.ReadUInt16();
+                            m_cellsFine[key] = new Cell { Height = height, Value = value };
+                        }
+                    }
                 }
                 m_dirty = true;
-                Log.Information($"SkylineLod: loaded {m_cells.Count} cells");
+                Log.Information($"SkylineLod: loaded {m_cells.Count} cells (+{m_cellsFine.Count} fine)");
             }
             catch (Exception e) {
                 m_lastError = e.Message;
@@ -457,8 +551,9 @@ namespace Game {
         // ---------------- 状态 ----------------
 
         public static string Describe() =>
-            $"lod:enabled={Enabled} cells={m_cells.Count} inMesh={m_cellsInMesh} indices={m_indexCount} "
-            + $"radius={RadiusMetres:0}m cell={CellSize} rebuilds={m_rebuilds} "
+            $"lod:enabled={Enabled} cells={m_cells.Count}(+{m_cellsFine.Count}f) "
+            + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f) indices={m_indexCount}(+{m_indexCountFine}f) "
+            + $"radius={RadiusMetres:0}m cell={CellSize}/{FineSize} rebuilds={m_rebuilds} "
             + $"err={(m_lastError.Length > 0 ? m_lastError : "-")}";
 
         public static string Survey() {
@@ -479,8 +574,12 @@ namespace Game {
                 ["cells"] = m_cells.Count,
                 ["cellsInMesh"] = m_cellsInMesh,
                 ["meshIndices"] = m_indexCount,
+                ["fineCells"] = m_cellsFine.Count,
+                ["fineCellsInMesh"] = m_cellsInMeshFine,
+                ["fineMeshIndices"] = m_indexCountFine,
                 ["radiusMetres"] = RadiusMetres,
                 ["cellSizeBlocks"] = CellSize,
+                ["fineCellSizeBlocks"] = FineSize,
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,
