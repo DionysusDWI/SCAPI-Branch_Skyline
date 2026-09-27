@@ -18,6 +18,11 @@
 | **六向贪心网格** | `SurfaceVoxelMesh`：对 +Y/-Y/±X/±Z 六个朝向各做 2D 贪心合并（同片、同朝向、同材质的相邻面并成一个四边形），
   与列顶高度场网格（2D 贪心）**同一套顶点格式 `TerrainVertex`** → 直接用游戏地形 shader 画，本步不改顶点格式 |
 | **演示层接通** | `skyline.CubeSurfaceVoxel(true/false)`：演示层可在"列顶高度场"与"表面体素"两种网格间切换（切完重新 `CubeSurfaceHarvest`） |
+| **手动生成 LOD + HUD 进度条** | `SkylineLodManualBuild` + `skyline.LodManualStart(radius) / LodManualStatus() / LodManualCancel() / LodManualBudget(ms)`：
+  把相机周围（**圆内**）的已加载列排成任务表（近的先做），**分帧推进**（默认 4 ms/帧）：
+  对每列 ① 走既有通道强制 LOD 重采 ② 把该列的 32³ 立方体放进壳仓待采队列；
+  **进度按真实下游完成度算**（LOD 单元不再脏 + 壳已入仓），HUD 画**进度条**（`PerformanceManager` 的 FlatBatch，
+  左上角、性能信息下方）+ 一行 ASCII 状态（`LOD build 42% (85/203), eta 4s`） |
 
 ### Verified（AgentLab）
 
@@ -34,6 +39,9 @@
 * **体积真的画出来了**：演示层 A/B（同一 2×2 立方体组）`diffPxGt8 = 18,659`，截图里能看到**树冠柱、草丛、花、层状地形**；
 * **代价已量化**：表面体素网格是列顶高度场的 **2.4~2.8× 四边形 / 2.4× 顶点字节**（单立方体约 336 KiB@1 m）→
   下一步要做「更好的合并（跨片/多方向）」与「只对最近一档用体素网格」，否则 66 个壳会从 1.4 MiB 涨到 ~22 MB。
+* **手动生成 LOD 实测**（半径 128 m）：**203 列 / 20.04 s 跑完**，进度曲线 `8 → 187`（3 s 内）→ 等最后 16 列到超时；
+  **`skippedStuck = 16`（7.9%）如实报出** —— 这些列的 LOD 已重采，但它们的 32³ 立方体因**兄弟区块没就绪**始终采不到
+  （不是假装完成）；HUD 进度条与状态行在运行期间可见（`manual-build-a-running.png` vs `-b-done.png`）。
 
 ## [v0.1.59] - 2026-09-29
 

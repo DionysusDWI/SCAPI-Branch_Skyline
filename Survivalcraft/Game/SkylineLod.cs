@@ -386,6 +386,8 @@ namespace Game {
                 NearBandTick();
                 // [v0.1.51] 壳的生产路径：按预算采集 + 建模（采集在卸载钩子里排队）
                 SkylineCubeShellStore.Tick();
+                // [v0.1.60] 手动生成 LOD：分帧推进任务表（默认没有任务时是空操作）
+                SkylineLodManualBuild.Tick();
                 Harvest();
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();

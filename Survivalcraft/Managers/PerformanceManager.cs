@@ -276,6 +276,8 @@ namespace Game {
             else {
                 m_frameData = null;
             }
+            // [v0.1.60] 手动生成 LOD 的 HUD 进度条（跑的时候 + 跑完 3 s；与 DH 类似）
+            SkylineLodManualBuild.DrawHud(m_primitivesRenderer, viewport, scale);
             m_primitivesRenderer.Flush();
         }
 

@@ -184,6 +184,17 @@ namespace Game {
 
         static long m_backfilled;
 
+        /// <summary>
+        /// [v0.1.60] **手动重采某一列**（手动生成 LOD 用）：把该列所属的 16 m 单元标脏，让下一个 Tick 立刻重采。
+        /// 与 `NotifyChunkValid` 走同一条脏队列通道（区别只在于"不等区块状态变化，由人点"）。
+        /// </summary>
+        public static void ManualResampleColumn(int chunkX, int chunkZ) {
+            MarkDirty(Key(chunkX, chunkZ));
+        }
+
+        /// <summary>[v0.1.60] 某个 16 m 单元还在脏队列里吗（手动生成 LOD 用它算"真实完成度"）。</summary>
+        public static bool IsCellDirty(int cellX, int cellZ) => m_dirtyCells.ContainsKey(Key(cellX, cellZ));
+
         /// <summary>[v0.1.17] 因"区块刚 Valid"而标脏的次数（诊断）。</summary>
         public static long BackfilledOnValid => m_backfilled;
 

@@ -247,6 +247,55 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.60] **主线程**手动入队：把某一列（区块坐标）所属的 32³ 立方体排进待采队列。
+        /// 供"手动生成 LOD"（`SkylineLodManualBuild`）复用同一条采集通道；与 `OnChunkValid` 用同一套分带计算。
+        /// </summary>
+        public static int QueueCubeForColumn(int chunkX, int chunkZ) {
+            if (!Enabled) {
+                return 0;
+            }
+            try {
+                Terrain terrain = Terrain;
+                TerrainChunk chunk = terrain?.GetChunkAtCoords(chunkX, chunkZ);
+                if (chunk == null) {
+                    return 0;
+                }
+                int minTop = int.MaxValue, maxTop = int.MinValue;
+                for (int x = 0; x < TerrainChunk.Size; x++) {
+                    for (int z = 0; z < TerrainChunk.Size; z++) {
+                        int top = chunk.GetTopHeightFast(x, z);
+                        if (top > maxTop) {
+                            maxTop = top;
+                        }
+                        if (top < minTop) {
+                            minTop = top;
+                        }
+                    }
+                }
+                if (maxTop < TerrainChunk.MinHeight) {
+                    return 0;
+                }
+                int cxc = chunkX >> 1, czc = chunkZ >> 1;
+                int queued = 0;
+                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                    (int Cx, int Cy, int Cz) key = (cxc, cy, czc);
+                    if (m_entries.ContainsKey(key)) {
+                        continue;                                // 已经有壳：不重复采
+                    }
+                    if (m_pendingSet.TryAdd(key, 0)) {
+                        m_pendingQueue.Enqueue(key);
+                        queued++;
+                    }
+                }
+                return queued;
+            }
+            catch (Exception e) {
+                LastError = e.Message;
+                return 0;
+            }
+        }
+
         /// <summary>[v0.1.55] 主线程：按预算处理待采队列（兄弟区块没就绪就稍后重试，最多 `MaxPendingRetries` 次）。</summary>
         static void HarvestPending() {
             if (m_pendingQueue.IsEmpty) {
@@ -543,6 +592,36 @@ namespace Game {
         /// <summary>[v0.1.57] 立刻按当前上限淘汰（取证用 `skyline.CubeShellEvictTo`）。</summary>
         public static void EvictNow() {
             EvictIfNeeded();
+        }
+
+        /// <summary>
+        /// [v0.1.60] 某一列（区块坐标）所属的立方体**已经有壳了吗**（手动生成 LOD 用来算真实完成度）。
+        /// 该列涉及的分带按"顶面高度"估：`cy = maxTop &gt;&gt; 5`。
+        /// </summary>
+        public static bool HasCubeForColumn(int chunkX, int chunkZ) {
+            try {
+                Terrain terrain = Terrain;
+                TerrainChunk chunk = terrain?.GetChunkAtCoords(chunkX, chunkZ);
+                if (chunk == null) {
+                    return true;                             // 列都没了：没什么可等的
+                }
+                int maxTop = int.MinValue;
+                for (int x = 0; x < TerrainChunk.Size; x++) {
+                    for (int z = 0; z < TerrainChunk.Size; z++) {
+                        int top = chunk.GetTopHeightFast(x, z);
+                        if (top > maxTop) {
+                            maxTop = top;
+                        }
+                    }
+                }
+                if (maxTop < TerrainChunk.MinHeight) {
+                    return true;                             // 空列
+                }
+                return m_entries.ContainsKey((chunkX >> 1, maxTop >> 5, chunkZ >> 1));
+            }
+            catch {
+                return true;
+            }
         }
 
         static void EvictIfNeeded() {
