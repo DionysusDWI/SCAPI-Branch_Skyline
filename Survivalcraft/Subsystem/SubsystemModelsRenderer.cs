@@ -317,12 +317,14 @@ namespace Game {
             modelShader.LightDirection1 = -Vector3.TransformNormal(LightingManager.DirectionToLight1, camera.ViewMatrix);
             modelShader.LightDirection2 = -Vector3.TransformNormal(LightingManager.DirectionToLight2, camera.ViewMatrix);
             modelShader.FogColor = new Vector3(m_subsystemSky.ViewFogColor);
-            modelShader.FogBottomTopDensity = new Vector3(
+            Vector3 modelFogBand = new(
                 m_subsystemSky.ViewFogBottom - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogTop - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogDensity
             );
-            modelShader.HazeStartDensity = new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity);
+            modelShader.FogBottomTopDensity = SkylineRuntime.FogBand(modelFogBand);
+            modelShader.HazeStartDensity = SkylineRuntime.HazeStartDensity(
+                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity));
             modelShader.FogYMultiplier = m_subsystemSky.VisibilityRangeYMultiplier;
             modelShader.WorldUp = Vector3.TransformNormal(Vector3.UnitY, camera.ViewMatrix);
             modelShader.Transforms.View = Matrix.Identity;
@@ -452,12 +454,14 @@ namespace Game {
             skinnedShader.LightDirection1 = -Vector3.TransformNormal(LightingManager.DirectionToLight1, camera.ViewMatrix);
             skinnedShader.LightDirection2 = -Vector3.TransformNormal(LightingManager.DirectionToLight2, camera.ViewMatrix);
             skinnedShader.FogColor = new Vector3(m_subsystemSky.ViewFogColor);
-            skinnedShader.FogBottomTopDensity = new Vector3(
+            Vector3 skinnedFogBand = new(
                 m_subsystemSky.ViewFogBottom - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogTop - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogDensity
             );
-            skinnedShader.HazeStartDensity = new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity);
+            skinnedShader.FogBottomTopDensity = SkylineRuntime.FogBand(skinnedFogBand);
+            skinnedShader.HazeStartDensity = SkylineRuntime.HazeStartDensity(
+                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity));
             skinnedShader.FogYMultiplier = m_subsystemSky.VisibilityRangeYMultiplier;
             skinnedShader.WorldUp = Vector3.TransformNormal(Vector3.UnitY, camera.ViewMatrix);
             // 蒙皮模型：World[0] 设置为 ViewMatrix，View 设置为 Identity

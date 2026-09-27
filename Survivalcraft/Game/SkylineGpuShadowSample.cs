@@ -12,8 +12,10 @@ namespace Game {
     /// 由 `TerrainRenderer.DrawOpaque` 在启用时替代 `m_opaqueShader`（其余参数与绘制流程完全一致）。
     ///
     /// 开关：`skyline.GpuShadowSampleEnabled`（默认关；打开后 `GpuShadowTick` 会自动补一次 `GpuShadowCapture`）、
-    /// `GpuShadowSampleStrength`（0.45）、`GpuShadowSampleBias`（0.004）、`GpuShadowFlipY`（后端 UV 方向；
+    /// `GpuShadowSampleStrength`（0.45）、`GpuShadowSampleBias`（0.0002）、`GpuShadowFlipY`（后端 UV 方向；
     /// 先用 A/B 定，默认 false）。诊断：`skyline.GpuShadowSampleDescribe()`。
+    /// [v0.1.35] 深度图改为 **16 bit 双通道**（R 高字节 / G 低字节）后，采样侧按**捕获时**的编码解码；
+    /// 量化步长 4096 m 范围下 16.1 m → 0.0625 m，才撑得住"米级矮墙的投影"。
     /// </summary>
     public static partial class SkylineRuntime {
         public static bool GpuShadowSampleEnabled { get; set; }
@@ -39,6 +41,7 @@ namespace Game {
         public static string GpuShadowSampleDescribe() =>
             $"gpuShadowSample enabled={GpuShadowSampleEnabled} strength={GpuShadowSampleStrength:0.##} "
             + $"bias={GpuShadowSampleBias:0.####} flipY={GpuShadowFlipY} hasMap={m_gpuShadowHasMap} "
+            + $"depth16={m_gpuShadowDepth16AtCapture} "
             + $"resolved={m_gpuShadowSampleResolved} fallbacks={m_gpuShadowSampleFallbacks} "
             + $"lastReason='{m_gpuShadowSampleLastReason}' debug={GpuShadowDebugMode} err='{m_gpuShadowSampleError}'";
 
@@ -91,6 +94,7 @@ namespace Game {
                 shader.GetParameter("u_shadowBias", true).SetValue(GpuShadowSampleBias);
                 shader.GetParameter("u_shadowStrength", true).SetValue(GpuShadowSampleStrength);
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
+                shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
                 shader.GetParameter("u_shadowDebug", true).SetValue((float)GpuShadowDebugMode);
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
@@ -215,6 +219,7 @@ float u_depthMax;
 float u_shadowBias;
 float u_shadowStrength;
 float u_shadowFlipY;
+float u_shadowDepth16;
 float u_shadowDebug;
 
 void main(
@@ -238,7 +243,18 @@ void main(
 	bool inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
 	if (inside)
 	{
-		mapDepth = u_shadowMap.Sample(u_shadowSampler, uv).r;
+		float4 texel = u_shadowMap.Sample(u_shadowSampler, uv);
+		if (u_shadowDepth16 > 0.5)
+		{
+			// R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
+			float hi = floor(texel.r * 255.0 + 0.5);
+			float lo = floor(texel.g * 255.0 + 0.5);
+			mapDepth = (hi * 256.0 + lo) / 65535.0;
+		}
+		else
+		{
+			mapDepth = texel.r;
+		}
 	}
 	if (u_shadowDebug > 0.5)
 	{
@@ -260,7 +276,7 @@ void main(
 #ifdef GLSL
 
 #ifdef GL_ES
-precision mediump float;
+precision highp float;   // [v0.1.35] 16 bit 深度解码需要 fp32（mediump 尾数只有 ~10 bit）
 #endif
 
 // <Sampler Name='u_samplerState' Texture='u_texture' />
@@ -277,6 +293,7 @@ uniform float u_depthMax;
 uniform float u_shadowBias;
 uniform float u_shadowStrength;
 uniform float u_shadowFlipY;
+uniform float u_shadowDepth16;
 uniform float u_shadowDebug;
 
 varying vec4 v_color;
@@ -299,7 +316,18 @@ void main()
 	bool inside = uv.x >= 0.0 && uv.x <= 1.0 && uv.y >= 0.0 && uv.y <= 1.0;
 	if (inside)
 	{
-		mapDepth = texture2D(u_shadowMap, uv).r;
+		vec4 texel = texture2D(u_shadowMap, uv);
+		if (u_shadowDepth16 > 0.5)
+		{
+			// R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
+			float hi = floor(texel.r * 255.0 + 0.5);
+			float lo = floor(texel.g * 255.0 + 0.5);
+			mapDepth = (hi * 256.0 + lo) / 65535.0;
+		}
+		else
+		{
+			mapDepth = texel.r;
+		}
 	}
 	if (u_shadowDebug > 0.5)
 	{

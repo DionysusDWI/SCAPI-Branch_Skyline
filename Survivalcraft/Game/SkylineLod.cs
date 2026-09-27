@@ -759,14 +759,14 @@ namespace Game {
                 shader.GetParameter("u_fogYMultiplier", true).SetValue(sky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor", true).SetValue(new Vector3(sky.ViewFogColor));
                 shader.GetParameter("u_fogBottomTopDensity", true)
-                    .SetValue(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity));
+                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity)));
                 // v0.1.1：**与真实地形共用同一条视图雾曲线**。原来自算 [0.55R, R] 的雾带，
                 // 而原版真实地形在 `视距 × 0.8` 处就已 100% 雾化——两者交界"地形全雾消失 /
                 // LOD 无雾跳出"，交接感明显（用户反馈）。现在 `SkylineAtmosphere.AdjustHazeSpan`
                 // 已把视图雾的跨度拉远到 LOD 半径的 90%，这里直接采用 sky 的 (start, density)，
                 // 两个渲染层在交界处与全程都连续。
                 shader.GetParameter("u_hazeStartDensity", true)
-                    .SetValue(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity));
+                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity)));
                 shader.GetParameter("u_texture", true).SetValue(
                     subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
                 Display.BlendState = BlendState.Opaque;

@@ -8,6 +8,9 @@ using Engine.Media;
 namespace Game {
     /// <summary>
     /// SCAPI Skyline v0.1.32：**GPU 阴影贴图第一步 —— 自编译深度 shader + 太阳视角深度图（含回读自检）**。
+    /// [v0.1.35] 深度编码升级为 **16 bit 双通道（R=高字节, G=低字节）**：竖直量化步长由 depthMax/255
+    /// （4096 m 时 ≈16.1 m）降到 depthMax/65535（≈0.06 m）—— 8 bit 下"2 m 矮墙的投影会被量化吃掉"，
+    /// 16 bit 才能支撑细粒度自阴影；`GpuShadowDepth16=false` 时逐位回退旧 8 bit 编码。
     ///
     /// 里程碑 5 路线：只读网格访问器 v0.1.11 → 太阳视角 pass v0.1.18（用游戏地形 shader 画"光照图"）→
     /// LOD 自阴影 v0.1.19 → 地形顶点阴影 v0.1.30 → **GPU 深度图（本版）** → 下一步：把深度图采样进着色。
@@ -34,6 +37,10 @@ namespace Game {
         /// <summary>[v0.1.33] 是否把**真实区块几何**也画进同一张深度图（默认开）。
         /// v0.1.32 只画 LOD 网格，因此近景（≤视距+8 m，LOD 刻意跳过）是空洞。</summary>
         public static bool GpuShadowIncludeChunks { get; set; } = true;
+
+        /// <summary>[v0.1.35] 深度图编码：true = 16 bit 双通道（R 高字节 / G 低字节，蓝通道仍存 8 bit 预览），
+        /// false = 旧 8 bit（R=G=B=depth）。采样侧按**捕获时**的编码解码。</summary>
+        public static bool GpuShadowDepth16 { get; set; } = true;
 
         const string GpuShadowVsh = @"#ifdef HLSL
 
@@ -90,26 +97,52 @@ void main()
 
         const string GpuShadowPsh = @"#ifdef HLSL
 
+float u_depth16;
+
 void main(
 	in float v_depth : TEXCOORD0,
 	out float4 svTarget : SV_TARGET
 )
 {
-	svTarget = float4(v_depth, v_depth, v_depth, 1.0);
+	float d = saturate(v_depth);
+	if (u_depth16 > 0.5)
+	{
+		float d16 = floor(d * 65535.0 + 0.5);
+		float hi = floor(d16 / 256.0);
+		float lo = d16 - hi * 256.0;
+		svTarget = float4(hi / 255.0, lo / 255.0, d, 1.0);
+	}
+	else
+	{
+		svTarget = float4(d, d, d, 1.0);
+	}
 }
 
 #endif
 #ifdef GLSL
 
 #ifdef GL_ES
-precision mediump float;
+precision highp float;   // [v0.1.35] 16 bit 编码需要 fp32 才不丢低位（mediump 只有 ~10 bit 尾数）
 #endif
+
+uniform float u_depth16;
 
 varying float v_depth;
 
 void main()
 {
-	gl_FragColor = vec4(v_depth, v_depth, v_depth, 1.0);
+	float d = clamp(v_depth, 0.0, 1.0);
+	if (u_depth16 > 0.5)
+	{
+		float d16 = floor(d * 65535.0 + 0.5);
+		float hi = floor(d16 / 256.0);
+		float lo = d16 - hi * 256.0;
+		gl_FragColor = vec4(hi / 255.0, lo / 255.0, d, 1.0);
+	}
+	else
+	{
+		gl_FragColor = vec4(d, d, d, 1.0);
+	}
 }
 
 #endif
@@ -127,10 +160,12 @@ void main()
         static Vector3 m_gpuShadowSun = Vector3.UnitY;
         static float m_gpuShadowDepthMax = 4096f;
         static bool m_gpuShadowHasMap;
+        // [v0.1.35] 最近一次捕获用的深度编码（采样侧据此解码，保证"图 ↔ 解码"一致）
+        static bool m_gpuShadowDepth16AtCapture;
 
         public static string GpuShadowDescribe() =>
             $"gpuShadow enabled={GpuShadowEnabled} size={GpuShadowSize} radius={GpuShadowRadius:0} "
-            + $"captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
+            + $"depth16={GpuShadowDepth16} captures={m_gpuShadowCaptures} last={m_gpuShadowLast}";
 
         static Shader EnsureGpuShadowShader() {
             if (m_gpuShadowShader == null) {
@@ -190,11 +225,13 @@ void main()
                 m_gpuShadowSun = sun;
                 m_gpuShadowDepthMax = depthMax;
                 m_gpuShadowHasMap = true;
+                m_gpuShadowDepth16AtCapture = GpuShadowDepth16;
                 shader.GetParameter("u_origin", true).SetValue(new Vector2(origin3.X, origin3.Z));
                 shader.GetParameter("u_viewProjectionMatrix", true).SetValue(viewProjectionShifted);
                 shader.GetParameter("u_eye", true).SetValue(eye);
                 shader.GetParameter("u_sunDir", true).SetValue(sun);
                 shader.GetParameter("u_depthMax", true).SetValue(depthMax);
+                shader.GetParameter("u_depth16", true).SetValue(GpuShadowDepth16 ? 1f : 0f);
                 Display.BlendState = BlendState.Opaque;
                 Display.DepthStencilState = DepthStencilState.Default;
                 Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;
@@ -212,13 +249,18 @@ void main()
                 }
 
                 Image image = m_gpuShadowRt.GetData(new Rectangle(0, 0, size, size));
+                // [v0.1.35] 16 bit 时按 R*256+G 解码（单位 0..65535）；8 bit 沿用 R（单位 0..255）。
+                bool depth16 = m_gpuShadowDepth16AtCapture;
+                int depthUnits = depth16 ? 65535 : 255;
+                int backgroundCut = depth16 ? (65535 * 254 / 255) : 254;
                 int covered = 0;
                 double sumDepth = 0;
-                int minDepth = 255, maxDepth = 0;
+                int minDepth = depthUnits, maxDepth = 0;
                 for (int y = 0; y < size; y++) {
                     for (int x = 0; x < size; x++) {
-                        int d = image.GetPixel(x, y).R;
-                        if (d < 254) {
+                        Color pixel = image.GetPixel(x, y);
+                        int d = depth16 ? (pixel.R * 256 + pixel.G) : pixel.R;
+                        if (d < backgroundCut) {
                             covered++;
                             sumDepth += d;
                             if (d < minDepth) { minDepth = d; }
@@ -255,7 +297,7 @@ void main()
                     }
                     int ix = Math.Clamp((int)(sx * size), 0, size - 1);
                     int iy = Math.Clamp((int)(sy * size), 0, size - 1);
-                    int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * 255f);
+                    int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * depthUnits);
                     int got = -1;
                     int bestErr = int.MaxValue;
                     // Y 轴方向（图像上下翻转）不确定 → 两个方向都搜；窗口 ±8 px 容忍投影/像素取整误差。
@@ -265,7 +307,8 @@ void main()
                             for (int dx = -8; dx <= 8; dx++) {
                                 int qx = Math.Clamp(ix + dx, 0, size - 1);
                                 int qy = Math.Clamp(cy + dy, 0, size - 1);
-                                int v = image.GetPixel(qx, qy).R;
+                                Color area = image.GetPixel(qx, qy);
+                                int v = depth16 ? (area.R * 256 + area.G) : area.R;
                                 int err = Math.Abs(v - expected);
                                 if (err < bestErr) { bestErr = err; got = v; }
                             }
@@ -301,7 +344,7 @@ void main()
                     }
                     int ix = Math.Clamp((int)(sx * size), 0, size - 1);
                     int iy = Math.Clamp((int)(sy * size), 0, size - 1);
-                    int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * 255f);
+                    int expected = (int)(MathUtils.Clamp(Vector3.Dot(eye - world, sun) / depthMax, 0f, 1f) * depthUnits);
                     int got = -1;
                     int bestErr = int.MaxValue;
                     foreach (int flip in new[] { 0, 1 }) {
@@ -310,7 +353,8 @@ void main()
                             for (int dx = -8; dx <= 8; dx++) {
                                 int qx = Math.Clamp(ix + dx, 0, size - 1);
                                 int qy = Math.Clamp(cy + dy, 0, size - 1);
-                                int v = image.GetPixel(qx, qy).R;
+                                Color local = image.GetPixel(qx, qy);
+                                int v = depth16 ? (local.R * 256 + local.G) : local.R;
                                 int err = Math.Abs(v - expected);
                                 if (err < bestErr) { bestErr = err; got = v; }
                             }
@@ -329,13 +373,17 @@ void main()
                 checkedPairs = samples.Count;
                 m_gpuShadowCaptures++;
                 m_gpuShadowLast =
-                    $"gpuShadow size={size} radius={radius:0} covered={covered} "
+                    $"gpuShadow size={size} radius={radius:0} depth16={depth16} "
+                    + $"step={(depthMax / depthUnits):0.####}m covered={covered} "
                     + $"({100.0 * covered / (size * size):0.##}%) depth=[{minDepth},{maxDepth}] "
                     + $"mean={(covered > 0 ? sumDepth / covered : 0):0.0} selfCheck={selfCheckOk} "
                     + $"captures={m_gpuShadowCaptures} ms={(Time.RealTime - start) * 1000.0:0.0}";
                 result["ok"] = true;
                 result["size"] = size;
                 result["radius"] = radius;
+                result["depth16"] = depth16;
+                result["depthUnits"] = depthUnits;
+                result["depthStepMeters"] = Math.Round(depthMax / depthUnits, 4);
                 result["covered"] = covered;
                 result["coverage"] = Math.Round((double)covered / (size * size), 5);
                 result["chunksDrawn"] = chunksDrawn;

@@ -141,7 +141,7 @@ namespace Game {
             opaqueShader.GetParameter("u_fogYMultiplier", true).SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
             opaqueShader.GetParameter("u_fogColor", true).SetValue(new Vector3(m_subsystemSky.ViewFogColor));
             opaqueShader.GetParameter("u_fogBottomTopDensity")
-                .SetValue(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity));
+                .SetValue(SkylineRuntime.FogBand(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity)));
             ShaderParameter parameter = opaqueShader.GetParameter("u_hazeStartDensity");
             ModsManager.HookAction(
                 "SetShaderParameter",
@@ -156,7 +156,7 @@ namespace Game {
                 TerrainChunk terrainChunk = m_chunksToDraw[i];
                 float num = MathUtils.Min(terrainChunk.HazeEnds[gameWidgetIndex], m_subsystemSky.ViewHazeStart + 1f / m_subsystemSky.ViewHazeDensity);
                 float num2 = MathUtils.Min(m_subsystemSky.ViewHazeStart, num - 1f);
-                parameter.SetValue(new Vector2(num2, 1f / (num - num2)));
+                parameter.SetValue(SkylineRuntime.HazeStartDensity(new Vector2(num2, 1f / (num - num2))));
                 int num3 = 16;
                 if (viewPosition.Z > terrainChunk.BoundingBox.Min.Z) {
                     num3 |= 1;
@@ -191,7 +191,7 @@ namespace Game {
             m_alphaTestedShader.GetParameter("u_fogYMultiplier", true).SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
             m_alphaTestedShader.GetParameter("u_fogColor", true).SetValue(new Vector3(m_subsystemSky.ViewFogColor));
             m_alphaTestedShader.GetParameter("u_fogBottomTopDensity")
-                .SetValue(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity));
+                .SetValue(SkylineRuntime.FogBand(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity)));
             m_alphaTestedShader.GetParameter("u_alphaThreshold").SetValue(0.5f);
             ShaderParameter parameter = m_alphaTestedShader.GetParameter("u_hazeStartDensity");
             ModsManager.HookAction(
@@ -205,7 +205,7 @@ namespace Game {
                 TerrainChunk terrainChunk = m_chunksToDraw[i];
                 float num = MathUtils.Min(terrainChunk.HazeEnds[gameWidgetIndex], m_subsystemSky.ViewHazeStart + 1f / m_subsystemSky.ViewHazeDensity);
                 float num2 = MathUtils.Min(m_subsystemSky.ViewHazeStart, num - 1f);
-                parameter.SetValue(new Vector2(num2, 1f / (num - num2)));
+                parameter.SetValue(SkylineRuntime.HazeStartDensity(new Vector2(num2, 1f / (num - num2))));
                 int subsetsMask = 32;
                 DrawTerrainChunkGeometrySubsets(m_alphaTestedShader, terrainChunk, subsetsMask);
             }
@@ -229,7 +229,7 @@ namespace Game {
             m_transparentShader.GetParameter("u_fogYMultiplier", true).SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
             m_transparentShader.GetParameter("u_fogColor", true).SetValue(new Vector3(m_subsystemSky.ViewFogColor));
             m_transparentShader.GetParameter("u_fogBottomTopDensity")
-                .SetValue(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity));
+                .SetValue(SkylineRuntime.FogBand(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity)));
             ShaderParameter parameter = m_transparentShader.GetParameter("u_hazeStartDensity");
             ModsManager.HookAction(
                 "SetShaderParameter",
@@ -242,7 +242,7 @@ namespace Game {
                 TerrainChunk terrainChunk = m_chunksToDraw[i];
                 float num = MathUtils.Min(terrainChunk.HazeEnds[gameWidgetIndex], m_subsystemSky.ViewHazeStart + 1f / m_subsystemSky.ViewHazeDensity);
                 float num2 = MathUtils.Min(m_subsystemSky.ViewHazeStart, num - 1f);
-                parameter.SetValue(new Vector2(num2, 1f / (num - num2)));
+                parameter.SetValue(SkylineRuntime.HazeStartDensity(new Vector2(num2, 1f / (num - num2))));
                 int subsetsMask = 64;
                 DrawTerrainChunkGeometrySubsets(m_transparentShader, terrainChunk, subsetsMask);
             }

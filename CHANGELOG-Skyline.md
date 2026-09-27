@@ -3,6 +3,44 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.35] - 2026-09-27
+
+第四十五个版本：**深度图 16 bit 双通道 + 关雾开关** —— 把 v0.1.32 起的太阳深度图从
+"每步 16.06 m"提升到"每步 0.0625 m"，真实地形阴影从此能表现米级物体与自阴影；
+同时按用户要求在分支里提供 **`skyline.FogDisabled`**（测试光影时关雾）与 **`skyline.CloseDialogs()`**
+（自动化测试用，解掉"日志对话框挡住 Navigator"的阻塞）。
+
+**本版相对 v0.1.34 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（16 bit 深度）** | 深度 pass 片元写 `d16 = round(d*65535)`，`R=hi/255`、`G=lo/255`、`B=d`（8 bit 预览）；采样侧按**捕获时**的编码解码（`u_shadowDepth16`）。开关 `skyline.GpuShadowDepth16`（默认 **true**；false 逐位回退旧 8 bit，专供 A/B）。量化步长：8 bit 4096/255 = **16.0628 m** → 16 bit **0.0625 m** |
+| **修复 B（precision）** | 深度 pass 与采样变体的 GLSL 片元改 `precision highp float;` —— `mediump` 尾数只有 ~10 bit，`d*65535` 会被压到 ~1024 级，16 bit 等于白做。解码侧用 `floor(R*255+0.5)` 吸附整数，避免 ±1 ULP 吃掉低位 |
+| **新增 C（关雾开关）** | `SkylineFogControl.cs`：`skyline.FogDisabled`（默认 false = 原样）。开启时把雾密度清零（雾带 z=0、霾 (0,0)），接入 `TerrainRenderer`（opaque/alphaTested/transparent）、`SkylineLod`、`SubsystemModelsRenderer`；不动地形/光照/存档，`skyline.FogDescribe()` 诊断 |
+| **修复 D（自动化阻塞）** | `skyline.CloseDialogs()`：强制摘除当前所有对话框（原版 `HideAllDialogs()` 在 `ViewGameLogDialog` 上抛 NRE，会让 Navigator 永远停在 `status='dialog'`）。另记录：相机精确摆位应直写 `player.ComponentLocomotion.LookAngles`（弧度），`lookAt` 路线实测停在 pitch 偏差 ~38° 处 |
+
+### Verified（AgentLab；测试台 z=9145 的 16/8/4/2/1 m 阶梯墙 + 35×27 石砖平台；关雾）
+
+| 项 | 8 bit | 16 bit |
+|---|---|---|
+| 覆盖率（同一相机/同一几何） | 155,955 px（14.87%） | 155,955 px（14.87%） |
+| 深度范围 | [119, 173] | [30519, 44437] |
+| **量化步长** | **16.0628 m** | **0.0625 m** |
+| **深度 PNG 的不同值个数** | **48** | **9235** |
+| 值恰为 257 的倍数 | **100%**（纯 8 bit 栅格） | 0.342%（≈1/257 随机） |
+| 回读自检 / 耗时 | True / 56.8 ms | True / 45.1 ms |
+| 采样截图（strength 0.45、bias 0.0002） | **整块平台被假自阴影糊暗**（量化 ±8 m 误判自遮挡） | 平台正常受光 + 阶梯墙**清晰阶梯状投影** |
+
+像素统计（8bit → 16bit）：**438,256 px 变化（>8，占 48%）**，变亮 367,590 / 变暗 70,666，
+全帧平均亮度 **92.2 → 111.1**。证据：`data/sessions/skyline-v0135/`、脚本
+`heightlab/skyline-v0135-16bit-depth.py`（幂等，可复跑）、`notes/107`。
+
+边界（如实）：只接入**不透明** pass；粒子/移动方块/挖掘裂纹等自设雾参数的 pass 未接入关雾开关；
+深度图仍按需生成。下一步：①alpha-tested 进深度图；②与 v0.1.30 CPU 顶点阴影统一口径 A/B；
+③`GpuShadowRadius` 收到 256 m 的精度/覆盖取舍；④家具 design 写入侧护栏。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.34] - 2026-09-27
 
 第四十四个版本：**阴影贴图采样收口** —— 不透明 pass 改用"地形 shader + 阴影采样"变体，
