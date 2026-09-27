@@ -3,6 +3,26 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.5] - 2026-09-27
+
+第十五个版本：**LOD 光影接口预适配（Dawnlight / Iris）**（用户里程碑 5："需要对 LOD 的 Dawnlight
+光影接口，以及学习 Iris 光影接口做预适配"）。
+
+**本版相对 v0.1.4 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（接管点）** | `SkylineLod` 增加 —— `ExternalShaderHooked`（**默认 false = 与 v0.1.4 逐位一致**；光影包置 true 表示接管 LOD 绘制）、`CustomDraw(Camera)`（外部绘制回调，内部异常被捕获并记入 `lastError`）、`MeshMetadata()`（层/单元尺寸/半径/索引数的 JSON 元数据）。桥转发：`skyline.LodExternalShaderHooked` / `skyline.LodMeshMetadata()` |
+| **文档 B** | `notes/73-LOD光影接口预适配.md`：**Dawnlight 实读结论**（MonoMod.RuntimeDetour + 77 个 shader 的延迟管线，**没有给外部 LOD 留接口**→ 接口应由我们定义）；**Iris 结构调研**（`shaderpack/pipeline/uniforms/targets/samplers/vertices/shadows/compat` 七模块与我们的对应表；其仓库自带 `DHApi.jar` 证明"Iris+DH"路线）；真接入路线图（只读网格访问器→阴影阶段→G-buffer/法线/材质 id→与 Dawnlight detour 的对接方式→以"远景明暗/阴影一致"为验收） |
+
+### Verified
+
+* 开关默认关闭时行为不变（`Draw` 走原路径）；开启且 `CustomDraw` 为空时安全回退内置路径
+  （代码路径审查 + 构建 0 警告 0 错误）；
+* `LodMeshMetadata` 输出示例：`{"coarseCells":…,"coarseIndices":…,"coarseCellSize":16,
+  "fineCells":…,"fineIndices":…,"fineCellSize":8,"radiusMetres":1024,"fineRangeMetres":2048,
+  "externalHooked":false}`。
+
 ## [v0.1.4] - 2026-09-27
 
 第十四个版本：**32³ 路线第 1 步——竖直分节（16×16×256 子列，按需分配）**（用户里程碑"32³ 竖直分节"）。

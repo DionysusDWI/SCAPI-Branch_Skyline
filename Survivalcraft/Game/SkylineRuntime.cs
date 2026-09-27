@@ -148,6 +148,15 @@ namespace Game {
             set => SkylineRender.ShortSphereFactor = value;
         }
 
+        /// <summary>v0.1.5：光影包接管 LOD 绘制（Dawnlight/Iris 式）。</summary>
+        public static bool LodExternalShaderHooked {
+            get => SkylineLod.ExternalShaderHooked;
+            set => SkylineLod.ExternalShaderHooked = value;
+        }
+
+        /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>
+        public static string LodMeshMetadata() => SkylineLod.MeshMetadata();
+
         public static string LodDescribe() => SkylineLod.Describe();
 
         public static string LodSurvey() => SkylineLod.Survey();

@@ -37,6 +37,33 @@ namespace Game {
         /// <summary>精细层（8 m）覆盖到"视距 × 本系数"为止，之后交给 16 m 粗层。</summary>
         public static float FineRangeFactor { get; set; } = 2.0f;
 
+        // ===== v0.1.5：光影接口预适配（Dawnlight / Iris 式管线）=====
+        /// <summary>
+        /// 外部光影包接管 LOD 绘制时置 true：`Draw` 不再走内置的地形 shader 路径，
+        /// 改调用 <see cref="CustomDraw"/>（若为 null 则回退内置路径）。
+        /// 设计背景见 notes/73：Dawnlight 用 MonoMod hook 游戏渲染管线，Iris 用
+        /// gbuffers_/composite_ 阶段约定；这里给两者都留"一个明确的接管点 + 一份 LOD 元数据"。
+        /// </summary>
+        public static bool ExternalShaderHooked { get; set; }
+
+        /// <summary>外部光影包的 LOD 绘制回调（相机参数；内部需自行设置 shader 与状态）。</summary>
+        public static System.Action<Camera> CustomDraw { get; set; }
+
+        /// <summary>当前 LOD 网格的元数据（给光影包用：层、单元尺寸、可见半径、索引数）。</summary>
+        public static string MeshMetadata() {
+            return new System.Text.Json.Nodes.JsonObject {
+                ["coarseCells"] = m_cellsInMesh,
+                ["coarseIndices"] = m_indexCount,
+                ["coarseCellSize"] = CellSize,
+                ["fineCells"] = m_cellsInMeshFine,
+                ["fineIndices"] = m_indexCountFine,
+                ["fineCellSize"] = FineSize,
+                ["radiusMetres"] = RadiusMetres,
+                ["fineRangeMetres"] = RadiusMetres * FineRangeFactor,
+                ["externalHooked"] = ExternalShaderHooked
+            }.ToJsonString();
+        }
+
         sealed class Cell {
             public short Height;
             public ushort Value;
@@ -411,6 +438,17 @@ namespace Game {
 
         public static void Draw(Camera camera) {
             if (!Enabled || (m_indexCount == 0 && m_indexCountFine == 0)) {
+                return;
+            }
+            // v0.1.5：光影包接管点——Dawnlight/Iris 式管线自行绘制 LOD（见 notes/73）。
+            if (ExternalShaderHooked && CustomDraw != null) {
+                try {
+                    CustomDraw(camera);
+                }
+                catch (Exception e) {
+                    m_lastError = e.Message;
+                    Log.Warning($"SkylineLod.CustomDraw: {e.Message}");
+                }
                 return;
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
