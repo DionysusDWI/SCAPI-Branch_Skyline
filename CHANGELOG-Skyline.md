@@ -7,6 +7,58 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.87] - 2026-09-28
+
+第九十七个版本：**`op:container` 容器内容写入**（Axiom 缺口表 #1）+ **蓝图区域变换复核**（#5，结清）。
+
+### #1 落地：`op:container`
+
+```
+{"op":"container","x":..,"y":..,"z":..,"mode":"set|add|clear",
+ "items":[{"slot":0,"contents":5,"data":0,"count":10}, ...]}
+```
+
+* `mode=set`（默认）先清空该槽再放；`mode=add` 叠加（受 `IInventory.GetSlotCapacity` 限制）；
+  `slot` 省略时**自动找第一个放得下的槽**；`mode=clear` 不给 `items` 就清空**全部**槽；
+* 回包 `slotsCount / placed[{slot,contents,data,count,capacity}] / overflow`；
+* 实现：`SubsystemBlockEntities.GetBlockEntity` → `Entity.FindComponents<IInventory>().FirstOrDefault()`
+  → 全程走 `IInventory` 接口。
+* **口径提醒**：容器内容**不在方块数据里**（`cell` 的 `value` 看不到），这点必须先说清。
+
+实测（AgentLab）：放箱子（contents 45）→ `set` 槽0=鹅卵石×12、槽1=花岗岩×7（`slotsCount=16`、`overflow=0`）
+→ `add` 槽0 再加 5 ⇒ **`count=17`**（证明真叠加）→ `clear` ⇒ **`removed=17`**。
+
+### #5 复核：区域变换**早就可用**（结论是"已具备，只是没有判据"）
+
+`notes/106` 记的是"缺：从桥一键做 rotate/mirror 并写回"。复核发现 `SkylineBlueprint` 已有
+`Capture / Paste(rotation,mirrorX,mirrorZ) / Copy / MirrorRegion / Fill / Replace / Export / Import …`，
+而桥本就支持 `target:"type:Game.SkylineBlueprint"` ⇒ **直接可调用，不需要再加包装层**。
+
+端到端验证（**不对称** L 形图案才测得出旋转）：`rotation:90/180/270` 与 `mirrorX` 各贴一份，
+**逐格回读 contents 与手算期望比对 —— 四种变换全部一致**。
+
+### 缺口表现状
+
+| # | 缺口 | 状态 |
+|---|---|---|
+| 1 | 容器内容写入 | ✅ **本版** |
+| 2 | 隧道预设 `op:tunnel` | ⬜ 未做（截面+轨+灯+支撑的"配件层"） |
+| 3 | 笔画式构建 `op:brush` | ⬜ 未做（先要定"每帧写多少格 + 光照去抖"的节流） |
+| 4 | 贝塞尔扫掠 profile 家族 | ✅ v0.1.86 |
+| 5 | 区域变换 | ✅ **本版复核结清** |
+
+### 门禁与没做
+
+全量门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**（本版只动 AgentBridge 与文档）。
+没做：①"从背包批量倒进容器"；②配方容器不代替 `op:smelt`；③判据依赖回包而非独立回读
+（容器内容不在 `cell` 里，要独立回读需再加一个"读容器"的 op）。
+
+证据：`data/sessions/skyline-v0187/`（`container-op.json`、`blueprint-transforms.json`、`regression.json`）、
+`notes/165`。构建：`Survivalcraft.Windows` Release **0 警告 0 错误**（AgentBridge 模组构建另有 1 条**既存**过时 API 警告）。
+源码包内含本版补丁 `height-v0187.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.86] - 2026-09-28
 
 第九十六个版本：**贝塞尔扫掠的 profile 家族**（Axiom 学习项 #4）。
