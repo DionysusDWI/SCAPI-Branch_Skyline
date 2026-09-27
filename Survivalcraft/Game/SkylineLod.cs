@@ -150,6 +150,12 @@ namespace Game {
             if (chunks.Length == 0) {
                 return;
             }
+            // v0.1.6：采样缓冲移出循环（CA2014——stackalloc 不能放在循环体内，会累积栈）
+            Span<long> coarseSamples = stackalloc long[TerrainChunk.Size * TerrainChunk.Size];
+            Span<long> fine0 = stackalloc long[64];
+            Span<long> fine1 = stackalloc long[64];
+            Span<long> fine2 = stackalloc long[64];
+            Span<long> fine3 = stackalloc long[64];
             for (int n = 0; n < Math.Max(ChunksPerTick, 1); n++) {
                 m_harvestCursor = (m_harvestCursor + 1) % chunks.Length;
                 TerrainChunk chunk = chunks[m_harvestCursor];
@@ -177,28 +183,42 @@ namespace Game {
                         continue;
                     }
                 }
-                int bestTop = int.MaxValue;
-                int bestValue = 0;
-                // v0.1.1：同一次扫描顺便填 4 个 8 m 精细子单元（各 8×8 列取最低顶面）
-                int[] fineTop = [int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue];
-                int[] fineValue = [0, 0, 0, 0];
+                // v0.1.6：采样从"最低顶面"改为**中位高度**——"最低"会被单个深坑拉低
+                // （整片地形画成下沉平板），中位对树冠/坑洞都稳健。一次扫描把每列的
+                // (height<<32|value) 打包进 5 组样本（粗层 256 + 4 个细子块各 64），
+                // 各自排序取中位。Span<long>.Sort() 用默认比较（先 height 后 value），无 lambda。
+                int cCount = 0, f0 = 0, f1 = 0, f2 = 0, f3 = 0;
                 for (int x = 0; x < TerrainChunk.Size; x++) {
                     for (int z = 0; z < TerrainChunk.Size; z++) {
                         int top = chunk.GetTopHeightFast(x, z);
                         if (top < TerrainChunk.MinHeight) {
                             continue;                       // 空列
                         }
-                        if (top < bestTop) {
-                            bestTop = top;
-                            bestValue = chunk.GetCellValueFast(x, top, z);
-                        }
-                        int sub = (x >> 3) | ((z >> 3) << 1);
-                        if (top < fineTop[sub]) {
-                            fineTop[sub] = top;
-                            fineValue[sub] = chunk.GetCellValueFast(x, top, z);
+                        long packed = ((long)top << 32) | (uint)chunk.GetCellValueFast(x, top, z);
+                        coarseSamples[cCount++] = packed;
+                        switch ((x >> 3) | ((z >> 3) << 1)) {
+                            case 0: fine0[f0++] = packed; break;
+                            case 1: fine1[f1++] = packed; break;
+                            case 2: fine2[f2++] = packed; break;
+                            default: fine3[f3++] = packed; break;
                         }
                     }
                 }
+                int bestTop = int.MaxValue;
+                int bestValue = 0;
+                if (cCount > 0) {
+                    Span<long> sorted = coarseSamples.Slice(0, cCount);
+                    sorted.Sort();
+                    long mid = sorted[cCount / 2];
+                    bestTop = (int)(mid >> 32);
+                    bestValue = (int)(uint)mid;
+                }
+                Span<int> fineTop = [int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue];
+                Span<int> fineValue = [0, 0, 0, 0];
+                MedianInto(fine0, f0, fineTop, fineValue, 0);
+                MedianInto(fine1, f1, fineTop, fineValue, 1);
+                MedianInto(fine2, f2, fineTop, fineValue, 2);
+                MedianInto(fine3, f3, fineTop, fineValue, 3);
                 if (bestTop != int.MaxValue) {
                     m_cells[key] = new Cell { Height = (short)bestTop, Value = (ushort)bestValue };
                     m_harvestedCells++;
@@ -219,6 +239,19 @@ namespace Game {
         }
 
         // ---------------- 网格 ----------------
+
+        /// <summary>v0.1.6：把一组打包样本（height 在高 32 位、value 在低 32 位）排序取中位，
+        /// 写入细层的高度/材质槽。</summary>
+        static void MedianInto(Span<long> samples, int count, Span<int> tops, Span<int> values, int index) {
+            if (count <= 0) {
+                return;
+            }
+            Span<long> sorted = samples.Slice(0, count);
+            sorted.Sort();
+            long mid = sorted[count / 2];
+            tops[index] = (int)(mid >> 32);
+            values[index] = (int)(uint)mid;
+        }
 
         /// <summary>v0.1.1：重建入口——精细层（8 m，近环）+ 粗层（16 m，远环）两套网格。</summary>
         static void RebuildMesh() {
