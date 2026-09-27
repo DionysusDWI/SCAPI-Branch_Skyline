@@ -62,11 +62,17 @@ namespace Game {
 
         public TerrainChunkGeometry Geometry = new();
 
-        public int[] Cells;
+        // ===== v0.1.4：**竖直分节**（32³ 路线第 1 步）=====
+        // 把"整列 Size×Size×Height 一块"拆成 ColumnSlicesCount 个 256 层的子列，**按需租借**：
+        // 高空玩家只需顶部子列，竖直方向的裁剪才真正省内存（notes/67 §3）。读取未租借的段返回 0（空气），
+        // 写入会自动租借该段。对外访问全部走 Get/SetCellValueFast，行为与原整块一致。
+        public const int ColumnSliceHeight = 256;
+        public const int ColumnSlicesCount = Height / ColumnSliceHeight;
+        public int[][] Cells;
 
         public long[] Shafts;                                  // [高度实验] int[] -> long[]（高度字段要 10 位）
 
-        public static ArrayCache<int> m_cellsCache = new([Size * Size * Height], 0.66f, 60f, 0.33f, 5f);
+        public static ArrayCache<int> m_cellsCache = new([Size * Size * ColumnSliceHeight], 0.66f, 60f, 0.33f, 5f);
 
         public static ArrayCache<long> m_shaftsCache = new([Size * Size], 0.66f, 60f, 0.33f, 5f);
 
@@ -89,8 +95,33 @@ namespace Game {
                 new Vector3(Origin.X, MinHeight, Origin.Y),
                 new Vector3(Origin.X + Size, HeightMinusOne + 1, Origin.Y + Size));
             Center = new Vector2((float)Origin.X + Size / 2, (float)Origin.Y + Size / 2);
-            Cells = m_cellsCache.Rent(Size * Size * Height, true);
+            Cells = new int[ColumnSlicesCount][];
             Shafts = m_shaftsCache.Rent(Size * Size, true);
+        }
+
+        /// <summary>取某一段（未租借则为 null；读路径当成全 0/空气）。</summary>
+        public int[] GetColumnSlice(int seg) =>
+            seg >= 0 && seg < ColumnSlicesCount ? Cells[seg] : null;
+
+        /// <summary>确保某一段已租借（写路径用）。</summary>
+        public int[] EnsureColumnSlice(int seg) {
+            if (Cells[seg] == null) {
+                Cells[seg] = m_cellsCache.Rent(Size * Size * ColumnSliceHeight, true);
+            }
+            return Cells[seg];
+        }
+
+        /// <summary>已租借的段数（0..ColumnSlicesCount）——竖直分节的省内存指标。</summary>
+        public int AllocatedColumnSlices {
+            get {
+                int n = 0;
+                for (int i = 0; i < ColumnSlicesCount; i++) {
+                    if (Cells[i] != null) {
+                        n++;
+                    }
+                }
+                return n;
+            }
         }
 
         public virtual void DisposeVertexIndexBuffers() {
@@ -118,7 +149,12 @@ namespace Game {
                 throw new InvalidOperationException();
             }
             Geometry = null;
-            m_cellsCache.Return(Cells);
+            for (int i = 0; i < ColumnSlicesCount; i++) {
+                if (Cells[i] != null) {
+                    m_cellsCache.Return(Cells[i]);
+                    Cells[i] = null;
+                }
+            }
             m_shaftsCache.Return(Shafts);
         }
 
@@ -167,22 +203,53 @@ namespace Game {
             return 0;
         }
 
-        public virtual int GetCellValueFast(int index) => Cells[index];
+        // v0.1.4：分段寻址——索引布局与原版一致（(y-MinHeight) + x*Height + z*Height*Size），
+        // 只是把"整块"映射到"段号(高 16 位) + 段内偏移(低 16 位)"。
+        const int SliceIndexShift = 16;                     // Size*Size*ColumnSliceHeight = 65536
+        const int SliceIndexMask = 0xFFFF;
 
-        public virtual int GetCellValueFast(int x, int y, int z) => Cells[y - MinHeight + x * Height + z * Height * Size];
+        public virtual int GetCellValueFast(int index) {
+            int[] slice = Cells[index >> SliceIndexShift];
+            return slice == null ? 0 : slice[index & SliceIndexMask];
+        }
 
-        public virtual int GetCellValueFast(Point3 p) => Cells[p.Y - MinHeight + p.X * Height + p.Z * Height * Size];
+        public virtual int GetCellValueFast(int x, int y, int z) {
+            int rel = y - MinHeight;
+            int[] slice = Cells[rel >> 8];
+            return slice == null ? 0 : slice[(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size];
+        }
+
+        public virtual int GetCellValueFast(Point3 p) => GetCellValueFast(p.X, p.Y, p.Z);
 
         public virtual void SetCellValueFast(int x, int y, int z, int value) {
-            Cells[y - MinHeight + x * Height + z * Height * Size] = value;
+            int rel = y - MinHeight;
+            int seg = rel >> 8;
+            if (Cells[seg] == null) {
+                // v0.1.4：向未分配段写"空气"= 无操作（竖直分节的省内存来源）。
+                // 注意判据用 `contents == 0` 而不是 `value == 0`——光照系统会把空气写成
+                // "contents=0 + light=15"（15360）这类值，若按 value==0 判，任何一次光照重算
+                // 都会把 8 段全部租出来（实测 AllocatedColumnSlices=8）。
+                if ((value & 0x3FF) == 0) {
+                    return;
+                }
+                EnsureColumnSlice(seg);
+            }
+            Cells[seg][(rel & 255) + x * ColumnSliceHeight + z * ColumnSliceHeight * Size] = value;
         }
 
         public virtual void SetCellValueFast(Point3 p, int value) {
-            Cells[p.Y - MinHeight + p.X * Height + p.Z * Height * Size] = value;
+            SetCellValueFast(p.X, p.Y, p.Z, value);
         }
 
         public virtual void SetCellValueFast(int index, int value) {
-            Cells[index] = value;
+            int seg = index >> SliceIndexShift;
+            if (Cells[seg] == null) {
+                if ((value & 0x3FF) == 0) {
+                    return;
+                }
+                EnsureColumnSlice(seg);
+            }
+            Cells[seg][index & SliceIndexMask] = value;
         }
 
         public virtual int GetCellContentsFast(int x, int y, int z) => Terrain.ExtractContents(GetCellValueFast(x, y, z));
