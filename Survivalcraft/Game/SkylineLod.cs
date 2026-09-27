@@ -960,6 +960,18 @@ namespace Game {
             float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
             // [v0.1.45] 近环 4 m 层：只覆盖 [skipRadius, skipRadius+NearBandMetres]
             float nearRange = skipRadius + NearBandMetres;
+            // [v0.1.70] 里程碑 2.2：**LOD 单元也要及时移除**（壳有滑动窗口、LOD 之前没有）。
+            // 只在"网格范围之外"动手（×LodCellReleaseFactor），所以不需要置脏。
+            if (LodCellReleaseEnabled) {
+                PruneFarCells(m_cells, CellShift, CellSize, RadiusMetres * LodCellReleaseFactor,
+                    out int releasedCoarse);
+                PruneFarCells(m_cellsFine, FineShift, FineSize, fineRange * LodCellReleaseFactor,
+                    out int releasedFine);
+                m_lodCellsReleasedLastCoarse = releasedCoarse;
+                m_lodCellsReleasedLastFine = releasedFine;
+                m_lodCellsReleasedCoarse += releasedCoarse;
+                m_lodCellsReleasedFine += releasedFine;
+            }
             if (SkylineRuntime.LodNearLayerEnabled) {
                 PruneNearCells(skipRadius + NearBandMetres + 32f);
                 RebuildMeshCore(m_cellsNear, NearShift, skipRadius, nearRange, 2);
@@ -980,6 +992,65 @@ namespace Game {
                 && (m_cells.Count > 0 || m_cellsFine.Count > 0 || m_cellsNear.Count > 0)) {
                 m_dirty = true;
             }
+        }
+
+        // ===== [v0.1.70] 里程碑 2.2：LOD 单元也要**及时移除** =====
+
+        /// <summary>
+        /// [v0.1.70] 是否把"超出绘制半径 ×系数"的 LOD 单元从内存里放掉。**默认关**。
+        ///
+        /// 为什么默认关（实测教训，别想当然开）：LOD 单元表**就是"走过就记住"的轨迹缓存** ——
+        /// 视距只有 128 m，而 LOD 要画 [512, 1024] m 那一圈，那些数据**只能**来自"玩家曾经走近时采下来的"。
+        /// 把它按距离放掉 = **把远景丢掉**：实测在同一个位置，放掉之后 `cellsInMesh` 从 148 掉到 **0**
+        /// （地平线远景整片消失），而它**本身小到可以忽略**（12.3 km 走行后粗层 6,442 + 精细层 25,768，
+        /// 量级 ~1.6 MB，约 0.13 MB/km）。
+        /// ⇒ 换来的是"一个本来就不存在的内存问题"，代价是可见的远景。**要用请显式打开**。
+        /// 真正的下一步是**把 LOD 单元落盘 + 按需回读**（Distant Horizons 的做法），那才既省内存又不丢远景。
+        /// </summary>
+        public static bool LodCellReleaseEnabled { get; set; }
+
+        /// <summary>[v0.1.70] 释放半径相对**绘制半径**的倍数（默认 1.25，与壳滑动窗口同一口径）。</summary>
+        public static float LodCellReleaseFactor { get; set; } = 1.25f;
+
+        static long m_lodCellsReleasedCoarse;
+        static long m_lodCellsReleasedFine;
+        static int m_lodCellsReleasedLastCoarse;
+        static int m_lodCellsReleasedLastFine;
+
+        /// <summary>累计被释放的粗层/精细层单元数（诊断）。</summary>
+        public static long LodCellsReleasedCoarse => m_lodCellsReleasedCoarse;
+
+        public static long LodCellsReleasedFine => m_lodCellsReleasedFine;
+
+        /// <summary>
+        /// 把超出 `maxDist` 的单元丢掉。**为什么不置 m_dirty**：调用点给的距离是
+        /// `绘制半径 × LodCellReleaseFactor`（>1），被丢掉的单元本来就不在网格里，
+        /// 置脏只会引发"重建→置脏→重建"的死循环（而且每走一步就白烧一次全量重建）。
+        /// </summary>
+        static void PruneFarCells(Dictionary<long, Cell> dict, int shift, float size, float maxDist,
+                                  out int removed) {
+            removed = 0;
+            if (dict.Count == 0 || maxDist <= 0f) {
+                return;
+            }
+            Vector3 camera = CameraViewPosition();
+            float maxSq = maxDist * maxDist;
+            List<long> remove = null;
+            foreach (long key in dict.Keys) {
+                int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
+                float dx = (cx << shift) + size * 0.5f - camera.X;
+                float dz = (cz << shift) + size * 0.5f - camera.Z;
+                if (dx * dx + dz * dz > maxSq) {
+                    (remove ??= []).Add(key);
+                }
+            }
+            if (remove == null) {
+                return;
+            }
+            foreach (long key in remove) {
+                dict.Remove(key);
+            }
+            removed = remove.Count;
         }
 
         /// <summary>[v0.1.45] 玩家走远后清掉带外的近环单元（近环层不落盘、纯临时）。</summary>
@@ -1579,6 +1650,12 @@ namespace Game {
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,
+                ["cellReleaseEnabled"] = LodCellReleaseEnabled,
+                ["cellReleaseFactor"] = (double)LodCellReleaseFactor,
+                ["cellsReleasedCoarse"] = m_lodCellsReleasedCoarse,
+                ["cellsReleasedFine"] = m_lodCellsReleasedFine,
+                ["cellsReleasedLastCoarse"] = m_lodCellsReleasedLastCoarse,
+                ["cellsReleasedLastFine"] = m_lodCellsReleasedLastFine,
                 ["loadedChunks"] = loadedColumns,
                 ["refresh"] = RefreshSurveyJson(),
                 ["lastError"] = m_lastError
