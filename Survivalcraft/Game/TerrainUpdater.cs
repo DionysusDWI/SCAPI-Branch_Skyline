@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using System.Text.Json.Nodes;
 using Engine;
 
 namespace Game {
@@ -1704,6 +1705,168 @@ namespace Game {
             if (name == "Brightness") {
                 DowngradeAllChunksState(TerrainChunkState.InvalidVertices1, true);
             }
+        }
+
+        // ============================================================================================
+        // [v0.1.39] 里程碑 3「32³ 第 2 步」：**立方体级（三维坐标）窗口判定**
+        //
+        // v0.1.28 的判据是"列级"：椭球竖直切片里**该列任何一层**有内容 → 整列保留（保守，浪费内存）。
+        // 立方体级只认"这个 32³ 立方体所在那一段"（列分带掩码的**对应位**）——
+        // 这正是 P3（跨列共享 32³ 立方体分页）将来要用的分配粒度，先把判据与诊断做实，
+        // 不动任何存储布局（可随时回退）。
+        // ============================================================================================
+        public const int CubeSize = 32;
+
+        static int CubeBandIndex(int cy) => cy - TerrainChunk.MinHeight / CubeSize;   // MinHeight=-1024 → +32
+
+        /// <summary>一个 32³ 立方体横跨 2×2 个 16×16 列 —— 分带掩码是**列级**的，所以内容判定要 OR 这 4 列。</summary>
+        static void CubeColumns(int cx, int cz, out int colX0, out int colX1, out int colZ0, out int colZ1) {
+            colX0 = cx * 2; colX1 = colX0 + 1;
+            colZ0 = cz * 2; colZ1 = colZ0 + 1;
+        }
+
+        /// <summary>[v0.1.39] 单立方体判定：三维坐标 (cx,cy,cz)，一格 = 32³。
+        /// 输出：是否在球窗椭球内 / 该立方体那一段是否真有内容 / 旧"列级"判据会不会保留它 / 最终保留与否 / 原因。</summary>
+        public virtual void CubeWindowDecide(int cx, int cy, int cz,
+                                             out bool inSphere, out bool hasContent, out bool columnRuleKeep,
+                                             out bool kept, out string reason) {
+            inSphere = false;
+            kept = false;
+            reason = "outOfWindow";
+            Vector3 cubeCenter = new(cx * CubeSize + CubeSize * 0.5f, cy * CubeSize + CubeSize * 0.5f,
+                                     cz * CubeSize + CubeSize * 0.5f);
+            int bandIndex = CubeBandIndex(cy);
+            CubeColumns(cx, cz, out int colX0, out int colX1, out int colZ0, out int colZ1);
+            bool maskKnown = false;
+            hasContent = false;
+            for (int colX = colX0; colX <= colX1; colX++) {
+                for (int colZ = colZ0; colZ <= colZ1; colZ++) {
+                    if (!TryGetContentBandMask32(colX, colZ, out ulong columnMask)) {
+                        continue;
+                    }
+                    maskKnown = true;
+                    if (bandIndex >= 0 && bandIndex < 64 && ((columnMask >> bandIndex) & 1UL) != 0) {
+                        hasContent = true;
+                    }
+                }
+            }
+            columnRuleKeep = false;
+            float yMul = MathF.Max(m_subsystemSky?.VisibilityRangeYMultiplier ?? 1f, 0.05f);
+            foreach (KeyValuePair<int, UpdateLocation> kv in m_updateParameters.Locations) {
+                UpdateLocation location = kv.Value;
+                if (!location.SphereWindow) {
+                    continue;
+                }
+                float dx = cubeCenter.X - location.Center.X;
+                float dz = cubeCenter.Z - location.Center.Y;
+                float horiz2 = dx * dx + dz * dz;
+                float cd2 = location.ContentDistance * location.ContentDistance;
+                if (horiz2 > cd2) {
+                    continue;
+                }
+                float reach = MathF.Sqrt(MathUtils.Max(cd2 - horiz2, 0f)) * yMul;
+                if (MathF.Abs(cubeCenter.Y - location.CenterY) > reach) {
+                    continue;
+                }
+                inSphere = true;
+                for (int colX = colX0; colX <= colX1 && !columnRuleKeep; colX++) {
+                    for (int colZ = colZ0; colZ <= colZ1; colZ++) {
+                        if (TryGetContentBandMask32(colX, colZ, out ulong columnMask)
+                            && BandMaskHasContentInRange(columnMask, location.CenterY - reach, location.CenterY + reach)) {
+                            columnRuleKeep = true;               // 旧列级判据（v0.1.28）会保留整列
+                            break;
+                        }
+                    }
+                }
+            }
+            kept = inSphere && hasContent;
+            reason = !inSphere ? "outOfWindow"
+                : !maskKnown ? "noMask"
+                : hasContent ? "kept"
+                : columnRuleKeep ? "cubeBandEmpty(oldRuleWouldKeep)"
+                : "cubeBandEmpty";
+        }
+
+        /// <summary>[v0.1.39] 单立方体判定的文本版（桥：`skyline.CubeWindowDecision(cx,cy,cz)`）。</summary>
+        public virtual string DescribeCubeWindowDecision(int cx, int cy, int cz) {
+            System.Text.StringBuilder sb = new();
+            sb.Append($"cube=({cx},{cy},{cz}) y=[{cy * CubeSize},{cy * CubeSize + CubeSize - 1}] ");
+            sb.Append($"cubeSize={CubeSize} ");
+            CubeColumns(cx, cz, out int colX0, out int colX1, out int colZ0, out int colZ1);
+            int bandIndex = CubeBandIndex(cy);
+            sb.Append($"columns=({colX0},{colZ0})..({colX1},{colZ1}) bandIndex={bandIndex} ");
+            for (int colX = colX0; colX <= colX1; colX++) {
+                for (int colZ = colZ0; colZ <= colZ1; colZ++) {
+                    TerrainChunk column = m_terrain.GetChunkAtCoords(colX, colZ);
+                    if (TryGetContentBandMask32(colX, colZ, out ulong columnMask)) {
+                        int bit = bandIndex >= 0 && bandIndex < 64 ? (int)((columnMask >> bandIndex) & 1UL) : -1;
+                        sb.Append($"[col({colX},{colZ}) allocated={column != null} mask=0x{columnMask:X16} bit={bit}] ");
+                    }
+                    else {
+                        sb.Append($"[col({colX},{colZ}) allocated={column != null} maskKnown=none] ");
+                    }
+                }
+            }
+            CubeWindowDecide(cx, cy, cz, out bool inSphere, out bool hasContent, out bool columnRuleKeep,
+                             out bool kept, out string reason);
+            sb.Append($"inSphere={inSphere} cubeHasContent={hasContent} columnRuleKeep={columnRuleKeep} "
+                + $"kept={kept} reason={reason}");
+            return sb.ToString();
+        }
+
+        /// <summary>[v0.1.39] **专项窗口报告**：以相机所在立方体为中心，统计 ±radiusCubes（横）/±yRadius（竖）
+        /// 范围内立方体级判据的分布，并给出"旧列级判据会多保留多少"的对照 —— 这是 P3 的收益口径。</summary>
+        public virtual string CubeWindowSurvey(int pcx, int pcy, int pcz, int radiusCubes, int yRadius) {
+            int total = 0, inSphere = 0, hasContent = 0, kept = 0, columnRuleKeep = 0;
+            Dictionary<int, int> keptByCy = [];
+            Dictionary<int, int> sphereByCy = [];
+            for (int cx = pcx - radiusCubes; cx <= pcx + radiusCubes; cx++) {
+                for (int cz = pcz - radiusCubes; cz <= pcz + radiusCubes; cz++) {
+                    for (int cy = pcy - yRadius; cy <= pcy + yRadius; cy++) {
+                        CubeWindowDecide(cx, cy, cz, out bool iS, out bool hC, out bool cR, out bool k, out _);
+                        total++;
+                        if (iS) {
+                            inSphere++;
+                            sphereByCy.TryGetValue(cy, out int sN);
+                            sphereByCy[cy] = sN + 1;
+                        }
+                        if (hC) {
+                            hasContent++;
+                        }
+                        if (k) {
+                            kept++;
+                            keptByCy.TryGetValue(cy, out int kN);
+                            keptByCy[cy] = kN + 1;
+                        }
+                        if (cR) {
+                            columnRuleKeep++;
+                        }
+                    }
+                }
+            }
+            JsonArray byCy = [];
+            for (int cy = pcy - yRadius; cy <= pcy + yRadius; cy++) {
+                sphereByCy.TryGetValue(cy, out int sN);
+                keptByCy.TryGetValue(cy, out int kN);
+                byCy.Add(new JsonObject { ["cy"] = cy, ["inSphere"] = sN, ["kept"] = kN });
+            }
+            JsonObject result = new() {
+                ["ok"] = true,
+                ["cameraCube"] = new JsonArray(pcx, pcy, pcz),
+                ["radiusCubes"] = radiusCubes,
+                ["yRadius"] = yRadius,
+                ["total"] = total,
+                ["inSphere"] = inSphere,
+                ["cubeHasContent"] = hasContent,
+                ["kept"] = kept,
+                ["columnRuleKeep"] = columnRuleKeep,
+                ["emptyButColumnRuleKeeps"] = columnRuleKeep - kept,
+                ["byCy"] = byCy,
+                ["sphereLoadingEnabled"] = SkylineRuntime.SphereLoadingEnabled,
+                ["cubeBands"] = SkylineRuntime.SphereLoadingCubeBands,
+                ["note"] = "kept = 立方体级（三维坐标 + 该段掩码位）；columnRuleKeep = v0.1.28 列级判据"
+            };
+            return result.ToJsonString();
         }
     }
 }

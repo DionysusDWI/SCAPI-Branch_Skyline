@@ -19,6 +19,13 @@ namespace Game {
     ///     半径默认取 `SubsystemSky.VisibilityRange`（用户设置视距），`m = CubeWindowYMultiplier`；
     ///   * 立方体按"与椭球**相交**（包围盒最近点）"计数 —— 与现有列式"被球波及的列都要加载"同口径，
     ///     因此两组数字可比。
+    ///
+    /// [v0.1.39] 追加**立方体级判据**（不是账本，而是"该立方体要不要保留"的可查判定）：
+    ///   * `skyline.CubeWindowDecision(cx,cy,cz)` —— 三维坐标单立方体判定（球窗 + **该 32 层分带的掩码位**），
+    ///     并与 v0.1.28 的列级判据对照；
+    ///   * `skyline.CubeBandSurveyHere(radius,yRadius)` —— 以相机所在立方体为中心的**专项窗口报告**
+    ///     （含"列级判据会多保留多少"的收益口径）；
+    ///   * `skyline.CubeInvariantsCheck(samples)` —— 立方体坐标 ↔ 分带掩码位 ↔ (x,y,z) 的寻址门禁。
     /// </summary>
     public static partial class SkylineRuntime {
         // ---------------- 配置（全部可在运行时改，桥可直接读写） ----------------
@@ -213,5 +220,105 @@ namespace Game {
                 : null,
             ["note"] = "账本模式：只统计 32³ 三维窗口的规模/内存/重算耗时，不参与加载与存档"
         }.ToJsonString();
+
+        // ============================================================================================
+        // [v0.1.39] 立方体级判据（三维坐标）：账本回答"有多少"，下面回答"这一块要不要"
+        // ============================================================================================
+
+        /// <summary>[v0.1.39] 单立方体判定（三维坐标）：球窗椭球内？该 32 层分带真有内容？
+        /// 旧列级判据会不会保留整列？最终 kept？见 `TerrainUpdater.CubeWindowDecide`。</summary>
+        public static string CubeWindowDecision(int cx, int cy, int cz) {
+            TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
+            if (updater == null) {
+                return "cubeWindowDecision: no updater";
+            }
+            return updater.DescribeCubeWindowDecision(cx, cy, cz);
+        }
+
+        /// <summary>[v0.1.39] **专项窗口报告**：以相机所在立方体为中心，统计立方体级判据的分布，
+        /// 并与 v0.1.28 列级判据对照（`emptyButColumnRuleKeeps` = 列级会多保留的立方体数，这是 P3 收益口径）。</summary>
+        public static string CubeBandSurveyHere(int radiusCubes = 4, int yRadius = 3) {
+            Camera camera = GetCamera();
+            if (camera == null) {
+                return "cubeBandSurvey: no camera";
+            }
+            Vector3 position = camera.ViewPosition;
+            int pcx = (int)MathF.Floor(position.X / TerrainUpdater.CubeSize);
+            int pcy = (int)MathF.Floor(position.Y / TerrainUpdater.CubeSize);
+            int pcz = (int)MathF.Floor(position.Z / TerrainUpdater.CubeSize);
+            return CubeBandSurveyAt(pcx, pcy, pcz, radiusCubes, yRadius);
+        }
+
+        /// <summary>[v0.1.39] 指定立方体中心的专项窗口报告（脚本/取证用：不必把相机搬过去，
+        /// 例如对比"地面"与"高空"同一个 x/z 下的立方体窗口差别）。</summary>
+        public static string CubeBandSurveyAt(int pcx, int pcy, int pcz,
+                                              int radiusCubes = 4, int yRadius = 3) {
+            TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
+            if (updater == null) {
+                return "cubeBandSurvey: no updater";
+            }
+            return updater.CubeWindowSurvey(pcx, pcy, pcz,
+                Math.Clamp(radiusCubes, 1, 16), Math.Clamp(yRadius, 0, 16));
+        }
+
+        /// <summary>
+        /// [v0.1.39] **立方体寻址门禁**：立方体坐标 ↔ 分带掩码位 ↔ (x,y,z) 必须自洽。
+        /// 覆盖世界竖直两端、32 的倍数/±1 边界与随机抽样；任何一条不成立 → ok=false。
+        /// 施工（P3）前后各跑一次。
+        /// </summary>
+        public static string CubeInvariantsCheck(int samples = 4096) {
+            JsonObject result = new();
+            try {
+                const int size = 32;
+                int checkedCells = 0;
+                int mismatches = 0;
+                string firstMismatch = null;
+                int bandOffset = -TerrainChunk.MinHeight / size;      // -1024/32 = 32
+                void CheckCell(int x, int y, int z) {
+                    checkedCells++;
+                    // 立方体坐标用**算术右移**（= floor 除法），负数才与游戏里 ToChunk 的约定一致
+                    int cx = x >> 5;
+                    int cy = y >> 5;
+                    int cz = z >> 5;
+                    int bandIndex = (y - TerrainChunk.MinHeight) >> 5;   // 掩码 64 位 ↔ 2048 m / 32
+                    int y0 = cy << 5;
+                    bool inside = y >= y0 && y < y0 + size;
+                    int rcx = (cx << 5 | 16) >> 5;
+                    int rcy = (cy << 5 | 16) >> 5;
+                    int rcz = (cz << 5 | 16) >> 5;
+                    bool roundTrip = rcx == cx && rcy == cy && rcz == cz;
+                    if (bandIndex != cy + bandOffset || !inside || !roundTrip
+                        || bandIndex < 0 || bandIndex > 63) {
+                        mismatches++;
+                        firstMismatch ??= $"(x={x},y={y},z={z}) cube=({cx},{cy},{cz}) bandIndex={bandIndex} "
+                            + $"expected={cy + bandOffset} inside={inside} roundTrip={roundTrip}";
+                    }
+                }
+                int minY = TerrainChunk.MinHeight;
+                int maxY = TerrainChunk.HeightMinusOne;
+                foreach (int y in new[] { minY, minY + 1, -993, -992, -991, -1, 0, 1, 31, 32, 33,
+                                          maxY - 1, maxY }) {
+                    CheckCell(0, y, 0);
+                    CheckCell(31, y, -31);
+                }
+                Random random = new(12345);
+                int n = Math.Clamp(samples, 16, 200000);
+                for (int i = 0; i < n; i++) {
+                    CheckCell(random.Int(-4096, 4096), random.Int(minY, maxY), random.Int(-4096, 4096));
+                }
+                result["ok"] = mismatches == 0;
+                result["cubeSize"] = size;
+                result["bandOffset"] = bandOffset;
+                result["checkedCells"] = checkedCells;
+                result["mismatches"] = mismatches;
+                result["firstMismatch"] = firstMismatch;
+                result["note"] = "bandIndex == cy + 32；立方体装得下该格；中心反查回同一立方体";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result.ToJsonString();
+        }
     }
 }

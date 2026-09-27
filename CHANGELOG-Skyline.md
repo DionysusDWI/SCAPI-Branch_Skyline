@@ -3,6 +3,46 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.39] - 2026-09-27
+
+第四十九个版本：**32³ 立方体级窗口判定（三维坐标）+ 立方体寻址门禁** —— 里程碑 3「32³ 第 2 步」的
+判据与门禁部分。v0.1.28 的球窗判据是**列级**（椭球竖直切片里该列任何一层有内容就保留整列），
+本版给出**立方体级**判据：三维坐标 `(cx,cy,cz)`，只认"这个 32³ 立方体所在那个 32 层分带"的掩码位；
+并配一个**专项窗口报告**与一条寻址门禁。**不动存储布局**，随时可回退。
+
+**本版相对 v0.1.38 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（立方体级判据）** | `TerrainUpdater.CubeWindowDecide(cx,cy,cz,...)`：一个 32³ 立方体横跨 **2×2 个列**，内容判定 = 四列 64 位分带掩码**对应位的 OR**（`bit = (mask >> (cy + 32)) & 1`）；两层判据 = 椭球（水平 `dx²+dz² ≤ C²`、竖直 `|Δy| ≤ sqrt(C²−dx²−dz²)·yMul`）∩ 该分带真有内容 |
+| **新增 B（专项窗口报告）** | `TerrainUpdater.CubeWindowSurvey(pcx,pcy,pcz,r,yr)` + 桥 `skyline.CubeBandSurveyHere(r,yr)` / `CubeBandSurveyAt(...)`：统计 `total/inSphere/cubeHasContent/kept`，并对 v0.1.28 列级判据给出 `columnRuleKeep` 与 **`emptyButColumnRuleKeeps`**（P3 收益口径），附每层分布 |
+| **新增 C（寻址门禁）** | `skyline.CubeInvariantsCheck(samples)`：断言立方体坐标用算术右移（floor）、`bandIndex == cy + 32`（MinHeight −1024 与 32 对齐）、立方体装得下该格、中心反查回同一立方体 |
+| **桥** | `skyline.CubeWindowDecision(cx,cy,cz)`（单立方体文本判定，含四列 allocated/mask/bit 明细） |
+
+### Verified（AgentLab；`SphereLoadingEnabled=true`；视距 128）
+
+* **门禁**：`CubeInvariantsCheck(8192)` → **ok=true / checkedCells=8218 / mismatches=0**；
+* **单立方体**：`CubeWindowDecision(136,2,285)` → 四列 `(272,570)..(273,571)` 均 `allocated=True`、
+  `mask=0x00000007FFFFFFFF`、`bandIndex=34`、`bit=1` → `inSphere=True cubeHasContent=True kept=True`；
+* **专项窗口（±4 / 竖直 ±3，567 个候选）**：
+
+| | 地面（cy=2） | 高空（cy=13，玩家站 y=420 柱顶） |
+|---|---|---|
+| `inSphere` / `kept` | 132 / **108** | 133 / **8** |
+| `columnRuleKeep`（v0.1.28 列级） | 132 | 9 |
+| **`emptyButColumnRuleKeeps`** | **24（≈18%）** | 1 |
+| 每层 kept | 0:16, 1:43, 2:48, **3:1** | 11:1, 12:3, 13:3, 14:1 |
+
+* **账本基线复跑**（v0.1.13 `CubeWindowSurvey`）：地面 443 立方体 / 233 列（55.4 MiB vs 58.3 MiB，0.141 ms）；
+  高空 448 / 233（56.0 MiB，0.283 ms）——注意账本的 `cubesWithContent` 是单点采样的**粗糙口径**，
+  立方体级 survey 用分带掩码才是准的。
+
+边界（如实）：本版只是**判据 + 诊断 + 门禁**，不改存储；真正的 P3（跨 2×2 列共享 32³ 立方体、
+分配单元 128 KiB、存档版本化 P4）仍需世界副本 + 施工前后各跑两条门禁 + 内存/fps 对照。
+证据：`data/sessions/skyline-v0139/`、`notes/112`。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.38] - 2026-09-27
 
 第四十八个版本：**近/远两级级联阴影贴图** —— 远图（512 m / 1024² = 1 m/texel）之外再加一张
