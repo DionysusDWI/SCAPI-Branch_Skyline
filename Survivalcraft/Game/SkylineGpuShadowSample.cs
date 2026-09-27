@@ -77,6 +77,8 @@ namespace Game {
         static string m_gpuShadowSampleError = "";
         static Shader m_gpuShadowOpaqueShader;
         static SamplerState m_gpuShadowSampler;
+        // [v0.1.69] 只用体积雾时的 1×1 占位深度图（纹素参数必须绑真纹理；u_shadowEnable=0 时不采样）
+        static RenderTarget2D m_gpuShadowDummyRt;
         static long m_gpuShadowSampleResolved;
         static long m_gpuShadowSampleFallbacks;
         static string m_gpuShadowSampleLastReason = "";
@@ -151,15 +153,24 @@ namespace Game {
         /// 否则返回 fallback（游戏原本的 `m_opaqueShader`）→ 默认行为逐位不变。
         /// </summary>
         public static Shader ResolveOpaqueShader(Shader fallback) {
-            if (!GpuShadowSampleEnabled || !m_gpuShadowHasMap || m_gpuShadowRt == null) {
+            // [v0.1.69] 变体条件解耦：**体积雾**与**阴影采样**都注入同一个不透明变体，
+            // 所以"只想开体积雾"也必须能拿到变体（以前必须先有深度图，等于被阴影挡住）。
+            bool shadows = GpuShadowSampleEnabled && m_gpuShadowHasMap && m_gpuShadowRt != null;
+            bool fog = VolumetricFogEnabled;
+            if (!shadows && !fog) {
                 m_gpuShadowSampleFallbacks++;
-                m_gpuShadowSampleLastReason = !GpuShadowSampleEnabled ? "disabled"
-                    : (!m_gpuShadowHasMap ? "noMap" : "noRt");
+                m_gpuShadowSampleLastReason = (!GpuShadowSampleEnabled ? "disabled"
+                    : (!m_gpuShadowHasMap ? "noMap" : "noRt")) + "+fogOff";
                 return fallback;
             }
             try {
                 if (m_gpuShadowOpaqueShader == null) {
                     m_gpuShadowOpaqueShader = new Shader(GpuShadowOpaqueVsh, GpuShadowOpaquePsh);
+                }
+                if (!shadows && m_gpuShadowDummyRt == null) {
+                    // 只用体积雾时的占位深度图（1×1）：纹素参数必须绑一个真的 Texture2D，
+                    // 但 u_shadowEnable=0 会让片元根本不走采样分支。
+                    m_gpuShadowDummyRt = new RenderTarget2D(1, 1, 1, ColorFormat.Rgba8888, DepthFormat.None);
                 }
                 if (m_gpuShadowSampler == null) {
                     m_gpuShadowSampler = new SamplerState {
@@ -170,7 +181,8 @@ namespace Game {
                     };
                 }
                 Shader shader = m_gpuShadowOpaqueShader;
-                shader.GetParameter("u_shadowMap", true).SetValue(m_gpuShadowRt);
+                shader.GetParameter("u_shadowEnable", true).SetValue(shadows ? 1f : 0f);
+                shader.GetParameter("u_shadowMap", true).SetValue(shadows ? m_gpuShadowRt : m_gpuShadowDummyRt);
                 shader.GetParameter("u_shadowSampler", true).SetValue(m_gpuShadowSampler);
                 shader.GetParameter("u_sunViewProjection", true).SetValue(m_gpuShadowViewProjection);
                 shader.GetParameter("u_sunOrigin", true).SetValue(m_gpuShadowOrigin);
@@ -178,7 +190,8 @@ namespace Game {
                 shader.GetParameter("u_sunDir", true).SetValue(m_gpuShadowSun);
                 shader.GetParameter("u_depthMax", true).SetValue(m_gpuShadowDepthMax);
                 // [v0.1.38] 近图（级联）：没有近图时 u_nearCascade = 0，片元只走远图（行为同 v0.1.37）
-                shader.GetParameter("u_shadowMapNear", true).SetValue(m_gpuShadowRtNear ?? m_gpuShadowRt);
+                shader.GetParameter("u_shadowMapNear", true).SetValue(
+                    shadows ? (m_gpuShadowRtNear ?? m_gpuShadowRt) : m_gpuShadowDummyRt);
                 shader.GetParameter("u_shadowSamplerNear", true).SetValue(m_gpuShadowSampler);
                 shader.GetParameter("u_sunViewProjectionNear", true).SetValue(m_gpuShadowViewProjectionNear);
                 shader.GetParameter("u_sunOriginNear", true).SetValue(m_gpuShadowOriginNear);
@@ -191,6 +204,24 @@ namespace Game {
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
                 shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
                 shader.GetParameter("u_shadowDebug", true).SetValue((float)GpuShadowDebugMode);
+                // [v0.1.69] 自研体积雾：与阴影共用同一个不透明变体
+                {
+                    float fogTime = (float)Time.RealTime;
+                    float fogBottom = Math.Min(FogBottomY, FogTopY - 1f);
+                    shader.GetParameter("u_vfEnable", true).SetValue(VolumetricFogEnabled ? 1f : 0f);
+                    shader.GetParameter("u_vfBottomY", true).SetValue(fogBottom);
+                    shader.GetParameter("u_vfTopY", true).SetValue(Math.Max(FogTopY, fogBottom + 1f));
+                    shader.GetParameter("u_vfDensity", true).SetValue(Math.Max(FogDensity, 0f));
+                    shader.GetParameter("u_vfScale", true).SetValue(Math.Max(FogScale, 1e-6f));
+                    shader.GetParameter("u_vfWind", true).SetValue(FogWind * fogTime);
+                    shader.GetParameter("u_vfThreshold", true).SetValue(Math.Clamp(FogThreshold, 0f, 0.99f));
+                    shader.GetParameter("u_vfStrength", true).SetValue(Math.Clamp(FogStrength, 0f, 1f));
+                    shader.GetParameter("u_vfColor", true).SetValue(FogColor);
+                    shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
+                    shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
+                    m_volFogBound++;
+                    m_volFogLastError = "";
+                }
                 // [v0.1.64] PCF：偏移在 **UV 空间**（1 texel = 1/尺寸）。传"米"会把整张贴图当偏移跨过去
                 // （实测：8 个抽样全落到边界外 → 阴影整片消失）。级联的世界尺度差异由"覆盖范围不同"自然给出。
                 shader.GetParameter("u_shadowSoft", true).SetValue(GpuShadowSoftEnabled ? 1f : 0f);
@@ -351,6 +382,56 @@ float u_shadowReliefFar;
 float u_shadowReliefNear;
 float u_shadowSoftSlopeBias;
 float u_shadowSoftReliefTexels;
+float u_shadowEnable;
+float u_vfEnable;
+float u_vfBottomY;
+float u_vfTopY;
+float u_vfDensity;
+float u_vfScale;
+float2 u_vfWind;
+float u_vfThreshold;
+float u_vfStrength;
+float3 u_vfColor;
+float u_vfMaxDistance;
+float u_vfShear;
+float3 u_viewPosition;
+// [v0.1.69] 体积雾：确定性值噪声 + 沿视线 8 步积分（与云同一套噪声口径）
+float vfHash12(float2 p)
+{
+	float3 p3 = frac(float3(p.x, p.y, p.x) * 0.1031);
+	p3 += dot(p3, float3(p3.y, p3.z, p3.x) + 33.33);
+	return frac((p3.x + p3.y) * p3.z);
+}
+
+float vfNoise2(float2 p)
+{
+	float2 i = floor(p);
+	float2 f = frac(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = vfHash12(i);
+	float b = vfHash12(i + float2(1.0, 0.0));
+	float c = vfHash12(i + float2(0.0, 1.0));
+	float d = vfHash12(i + float2(1.0, 1.0));
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float vfHeightAt(float3 p)
+{
+	return (p.y - u_vfBottomY) / max(u_vfTopY - u_vfBottomY, 0.001);
+}
+
+float vfDensityAt(float3 p)
+{
+	float h = vfHeightAt(p);
+	if (h < 0.0 || h > 1.0)
+	{
+		return 0.0;
+	}
+	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
+	float2 q = (p.xz + p.y * u_vfShear * float2(1.7, 1.1)) * u_vfScale + u_vfWind;
+	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + float2(5.1, 9.7)) * 0.3;
+	return max(0.0, n - u_vfThreshold) * prof;
+}
 
 // [v0.1.35] R 高字节 / G 低字节：d16 = (R*255)*256 + G*255
 float decodeShadowDepth(float4 texel)
@@ -415,7 +496,7 @@ void main(
 			result.rgb = float3(mapDepth, mapDepth, mapDepth);
 		}
 	}
-	else if (inside)
+	else if (inside && u_shadowEnable > 0.5)
 	{
 		// 近图的深度是按「近图自己的 eye + depthMax」归一化的（两张图的太阳距离不同），
 		// 所以比较时必须换成对应的 eye/depthMax —— 用错会整片判成阴影（实测踩到）。
@@ -471,6 +552,46 @@ void main(
 		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
 	result.rgb = lerp(result.rgb, u_fogColor * v_color.a, v_fog);
+	// [v0.1.69] 自研体积雾（替换被 FogDisabled 置 0 的原版雾）：沿视线 8 步积分
+	if (u_vfEnable > 0.5)
+	{
+		float3 vfDelta = v_world - u_viewPosition;
+		float vfLen = length(vfDelta);
+		if (vfLen > 0.001)
+		{
+			float3 vfRd = vfDelta / vfLen;
+			float vfT0 = 0.0;
+			float vfT1 = min(vfLen, u_vfMaxDistance);
+			if (abs(vfRd.y) > 1e-5)
+			{
+				float vfTa = (u_vfBottomY - u_viewPosition.y) / vfRd.y;
+				float vfTb = (u_vfTopY - u_viewPosition.y) / vfRd.y;
+				vfT0 = max(vfT0, min(vfTa, vfTb));
+				vfT1 = min(vfT1, max(vfTa, vfTb));
+			}
+			else if (u_viewPosition.y < u_vfBottomY || u_viewPosition.y > u_vfTopY)
+			{
+				vfT1 = 0.0;
+			}
+			if (vfT1 > vfT0)
+			{
+				float vfDt = (vfT1 - vfT0) * 0.125;
+				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
+				float vfOd = 0.0;
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 0.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 1.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 2.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 3.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 4.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 5.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 6.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
+				vfOd *= vfDt * u_vfDensity;
+				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
+				result.rgb = lerp(result.rgb, u_vfColor, vfAlpha);
+			}
+		}
+	}
 	svTarget = result;
 }
 
@@ -512,6 +633,57 @@ uniform float u_shadowReliefFar;
 uniform float u_shadowReliefNear;
 uniform float u_shadowSoftSlopeBias;
 uniform float u_shadowSoftReliefTexels;
+uniform float u_shadowEnable;
+uniform float u_vfEnable;
+uniform float u_vfBottomY;
+uniform float u_vfTopY;
+uniform float u_vfDensity;
+uniform float u_vfScale;
+uniform vec2 u_vfWind;
+uniform float u_vfThreshold;
+uniform float u_vfStrength;
+uniform vec3 u_vfColor;
+uniform float u_vfMaxDistance;
+uniform float u_vfShear;
+uniform vec3 u_viewPosition;
+
+// [v0.1.69] 体积雾（与 HLSL 段同一算法）
+float vfHash12(vec2 p)
+{
+	vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+	p3 += dot(p3, vec3(p3.y, p3.z, p3.x) + 33.33);
+	return fract((p3.x + p3.y) * p3.z);
+}
+
+float vfNoise2(vec2 p)
+{
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = vfHash12(i);
+	float b = vfHash12(i + vec2(1.0, 0.0));
+	float c = vfHash12(i + vec2(0.0, 1.0));
+	float d = vfHash12(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float vfHeightAt(vec3 p)
+{
+	return (p.y - u_vfBottomY) / max(u_vfTopY - u_vfBottomY, 0.001);
+}
+
+float vfDensityAt(vec3 p)
+{
+	float h = vfHeightAt(p);
+	if (h < 0.0 || h > 1.0)
+	{
+		return 0.0;
+	}
+	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
+	vec2 q = (p.xz + p.y * u_vfShear * vec2(1.7, 1.1)) * u_vfScale + u_vfWind;
+	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + vec2(5.1, 9.7)) * 0.3;
+	return max(0.0, n - u_vfThreshold) * prof;
+}
 
 varying vec4 v_color;
 varying vec2 v_texcoord;
@@ -575,7 +747,7 @@ void main()
 			result.rgb = vec3(mapDepth, mapDepth, mapDepth);
 		}
 	}
-	else if (inside)
+	else if (inside && u_shadowEnable > 0.5)
 	{
 		// 近图深度按「近图自己的 eye + depthMax」归一化（两张图太阳距离不同）→ 比较时必须一起换。
 		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
@@ -626,6 +798,46 @@ void main()
 		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
 	result.rgb = mix(result.rgb, u_fogColor * v_color.a, v_fog);
+	// [v0.1.69] 自研体积雾（与 HLSL 段同一算法）
+	if (u_vfEnable > 0.5)
+	{
+		vec3 vfDelta = v_world - u_viewPosition;
+		float vfLen = length(vfDelta);
+		if (vfLen > 0.001)
+		{
+			vec3 vfRd = vfDelta / vfLen;
+			float vfT0 = 0.0;
+			float vfT1 = min(vfLen, u_vfMaxDistance);
+			if (abs(vfRd.y) > 1e-5)
+			{
+				float vfTa = (u_vfBottomY - u_viewPosition.y) / vfRd.y;
+				float vfTb = (u_vfTopY - u_viewPosition.y) / vfRd.y;
+				vfT0 = max(vfT0, min(vfTa, vfTb));
+				vfT1 = min(vfT1, max(vfTa, vfTb));
+			}
+			else if (u_viewPosition.y < u_vfBottomY || u_viewPosition.y > u_vfTopY)
+			{
+				vfT1 = 0.0;
+			}
+			if (vfT1 > vfT0)
+			{
+				float vfDt = (vfT1 - vfT0) * 0.125;
+				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
+				float vfOd = 0.0;
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 0.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 1.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 2.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 3.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 4.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 5.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 6.5));
+				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
+				vfOd *= vfDt * u_vfDensity;
+				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
+				result.rgb = mix(result.rgb, u_vfColor, vfAlpha);
+			}
+		}
+	}
 	gl_FragColor = result;
 }
 
