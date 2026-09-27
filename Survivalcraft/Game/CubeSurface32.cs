@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json.Nodes;
 using Engine;
 
@@ -152,6 +153,48 @@ namespace Game {
         /// <summary>把"方块自己的 contents/data 判定 + 外部给的光照"重新打包成壳里的 ushort。</summary>
         static int PackLight(int value, int light) {
             return (value & 0x3FF) | ((light & 0xF) << 10);
+        }
+
+        // ---------------- 存档（P4，v0.1.53） ----------------
+        // 每条记录固定 **16,384 B**：顶(short+ushort)×1024 + 4 侧 ushort×1024 + 底(short+ushort)×1024。
+        public const int SerializedBytes = GridCells * (2 + 2) + 4 * GridCells * 2 + GridCells * (2 + 2);
+
+        /// <summary>把整张壳写进二进制流（固定 `SerializedBytes` 字节）。</summary>
+        public void WriteTo(BinaryWriter writer) {
+            for (int i = 0; i < GridCells; i++) {
+                writer.Write(TopHeight[i]);
+                writer.Write(TopContents[i]);
+            }
+            for (int f = 0; f < 4; f++) {
+                ushort[] side = SideContents[f];
+                for (int i = 0; i < GridCells; i++) {
+                    writer.Write(side[i]);
+                }
+            }
+            for (int i = 0; i < GridCells; i++) {
+                writer.Write(BottomHeight[i]);
+                writer.Write(BottomContents[i]);
+            }
+        }
+
+        /// <summary>读回一张壳（坐标由调用方负责写/读）。</summary>
+        public static CubeSurface32 ReadFrom(BinaryReader reader) {
+            CubeSurface32 shell = new(0, 0, 0);
+            for (int i = 0; i < GridCells; i++) {
+                shell.TopHeight[i] = reader.ReadInt16();
+                shell.TopContents[i] = reader.ReadUInt16();
+            }
+            for (int f = 0; f < 4; f++) {
+                ushort[] side = shell.SideContents[f];
+                for (int i = 0; i < GridCells; i++) {
+                    side[i] = reader.ReadUInt16();
+                }
+            }
+            for (int i = 0; i < GridCells; i++) {
+                shell.BottomHeight[i] = reader.ReadInt16();
+                shell.BottomContents[i] = reader.ReadUInt16();
+            }
+            return shell;
         }
     }
 

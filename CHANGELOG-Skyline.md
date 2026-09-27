@@ -3,6 +3,35 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.53] - 2026-09-28
+
+第六十三个版本：**壳存档 P4 —— 16 KiB/立方体落盘，"走过一次就有远景"**（本轮新目标 3.2 的第一条）。
+v0.1.49~52 把壳做到"能采、能建网格、能按距离分档渲染"，但**关机就丢**；本版把它落盘，并给出**可量测的往返判据**。
+
+**本版相对 v0.1.52 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **格式** | `SkylineShell.bin`（世界目录）：头 **12 B**（magic `SCKS` + version 1 + count）+ 每条 **16,396 B**（坐标 3×int = 12 B + 壳 16,384 B）→ `文件 = 12 + N × 16,396`；**全空壳不写** |
+| **分帧写** | 脏 + 距上次 ≥ `SaveIntervalSeconds`（默认 60 s，最小 5 s 保护）触发；每 Tick 最多 `SaveRecordsPerTick`（默认 **64 条 = 1 MiB/Tick**）→ 4096 个壳（64 MiB）也不会一次性卡帧；先写 `.tmp` 再 `MoveFileSafely` 覆盖 |
+| **读档** | `Tick()` 里 `EnsureWorld()` 换世界懒加载；**无条件先 `Clear()`**（跨世界污染的老坑）；尾段截断时读到哪算哪；magic/version 不符只记 `lastError` |
+| **判据** | `skyline.CubeShellHash()` = FNV-1a over **排序后的**全部记录摘要；`CubeShellPersistence()` 报路径/字节/数量/摘要/脏否/存取耗时；`CubeShellSaveNow()` 立刻抽干队列（取证用） |
+
+### Verified（AgentLab）
+
+| 步骤 | 结果 |
+|---|---|
+| 采壳（视距 128→64） | 36 个立方体、壳 0.56 MiB |
+| `CubeShellSaveNow()` | 文件 **590,268 B** = 12 + 36×16,396（**磁盘字节逐字节吻合**）、`lastSaveMs` **1.11~1.30 ms**、`dirty=false` |
+| **重启游戏 → 载入同一世界** | `loadedRecordsTotal=36`、`lastLoadMs` **15~17 ms**、**摘要 `9ab13ea88a4f4d0a` 与重启前完全一致** |
+| 重启后把视距降到 64 | `meshResident` 0 → **28**、`drawnLastFrame` 0 → **28**，而 **`harvestedTotal` 仍是 0** → 画出来的壳**全部来自磁盘** |
+
+**本版踩到的两个坑（如实记）**：①报出来的文件大小一开始少了 **12 B/条**（忘了坐标），
+代码报 589,836 而磁盘是 590,268（36×12=432 的差）→ 改为 `12 + N×16,396`；
+②`new FileInfo("app:/doc/...")` 不可用（引擎虚拟路径），会报"文件名、目录名或卷标语法不正确" → 改成按格式自算。
+**还没做**：更宽采集口径 + `RequireNeighbors`；非完整方块 → 材质占位方盒；家具 `data` 缺口；存档的增量/差分写。
+证据：`data/sessions/skyline-v0153/`、`notes/128`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.52] - 2026-09-28
 
 第六十二个版本：**分距离 LOD 精度阶梯 + 网格滑动窗口**（本轮新目标 3.1/3.2）。

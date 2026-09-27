@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO;
 using System.Text.Json.Nodes;
 using Engine;
 using Engine.Graphics;
@@ -69,6 +70,36 @@ namespace Game {
         public static float MeshReleaseFactor { get; set; } = 1f;
         /// <summary>[v0.1.52] 网格滑动窗口开关（关掉 = 网格一直常驻，相当于 v0.1.51 的行为）。</summary>
         public static bool MeshSlidingWindow { get; set; } = true;
+
+        // ---------------- 存档 P4（v0.1.53） ----------------
+        /// <summary>存档开关。</summary>
+        public static bool PersistenceEnabled { get; set; } = true;
+        /// <summary>每个 Tick 最多写几条（1 条 = 16 KiB）；默认 64 条 ≈ 1 MiB/Tick，避免一次性写 64 MiB 卡帧。</summary>
+        public static int SaveRecordsPerTick { get; set; } = 64;
+        /// <summary>自动存档间隔（秒，仅在"脏"时触发）。</summary>
+        public static double SaveIntervalSeconds { get; set; } = 60.0;
+
+        const int SaveMagic = 0x53434B53;        // "SCKS"
+        const int SaveVersion = 1;
+        /// <summary>一条记录的字节数：3×int 坐标（12 B）+ 壳（16,384 B）。</summary>
+        public const int RecordBytes = 12 + CubeSurface32.SerializedBytes;
+        static string m_worldDir, m_shellPath, m_saveTempPath;
+        static Stream m_saveStream;
+        static BinaryWriter m_saveWriter;
+        static List<(int Cx, int Cy, int Cz)> m_saveQueue;
+        static int m_saveTotal, m_saveWritten;
+        static double m_nextSaveTime;
+        static bool m_dirty;
+
+        public static bool SaveInProgress => m_saveStream != null;
+        public static bool Dirty => m_dirty;
+        public static long SavedRecordsTotal { get; private set; }
+        public static long LoadedRecordsTotal { get; private set; }
+        public static double LastSaveMs { get; private set; }
+        public static double LastLoadMs { get; private set; }
+        public static long FileBytes { get; private set; }
+        public static string PersistenceError { get; private set; } = "";
+        public static string PersistencePath => m_shellPath ?? "";
         /// <summary>壳接管后让现有 LOD 层让位（默认开；false = 两层叠着画，用于 A/B 看穿插）。</summary>
         public static bool RestrictLod { get; set; } = true;
         /// <summary>
@@ -265,6 +296,7 @@ namespace Game {
                 EvictIfNeeded();
                 if (HarvestedTotal > 0) {
                     SkylineLod.RequestRebuild();          // 壳接管的那片变了 → 让 LOD 立刻重排（让位）
+                    MarkDirty();                          // [v0.1.53] 新采到壳 → 存档标脏
                 }
             }
             catch (Exception e) {
@@ -278,6 +310,16 @@ namespace Game {
                 return;
             }
             try {
+                // [v0.1.53] 存档 P4：换世界自动 Load；脏了按间隔开一次**分帧增量写**
+                if (PersistenceEnabled) {
+                    EnsureWorld();
+                    double now = Time.RealTime;
+                    if (m_saveStream == null && m_dirty && now >= m_nextSaveTime) {
+                        StartSave();
+                        m_nextSaveTime = now + Math.Max(5.0, SaveIntervalSeconds);
+                    }
+                    SaveTick();
+                }
                 EvictIfNeeded();
                 BuildMeshes();
             }
@@ -300,6 +342,7 @@ namespace Game {
                 m_entries.Remove(list[i].Key);
                 EvictedTotal++;
             }
+            MarkDirty();
         }
 
         /// <summary>
@@ -438,6 +481,237 @@ namespace Game {
             m_meshQueue.Clear();
             m_queued.Clear();
             MeshVertexBytes = 0;
+            MarkDirty();
+        }
+
+        // ---------------- 存档 P4：懒切世界 + 分帧增量写（v0.1.53） ----------------
+
+        /// <summary>确认当前世界的存档路径；**换世界时自动 Load**（与 `SkylineLod` 同一套懒加载口径）。</summary>
+        static string EnsureWorld() {
+            SubsystemGameInfo info = GameManager.Project?.FindSubsystem<SubsystemGameInfo>(true);
+            if (info == null || string.IsNullOrEmpty(info.DirectoryName)) {
+                return null;
+            }
+            if (m_worldDir != info.DirectoryName) {
+                m_worldDir = info.DirectoryName;
+                m_shellPath = Storage.CombinePaths(info.DirectoryName, "SkylineShell.bin");
+                Load();
+            }
+            return m_shellPath;
+        }
+
+        /// <summary>壳仓发生变化（新采到 / 淘汰 / 清空）→ 标脏，等下一次自动存档。</summary>
+        public static void MarkDirty() {
+            m_dirty = true;
+        }
+
+        /// <summary>开始一次增量存档：只写头 + 排队，正文在 `SaveTick` 里按预算分批写。</summary>
+        static void StartSave() {
+            string path = EnsureWorld();
+            if (path == null) {
+                return;
+            }
+            m_saveQueue = [.. m_entries.Keys];
+            m_saveTotal = m_saveQueue.Count;
+            m_saveWritten = 0;
+            m_saveTempPath = path + ".tmp";
+            try {
+                m_saveStream = Storage.OpenFile(m_saveTempPath, OpenFileMode.Create);
+                m_saveWriter = new BinaryWriter(m_saveStream);
+                m_saveWriter.Write(SaveMagic);
+                m_saveWriter.Write(SaveVersion);
+                m_saveWriter.Write(m_saveTotal);
+            }
+            catch (Exception e) {
+                PersistenceError = e.Message;
+                AbortSave();
+            }
+        }
+
+        /// <summary>[v0.1.53] 立刻完整存一次（把队列一次抽干，取证/退出时用）。</summary>
+        public static void SaveNow() {
+            if (m_saveStream == null) {
+                StartSave();
+            }
+            Stopwatch watch = Stopwatch.StartNew();
+            while (m_saveStream != null && watch.Elapsed.TotalSeconds < 30.0) {
+                SaveRecordsPerTick = Math.Max(SaveRecordsPerTick, 4096);   // 一次抽干
+                SaveTick();
+            }
+            SaveRecordsPerTick = 64;
+        }
+
+        /// <summary>按 `SaveRecordsPerTick` 写一批；写完就落盘（临时文件 → 正式文件）。</summary>
+        static void SaveTick() {
+            if (m_saveStream == null) {
+                return;
+            }
+            try {
+                int budget = Math.Max(1, SaveRecordsPerTick);
+                while (budget-- > 0 && m_saveQueue.Count > 0) {
+                    (int Cx, int Cy, int Cz) key = m_saveQueue[^1];
+                    m_saveQueue.RemoveAt(m_saveQueue.Count - 1);
+                    if (!m_entries.TryGetValue(key, out Entry entry)) {
+                        continue;                        // 期间被淘汰：不写这条（Load 侧按实际写入量容错）
+                    }
+                    m_saveWriter.Write(key.Cx);
+                    m_saveWriter.Write(key.Cy);
+                    m_saveWriter.Write(key.Cz);
+                    entry.Shell.WriteTo(m_saveWriter);
+                    m_saveWritten++;
+                }
+                if (m_saveQueue.Count == 0) {
+                    FinishSave();
+                }
+            }
+            catch (Exception e) {
+                PersistenceError = e.Message;
+                AbortSave();
+            }
+        }
+
+        static void FinishSave() {
+            Stopwatch watch = Stopwatch.StartNew();
+            try {
+                m_saveWriter.Flush();
+                m_saveWriter.Dispose();
+                m_saveStream.Dispose();
+                m_saveStream = null;
+                m_saveWriter = null;
+                Storage.MoveFileSafely(m_saveTempPath, m_shellPath);   // 覆盖旧档（先写临时文件再换名）
+                // 每条记录 = 12 B 坐标（3×int）+ 16,384 B 壳；整个文件 = 12 B 头 + N 条
+                FileBytes = 12L + (long)m_saveWritten * RecordBytes;
+                m_dirty = false;
+                SavedRecordsTotal += m_saveWritten;
+            }
+            catch (Exception e) {
+                PersistenceError = e.Message;
+                AbortSave();
+            }
+            finally {
+                LastSaveMs = watch.Elapsed.TotalMilliseconds;
+                m_saveQueue = null;
+            }
+        }
+
+        static void AbortSave() {
+            try {
+                m_saveWriter?.Dispose();
+                m_saveStream?.Dispose();
+            }
+            catch {
+                // ignored
+            }
+            m_saveWriter = null;
+            m_saveStream = null;
+            m_saveQueue = null;
+        }
+
+        /// <summary>读档（换世界时自动调用；也可手动 `CubeShellLoad()`）。</summary>
+        public static void Load() {
+            Clear();                                  // 无条件先清（避免跨世界污染 —— 与 SkylineLod v0.1.0 的修复同因）
+            LoadedRecordsTotal = 0;
+            string path = m_shellPath;
+            if (path == null || !Storage.FileExists(path)) {
+                m_dirty = true;
+                return;
+            }
+            Stopwatch watch = Stopwatch.StartNew();
+            try {
+                using (Stream stream = Storage.OpenFile(path, OpenFileMode.Read)) {
+                    BinaryReader reader = new(stream);
+                    int magic = reader.ReadInt32();
+                    int version = reader.ReadInt32();
+                    int count = reader.ReadInt32();
+                    if (magic != SaveMagic || version != SaveVersion) {
+                        PersistenceError = $"bad header magic={magic:x8} version={version}";
+                        return;
+                    }
+                    for (int i = 0; i < count; i++) {
+                        int cx, cy, cz;
+                        try {
+                            cx = reader.ReadInt32();
+                            cy = reader.ReadInt32();
+                            cz = reader.ReadInt32();
+                        }
+                        catch (EndOfStreamException) {
+                            break;                    // 上次写一半就被打断：读到哪算哪
+                        }
+                        CubeSurface32 shell = CubeSurface32.ReadFrom(reader);
+                        m_entries[(cx, cy, cz)] = new Entry { Shell = shell, LastUsed = 0 };
+                        LoadedRecordsTotal++;
+                    }
+                }
+                // 注意：`path` 是引擎虚拟路径（`app:/doc/...`），不能用 `FileInfo` 取长度
+                // （实测报"文件名、目录名或卷标语法不正确"）→ 按本格式自己算：12 B 头 + N 条 × 16,396 B。
+                FileBytes = 12L + LoadedRecordsTotal * RecordBytes;
+                m_dirty = false;
+            }
+            catch (Exception e) {
+                PersistenceError = e.Message;
+            }
+            LastLoadMs = watch.Elapsed.TotalMilliseconds;
+            EvictIfNeeded();
+        }
+
+        /// <summary>判据：整仓的确定性摘要（FNV-1a over 排序后的记录）——用来验"重启前后逐字节一致"。</summary>
+        public static string Hash() {
+            List<(int Cx, int Cy, int Cz)> keys = [.. m_entries.Keys];
+            keys.Sort();
+            ulong h = 14695981039346656037UL;
+            foreach ((int Cx, int Cy, int Cz) key in keys) {
+                Mix(ref h, (uint)key.Cx);
+                Mix(ref h, (uint)key.Cy);
+                Mix(ref h, (uint)key.Cz);
+                CubeSurface32 shell = m_entries[key].Shell;
+                for (int i = 0; i < CubeSurface32.GridCells; i++) {
+                    Mix(ref h, (uint)(ushort)shell.TopHeight[i]);
+                    Mix(ref h, shell.TopContents[i]);
+                }
+                for (int f = 0; f < 4; f++) {
+                    ushort[] side = shell.SideContents[f];
+                    for (int i = 0; i < CubeSurface32.GridCells; i++) {
+                        Mix(ref h, side[i]);
+                    }
+                }
+                for (int i = 0; i < CubeSurface32.GridCells; i++) {
+                    Mix(ref h, (uint)(ushort)shell.BottomHeight[i]);
+                    Mix(ref h, shell.BottomContents[i]);
+                }
+            }
+            return h.ToString("x16");
+        }
+
+        static void Mix(ref ulong h, uint value) {
+            for (int i = 0; i < 4; i++) {
+                h ^= (byte)(value >> (i * 8));
+                h *= 1099511628211UL;
+            }
+        }
+
+        public static string Persistence() {
+            return new JsonObject {
+                ["ok"] = true,
+                ["enabled"] = PersistenceEnabled,
+                ["path"] = PersistencePath,
+                ["fileBytes"] = FileBytes,
+                ["fileMiB"] = Math.Round(FileBytes / 1048576.0, 3),
+                ["cubes"] = m_entries.Count,
+                ["hash"] = Hash(),
+                ["dirty"] = m_dirty,
+                ["saveInProgress"] = SaveInProgress,
+                ["saveQueueLeft"] = m_saveQueue?.Count ?? 0,
+                ["saveTotal"] = m_saveTotal,
+                ["savedRecordsTotal"] = SavedRecordsTotal,
+                ["loadedRecordsTotal"] = LoadedRecordsTotal,
+                ["lastSaveMs"] = Math.Round(LastSaveMs, 2),
+                ["lastLoadMs"] = Math.Round(LastLoadMs, 2),
+                ["recordsPerTick"] = SaveRecordsPerTick,
+                ["recordBytes"] = CubeSurface32.SerializedBytes,
+                ["recordWithKeyBytes"] = RecordBytes,
+                ["intervalSeconds"] = SaveIntervalSeconds,
+                ["lastError"] = PersistenceError
+            }.ToJsonString();
         }
 
         /// <summary>[v0.1.52] 逐条清单（最多 `limit` 条）：立方体坐标、距相机、本档体素边长、是否有网格、四边形数。</summary>
@@ -629,6 +903,25 @@ namespace Game {
         /// <summary>[v0.1.52] 桥：同一张壳在各档下的网格代价表。</summary>
         public static string CubeShellMeshTiers(int cx, int cy, int cz) =>
             SkylineCubeShellStore.MeshTiers(cx, cy, cz);
+
+        /// <summary>[v0.1.53] 立刻把壳仓存下来（取证/收尾用；正常是"脏了 + 每 60 s"自动写）。</summary>
+        public static string CubeShellSaveNow() {
+            SkylineCubeShellStore.MarkDirty();
+            SkylineCubeShellStore.SaveNow();
+            return SkylineCubeShellStore.Persistence();
+        }
+
+        /// <summary>[v0.1.53] 手动读档（换世界会自动读；这里给取证用）。</summary>
+        public static string CubeShellLoad() {
+            SkylineCubeShellStore.Load();
+            return SkylineCubeShellStore.Persistence();
+        }
+
+        /// <summary>[v0.1.53] 存档状态：路径 / 文件字节 / 立方体数 / **整仓摘要** / 上次存取耗时。</summary>
+        public static string CubeShellPersistence() => SkylineCubeShellStore.Persistence();
+
+        /// <summary>[v0.1.53] 整仓摘要（重启前后比对用）。</summary>
+        public static string CubeShellHash() => SkylineCubeShellStore.Hash();
 
         /// <summary>
         /// [v0.1.52] 设档位表（相对视距的米数，最多 5 段，逗号分隔）。
