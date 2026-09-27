@@ -3,6 +3,33 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.26] - 2026-09-27
+
+第三十六个版本：**原生形状建造 `op:shape`** —— 把命令方块 mod 的 place 家族形状变体在配套桥
+（AgentBridge，与分支源码分仓）里**原生补齐**：box / wall / plane / line / cylinder / sphere，
+带 `hollow` 与 `dryRun`；写入按区块聚集，天然吃到 v0.1.24 的批量光照去抖。
+
+**本版相对 v0.1.25 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（桥侧形状建造）** | `op:shape`：六种模式 + `hollow`（空壳/管壁/球壳）+ `dryRun`（只算不写，返回体素数/包围盒/每区块格数）；30 万格上限；写入一律 `SubsystemTerrain.ChangeCell`（与手放同链），并按 `(cx,cz)` 排序连片写 |
+| **新增 B（取证脚本）** | `heightlab/skyline-v0126-shape-site.py`：驻留加载场地 → API 直连取景（`Body.Rotation`+`LookAngles`）→ 截图 → 批量回读 → `summary.json` |
+| **修复 C（工具链）** | 形状代码草稿误用 `BlocksManager.Blocks.Count`（该成员是 `Block[]` 数组、只有 `Length`）→ 改走 `AgentActions.ResolveAllContents` 统一解析（类型名 / craftingId / `GetBlockIndex` 回退） |
+
+### Verified
+
+* **dryRun 矩阵 6/6 与解析式一致**：box 296（8³−6³）、wall 64、plane 512、line 32、cylinder 218、sphere 410；
+  包围盒与 `chunksTouched` 全对；
+* **实建 896/896 格、0 跳过**：box 296（石砖）/ sphere 410（石砖）/ cylinder 122（石砖）/ plane 64（铜），
+  批量回读壳与内部全部符合（内部为空气、壳体为 26 StoneBrickBlock / 42 CopperIngotBlock）；
+* **碰撞成立**：玩家可站上 box 顶面 `(4267,88,9067)` 与高空铜球顶面 `(4256,205,9056)`；
+* 现场图 `data/sessions/skyline-v0126/shape/shape-{wide,box,sphere}.png`（另 3 张手动图 + `summary.json`）；
+* **开放问题（如实记录）**：驻留加载区里出现"写得到、看不到"——数据与碰撞成立、`EditSettleDescribe` 数据侧结算正常
+  （`last=338.9ms samples=515`），但同场截图（含"正前方 2 格单格铜"对照）未稳定出现新写入体素；
+  与用户报告的"超高家具透明但有碰撞体积"同类。修复方向与实验计划见 `notes/96 §5`
+  （驻留区 vs 流式区 A/B、re-stream 对照、y 带扫描）。
+
 ## [v0.1.25] - 2026-09-27
 
 第三十五个版本：**光照去抖的端到端复验** —— 用同一个家具满场压测脚本确认 v0.1.24 的优化
