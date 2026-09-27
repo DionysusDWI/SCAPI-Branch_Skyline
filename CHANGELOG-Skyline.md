@@ -7,6 +7,87 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.93] - 2026-09-28
+
+第一百个版本：**关雾测光影（用户口径）+ 本轮鲁棒性收尾** —— 里程碑目标集完成后的"应做尽做"阶段：
+**一条真 bug 的护栏修复**、**两条过期判据的修正**、**一次内存归因的结案**，以及
+**功能验收巡检从 11 条扩到 12 条**。
+
+> **相对上一发版（v0.1.89）**：v0.1.90~v0.1.92 未单独发版，其内容一并计入本版 ——
+> v0.1.90 设施集成测试（贝塞尔路 + 隧道 + 补给箱 + 笔刷，`ok=True`）、
+> v0.1.91 规模化设施（4 条隧道 + 路网 + 4 个补给箱，**4,100 格 / 182~314 ms**、托管堆 +17 MiB）、
+> v0.1.92 护栏自检 7/7（超长/退化参数/非法 contents/拼错 shape **全部明确报错且无部分写入**）。
+
+### 1. 用户口径：可以把 Fog 关掉以便于测试光影
+
+本项目现在有**两层雾**，讲清楚才不会把"关了雾还是灰蒙蒙"误判成 bug：
+
+| 层 | 开关 | 默认 | 由来 |
+|---|---|---|---|
+| **原版雾**（视距雾带 + 地平线霾） | `FogDisabled` | **true（关）** | v0.1.47 起 |
+| **自研体积雾**（替换品） | `VolumetricFogEnabled` | **true（开）** | v0.1.69，里程碑 3.3 要求"**替换**原版 Fog" |
+
+⇒ **完全无雾测光影 = 一条调用**：`VolumetricFogEnabled=false`（`FogDisabled` 本来就是 true）。
+
+**实测**（`heightlab/skyline-v0193-fog-off-lighting.py`，相机位固定、三时刻、每刻各拍雾开/雾关）：
+
+| 时刻 | 太阳仰角 | 太阳方位 | 雾开→关 差分 | 亮度 |
+|---|---|---|---|---|
+| 上午 | 19.5° | 224.1° | 6.815% | 115.27 → 113.39 |
+| 正午 | 27.0° | 270.6° | 6.988% | 120.46 → 118.00 |
+| 下午 | 19.1° | 317.1° | 7.507% | 105.74 → 102.98 |
+
+**判据**：①原版雾确实是关的；②三个时刻关自研雾后画面都明显变化（⇒ 这层雾真的在跑）；
+③**雾关**状态下上午 vs 下午差分 **43.517%**、太阳方位 224° → 317° ⇒ **关雾后光影本身还在，且跟着太阳转**；
+④收尾把 `VolumetricFogEnabled` 与三个风还原（`defaults` 漂移门会查）。
+
+### 2. 真 bug 修复：`op:brush` / `op:tunnel` 会往**未加载的列**写
+
+* **现象**：巡检里 `op:brush onlyAir` 把一格**非空**方块**覆盖成了花岗岩**。
+* **根因**：`Terrain.GetCellValue` 对**未加载**区块返回 **0 = 空气** ⇒ `onlyAir`（"只填空位"）
+  在未加载的列上把**实心格当空位**。
+* **修法**：把 `op:shape` 早就用的 `EnsureWriteTargetLoaded` 接到这两个 op 的写循环，未加载列**一律不写**，
+  并新增回包字段 **`skippedNotLoaded`**（不再"假成功"）。
+* **必须记住**：门槛是 `ThreadState >= InvalidLight`，**不能用 `Valid`** —— 刚写过一格的区块立刻降到
+  `InvalidLight`，用 `Valid` 会把同一批后续写入全挡掉（实测踩到）。
+
+### 3. 判据修正（判据本身会过期）
+
+* `skyline-v0181-draw-budget.py`：原断言"最高预算必须画完所有候选"在 16 m 壳粒度下（候选 2,861）过期 ⇒
+  改成断言"**极小预算被截断 + 最高预算不再被截断**"；
+* `skyline-v0189-brush-op.py`：原判据把命中格材质**写死成草地 8**、并用 Python 的 `round()` 复算 C# 的
+  `MathF.Round` 站位 ⇒ 改成**读写前后对比**、只查笔尖格；
+* `skyline-v0177-lod-gpu-shading.py`：`LodAttrSelfCheck` 是"渲染一帧再比像素"，相机刚动过时可能
+  **一张图都没采到**（`attrIndices == 0`）—— 那是"**没有可比的几何**"，不是"**两条路径不一致**"。
+  现在两种情况**分开**（无几何等一拍重试，最多 3 次；有几何却判 false 立刻报）。
+  实测：巡检里 FAIL 过一次、单独重跑 6/6 通过。
+
+### 4. 内存"1.7 GB"的归因结案：**不是泄漏，是驻留积压**
+
+150 步 soak 后 `gcTotalMiB` 545 → **1,706 MiB**、`TerrainChunk` 2,477（基线 205）。归因链：
+①当时驻留区 0 个、`allocated` 仅 198 ⇒ 不吻合；②再走 40 步**不涨**（2,477 → 2,474）；
+③**重启即回基线**（`TerrainChunk` 198、几何 25,428、堆 350 MiB）；④跑一次 `facility-scale`
+（`EnsureRegionLoaded` 一大片）⇒ 198 → **332**；⑤等驻留区 TTL（300 s）到期 ⇒ 回到 **198**。
+⇒ **会话期间多个驻留区叠加 + 走行积压的"保留"，驻留到期或重启即释放。**
+
+**如实记一条能力缺口**：`dotnet-dump collect` 的 188 MB dump 用 `dotnet-dump analyze` 报
+**"No CLR runtime found"**（缺 DAC），本轮**没能**用 SOS `gcroot` 再走一遍持有链定位。
+
+### 5. 工具链
+
+* 新增 `heightlab/skyline-v0193-fog-off-lighting.py`（关雾测光影，四条可证伪判据）；
+* `heightlab/acceptance-sweep.py` **11 → 12 条**，并把每个脚本的**完整 stdout/stderr** 落到
+  `<out>/logs/<script>.log`（FAIL 时不再只剩"最后一行"）。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**（`data/sessions/skyline-v0193/regression-final.json`）；
+* 功能验收巡检 **PASS 12 / FAIL 0**（`data/sessions/skyline-v0193/sweep-final4/`）；
+* 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**（AgentBridge 另有 1 条**既存**过时 API 警告）。
+
+证据：`data/sessions/skyline-v0193/`（`lit-*-fogOn/Off.png`、`fog-off-lighting.json`、`regression-final.json`、
+`sweep-final4/`）、`notes/169`。
+
 ## [v0.1.89] - 2026-09-28
 
 第九十九个版本：**笔画式构建 `op:brush`**（Axiom 缺口表 #3，**最后一条**）——
