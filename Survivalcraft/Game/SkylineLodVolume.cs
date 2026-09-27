@@ -25,6 +25,9 @@ namespace Game {
         public static int Channel { get; set; }
         public static int Size { get; set; } = 256;
 
+        /// <summary>[v0.1.66] 显存预算表用（只读）：体积感着色 pass 的 RT，未分配时为 null。</summary>
+        public static RenderTarget2D LodVolumeRt => m_rt;
+
         static Shader m_shader;
         static RenderTarget2D m_rt;
         static SamplerState m_sampler;

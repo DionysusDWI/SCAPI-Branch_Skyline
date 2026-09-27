@@ -43,6 +43,9 @@ namespace Game {
         /// <summary>调试时叠加一个棋盘格（看清 uv/覆盖范围）。</summary>
         public static bool DebugChecker { get; set; } = true;
 
+        /// <summary>[v0.1.66] 显存预算表用（只读）：G-buffer 离屏 RT，未分配时为 null。</summary>
+        public static RenderTarget2D GBufferRt => m_rt;
+
         static RenderTarget2D m_rt;
         static Shader m_shader;
         static Shader m_debugShader;

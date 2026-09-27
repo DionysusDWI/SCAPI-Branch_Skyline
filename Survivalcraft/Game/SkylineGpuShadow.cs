@@ -59,6 +59,12 @@ namespace Game {
         /// 自动重捕走**不读回**的轻量路径（`diagnostics skipped`），因为读回 1024² 才是那 ~90 ms 的大头。</summary>
         public static float GpuShadowSunRecaptureDegrees { get; set; } = 10f;
 
+        /// <summary>[v0.1.66] 显存预算表用（只读）：远级联深度 RT，未分配时为 null。</summary>
+        public static RenderTarget2D GpuShadowRtFar => m_gpuShadowRt;
+
+        /// <summary>[v0.1.66] 显存预算表用（只读）：近级联深度 RT，未分配时为 null。</summary>
+        public static RenderTarget2D GpuShadowRtNear => m_gpuShadowRtNear;
+
         const string GpuShadowVsh = @"#ifdef HLSL
 
 float2 u_origin;

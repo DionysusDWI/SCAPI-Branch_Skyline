@@ -35,6 +35,9 @@ namespace Game {
         /// 用来把"矩阵/相机算错"和"绘制本身有问题"分开。</summary>
         public static bool ShadowPassUseCameraView { get; set; }
 
+        /// <summary>[v0.1.66] 显存预算表用（只读）：太阳视角深度 pass 的 RT，未分配时为 null。</summary>
+        public static RenderTarget2D ShadowPassRt => m_shadowRt;
+
         static RenderTarget2D m_shadowRt;
         static int m_shadowCaptures;
         static string m_shadowLastStats = "(never captured)";

@@ -7,6 +7,53 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.66] - 2026-09-28
+
+第七十六个版本：**里程碑 3.5 —— 显存预算表**。用户口径（逐字）：
+"**光影渲染显存占用注意控制在 4 GB 以下**，因为 terrain-diffusion 需要大约 2 GB 显存容量，
+游戏本体在 128-256 视觉距离需要 2 GB 做保险。"
+
+### 相对 v0.1.65 的变更
+
+| 项 | 内容 |
+|---|---|
+| **新增 `SkylineVram.cs`** | `VramDescribe()`：列出**光影/离屏 pass 自己创建的**每张 RT 的**实际**尺寸（取分配对象的 `Width/Height`，不是配置项想当然）、按构造格式估算的字节数、设备信息与合计 |
+| **`RtBytesPerPixel = 8`** | `ColorFormat.Rgba8888`(4 B) + `DepthFormat.Depth24Stencil8`(4 B)。**改了格式必须同步改这个常数**，否则表会撒谎（已写进注释） |
+| **三个只读访问器** | `SkylineGBuffer.GBufferRt`、`SkylineLodVolume.LodVolumeRt`、`SkylineRuntime.ShadowPassRt`（+ `GpuShadowRtFar/Near`），让"是否真的分配了"可查 |
+| **`heightlab/vram-budget.py`** | **两个口径一起报**：①我们自己的 RT（`VramDescribe`）；②游戏进程在每张适配器上的真实占用（`\GPU Process Memory(pid_*)\Dedicated Usage`，多次采样取最大）。脚本会先把可选 pass 跑起来再统计 —— 否则"没分配"会被读成"不占显存" |
+
+### 实测（AgentLab，视距 128 m，阴影与 G-buffer 都跑起来）
+
+设备：`OpenGL ES 3.2 NVIDIA 610.88` / **NVIDIA GeForce RTX 4060 Laptop GPU**，
+`MaxTextureSize=32768`，后备缓冲 **2048×1113**。
+
+| RT | 分配 | 尺寸 | 占用 |
+|---|---|---|---|
+| `gpuShadow.far` | ✅ | 1024×1024 | **8 MiB** |
+| `gpuShadow.near` | ✅ | 1024×1024 | **8 MiB** |
+| `gbuffer` | ✅ | 512×512 | **2 MiB** |
+| `lodVolume` | ❌ | — | 0 |
+| `shadowPass` | ❌ | — | 0 |
+| **我们合计** | 3 张 | — | **18 MiB**（预算 4096 MiB 的 **0.44%**） |
+
+**整机**（同一时刻，游戏进程，128 m 视距）：独显 **293.0 MiB**、另一张适配器 3.3 MiB。
+
+### 结论
+
+* 光影这条链**有三个数量级的余量**；**风险不在 RT 张数，而在分辨率**：
+  4096² 双级联 + 4K G-buffer（8 B/px）也只到 **256 MiB**。
+* 这张表的价值是**以后每加一张 RT 都能立刻看到它值多少**，而不是等它把显存吃满。
+* 整机 293 MiB 说明 128 m 视距下游戏本体远没到 2 GB 的保险线；用户给的 2 GB 是"128-256 视距"的保守预留。
+
+### 未做 / 风险（不粉饰）
+
+* 性能计数器只有**进程粒度**，拆不出"仅光影 pass"（更细的归因要 RenderDoc / Nsight，本轮不做）。
+* 没测 **256 视距**与 **terrain-diffusion 同时跑**的组合（应在实际接入 terrain-diffusion 时再补）。
+* `VramDescribe()` **只**覆盖我们自己创建的 RT；游戏图集/网格/后备缓冲不在表内（口径写在返回里）。
+* WDDM 计数器是**驱动上报的估算**，本表用于趋势与量级，不当作精确值。
+
+详见 `notes/145-显存预算表.md`；证据 `data/sessions/skyline-v0166/vram.json`。
+
 ## [v0.1.65] - 2026-09-28
 
 第七十五个版本：**里程碑 3.4 —— 太阳追踪**。用户口径（逐字）：
