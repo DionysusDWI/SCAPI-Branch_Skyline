@@ -29,14 +29,27 @@ namespace Game {
     /// </summary>
     public static class SkylineCubeShellStore {
         public const int CubeSize = CubeSurface32.Size;
-        public const int ShellBytesPerCube = 16384;
+        /// <summary>
+        /// [v0.1.85] 立方体边长是 2 的几次幂（16 → 4）。**所有从世界坐标取立方体键的地方都用它**，
+        /// 不再写死 `&gt;&gt; 5`（那是 32 m 时代的硬编码）。
+        /// </summary>
+        public static int CubeShift => 4;                   // log2(CubeSize)
+        /// <summary>一个立方体边上有几个区块（16 m 壳 ⇒ **1**；原来是 2×2=4 个）。</summary>
+        public const int ChunksPerCube = 1;
+        public const int ChunksPerCubeShift = 0;            // log2(ChunksPerCube)
+        /// <summary>[v0.1.85] 逐立方体的壳字节数**跟着尺寸走**（16 m → 4 KiB；原来写死 16384 = 32 m 时代）。</summary>
+        public static readonly int ShellBytesPerCube = CubeSurface32.ShellBytes;
 
         /// <summary>总开关：关掉即完全不采集、不渲染（默认开）。</summary>
         public static bool Enabled { get; set; } = true;
         /// <summary>渲染开关（采集照常，只是不画；A/B 用）。</summary>
         public static bool RenderEnabled { get; set; } = true;
         /// <summary>壳数量上限（4096 × 16 KiB = 64 MiB）；超出按"最久没被用到"淘汰。</summary>
-        public static int MaxCubes { get; set; } = 4096;
+        /// <summary>
+        /// 常驻壳上限。[v0.1.85] **4096 → 16384**：16 m 壳每个只占 **4 KiB**（原 16 KiB），
+        /// 所以上限相应 ×4 才是**同一个字节预算**（16384 × 4 KiB = 64 MiB，与 4096 × 16 KiB 相同）。
+        /// </summary>
+        public static int MaxCubes { get; set; } = 16384;
         /// <summary>
         /// 一次"离开加载范围"事件里最多同步采集几个立方体（防大卸载卡帧；超出的计入 `skippedOverBudget`）。
         /// 实测单个立方体采集 **0.79 ms**（AgentLab）：64 个 ≈ 50 ms，而"改视距"这种一次性大卸载本来就在
@@ -220,7 +233,12 @@ namespace Game {
         public static double SaveIntervalSeconds { get; set; } = 60.0;
 
         const int SaveMagic = 0x53434B53;        // "SCKS"
-        const int SaveVersion = 1;
+        /// <summary>
+        /// [v0.1.85] 存档版本 **1 → 2**：记录长度从 16,396 B 变成 **4,108 B**（16 m 壳）。
+        /// 旧档**不兼容**，但**不删**：读档发现版本不符时把它改名成 `*.v1.bak` 再新建（可人工回退）。
+        /// 代价说清楚：**旧的"走过一次就有远景"的壳要重新采**；远地平线来自 LOD 区域仓（另一套文件），不受影响。
+        /// </summary>
+        const int SaveVersion = 2;
         /// <summary>一条记录的字节数：3×int 坐标（12 B）+ 壳（16,384 B）。</summary>
         public const int RecordBytes = 12 + CubeSurface32.SerializedBytes;
         /// <summary>[v0.1.57] 删除标记（墓碑）用的全零壳。</summary>
@@ -458,9 +476,9 @@ namespace Game {
             if (terrain == null) {
                 return false;
             }
-            for (int dx = 0; dx < 2; dx++) {
-                for (int dz = 0; dz < 2; dz++) {
-                    TerrainChunk chunk = terrain.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+            for (int dx = 0; dx < ChunksPerCube; dx++) {
+                for (int dz = 0; dz < ChunksPerCube; dz++) {
+                    TerrainChunk chunk = terrain.GetChunkAtCoords((cx << ChunksPerCubeShift) + dx, (cz << ChunksPerCubeShift) + dz);
                     if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
                         return false;
                     }
@@ -481,9 +499,9 @@ namespace Game {
             bool near = PartialMinValidChunksNear > 0
                 && CubeDistance(cx, cz, SkylineLod.CameraViewPosition())
                     <= ViewRangeMetres + PartialNearMetres;
-            for (int dx = 0; dx < 2; dx++) {
-                for (int dz = 0; dz < 2; dz++) {
-                    TerrainChunk chunk = terrain?.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+            for (int dx = 0; dx < ChunksPerCube; dx++) {
+                for (int dz = 0; dz < ChunksPerCube; dz++) {
+                    TerrainChunk chunk = terrain?.GetChunkAtCoords((cx << ChunksPerCubeShift) + dx, (cz << ChunksPerCubeShift) + dz);
                     if (chunk == null) {
                         missing++;
                         NotReadyAbsent++;
@@ -511,11 +529,27 @@ namespace Game {
         }
 
         /// <summary>[v0.1.62] 一个立方体的 2×2 里有几个区块是"已分配且 Valid"。</summary>
+        /// <summary>
+        /// [v0.1.85] 这个立方体**边上有几个区块还在内存里**（任一还在 → 壳不画：否则旧壳会叠在真地形上）。
+        /// 16 m 壳时一个立方体只对应**一个**区块，所以"四邻齐全/组不齐"那套判据全部折叠成这一条。
+        /// </summary>
+        static bool AnyChunkAllocated(Terrain terrain, int cx, int cz) {
+            for (int dx = 0; dx < ChunksPerCube; dx++) {
+                for (int dz = 0; dz < ChunksPerCube; dz++) {
+                    if (terrain?.GetChunkAtCoords((cx << ChunksPerCubeShift) + dx,
+                                                  (cz << ChunksPerCubeShift) + dz) != null) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         static int CountValidChunks(Terrain terrain, int cx, int cz) {
             int n = 0;
-            for (int dx = 0; dx < 2; dx++) {
-                for (int dz = 0; dz < 2; dz++) {
-                    TerrainChunk chunk = terrain?.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+            for (int dx = 0; dx < ChunksPerCube; dx++) {
+                for (int dz = 0; dz < ChunksPerCube; dz++) {
+                    TerrainChunk chunk = terrain?.GetChunkAtCoords((cx << ChunksPerCubeShift) + dx, (cz << ChunksPerCubeShift) + dz);
                     if (chunk != null && chunk.ThreadState >= TerrainChunkState.Valid) {
                         n++;
                     }
@@ -665,7 +699,7 @@ namespace Game {
                     bool ok = true;
                     for (int sx = 0; sx < 2 && ok; sx++) {
                         for (int sz = 0; sz < 2 && ok; sz++) {
-                            TerrainChunk chunk = terrain.GetChunkAtCoords(cx * 2 + sx, cz * 2 + sz);
+                            TerrainChunk chunk = terrain.GetChunkAtCoords((cx << ChunksPerCubeShift) + sx, (cz << ChunksPerCubeShift) + sz);
                             if (chunk == null || chunk.ThreadState < TerrainChunkState.Valid) {
                                 ok = false;
                                 break;
@@ -686,7 +720,7 @@ namespace Game {
                     if (!ok || maxTop < TerrainChunk.MinHeight) {
                         continue;
                     }
-                    for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                    for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> CubeShift; cy <= maxTop >> CubeShift; cy++) {
                         (int Cx, int Cy, int Cz) key = (cx, cy, cz);
                         if (m_entries.ContainsKey(key)) {
                             continue;
@@ -823,8 +857,8 @@ namespace Game {
                 if (maxTop < TerrainChunk.MinHeight) {
                     return;                                  // 整块全空（例如高空立方体）
                 }
-                int cxc = chunk.Coords.X >> 1, czc = chunk.Coords.Y >> 1;
-                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                int cxc = chunk.Coords.X >> ChunksPerCubeShift, czc = chunk.Coords.Y >> ChunksPerCubeShift;
+                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> CubeShift; cy <= maxTop >> CubeShift; cy++) {
                     (int Cx, int Cy, int Cz) key = (cxc, cy, czc);
                     if (m_pendingSet.TryAdd(key, 0)) {
                         m_pendingQueue.Enqueue(key);
@@ -865,9 +899,9 @@ namespace Game {
                 if (maxTop < TerrainChunk.MinHeight) {
                     return 0;
                 }
-                int cxc = chunkX >> 1, czc = chunkZ >> 1;
+                int cxc = chunkX >> ChunksPerCubeShift, czc = chunkZ >> ChunksPerCubeShift;
                 int queued = 0;
-                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> 5; cy <= maxTop >> 5; cy++) {
+                for (int cy = Math.Max(minTop, TerrainChunk.MinHeight) >> CubeShift; cy <= maxTop >> CubeShift; cy++) {
                     (int Cx, int Cy, int Cz) key = (cxc, cy, czc);
                     if (m_entries.ContainsKey(key)) {
                         continue;                                // 已经有壳：不重复采
@@ -908,9 +942,9 @@ namespace Game {
                     continue;
                 }
                 bool ready = true;
-                for (int dx = 0; dx < 2 && ready; dx++) {
-                    for (int dz = 0; dz < 2 && ready; dz++) {
-                        TerrainChunk sibling = terrain.GetChunkAtCoords(key.Cx * 2 + dx, key.Cz * 2 + dz);
+                for (int dx = 0; dx < ChunksPerCube && ready; dx++) {
+                    for (int dz = 0; dz < ChunksPerCube && ready; dz++) {
+                        TerrainChunk sibling = terrain.GetChunkAtCoords((key.Cx << ChunksPerCubeShift) + dx, (key.Cz << ChunksPerCubeShift) + dz);
                         if (sibling == null || sibling.ThreadState < TerrainChunkState.Valid) {
                             ready = false;
                         }
@@ -980,7 +1014,7 @@ namespace Game {
             if (!Enabled || !RenderEnabled || m_entries.Count == 0) {
                 return false;
             }
-            (int Cx, int Cy, int Cz) key = (worldX >> 5, height >> 5, worldZ >> 5);
+            (int Cx, int Cy, int Cz) key = (worldX >> CubeShift, height >> CubeShift, worldZ >> CubeShift);
             // [v0.1.62] **部分壳不让 LOD 让位**：缺的象限要留给 LOD 补（否则那一片会变成洞）。
             if (!m_entries.TryGetValue(key, out Entry entry) || entry.Partial) {
                 return false;
@@ -1023,7 +1057,7 @@ namespace Game {
                     if (chunk == null) {
                         continue;
                     }
-                    cubes.Add((chunk.Coords.X >> 1, chunk.Coords.Y >> 1));
+                    cubes.Add(((chunk.Coords.X >> ChunksPerCubeShift), (chunk.Coords.Y >> ChunksPerCubeShift)));
                 }
                 int budget = Math.Max(0, InlineHarvestPerCall);
                 foreach ((int Cx, int Cz) cube in cubes) {
@@ -1034,9 +1068,9 @@ namespace Game {
                     // 2×2 区块必须都还在、都已 Valid（内容 + 光照都算好）
                     int minTop = int.MaxValue, maxTop = int.MinValue;
                     bool ready = true;
-                    for (int dx = 0; dx < 2 && ready; dx++) {
-                        for (int dz = 0; dz < 2 && ready; dz++) {
-                            TerrainChunk sibling = terrain.GetChunkAtCoords(cube.Cx * 2 + dx, cube.Cz * 2 + dz);
+                    for (int dx = 0; dx < ChunksPerCube && ready; dx++) {
+                        for (int dz = 0; dz < ChunksPerCube && ready; dz++) {
+                            TerrainChunk sibling = terrain.GetChunkAtCoords((cube.Cx << ChunksPerCubeShift) + dx, (cube.Cz << ChunksPerCubeShift) + dz);
                             if (sibling == null || sibling.ThreadState < TerrainChunkState.Valid) {
                                 ready = false;
                                 break;
@@ -1060,9 +1094,9 @@ namespace Game {
                         // [v0.1.62] 组不齐也采（部分壳）。注意：上面那个 `ready` 循环是**提前 break** 的，
                         // 它的 minTop/maxTop 此时不可信 —— 所以这里**重新**只按"还 Valid 的那几个区块"取顶面范围。
                         int pMin = int.MaxValue, pMax = int.MinValue;
-                        for (int dx = 0; dx < 2; dx++) {
-                            for (int dz = 0; dz < 2; dz++) {
-                                TerrainChunk sibling = terrain.GetChunkAtCoords(cube.Cx * 2 + dx, cube.Cz * 2 + dz);
+                        for (int dx = 0; dx < ChunksPerCube; dx++) {
+                            for (int dz = 0; dz < ChunksPerCube; dz++) {
+                                TerrainChunk sibling = terrain.GetChunkAtCoords((cube.Cx << ChunksPerCubeShift) + dx, (cube.Cz << ChunksPerCubeShift) + dz);
                                 if (sibling == null || sibling.ThreadState < TerrainChunkState.Valid) {
                                     continue;
                                 }
@@ -1081,7 +1115,7 @@ namespace Game {
                         }
                         bool anyPartial = false;
                         if (pMax >= TerrainChunk.MinHeight) {
-                            for (int cy = Math.Max(pMin, TerrainChunk.MinHeight) >> 5; cy <= pMax >> 5; cy++) {
+                            for (int cy = Math.Max(pMin, TerrainChunk.MinHeight) >> CubeShift; cy <= pMax >> CubeShift; cy++) {
                                 anyPartial |= TryCapturePartial(terrain, (cube.Cx, cy, cube.Cz));
                             }
                         }
@@ -1093,8 +1127,8 @@ namespace Game {
                     if (maxTop < TerrainChunk.MinHeight) {
                         continue;                            // 全空列（比如高空立方体）：没有表面可存
                     }
-                    int cyLo = Math.Max(minTop, TerrainChunk.MinHeight) >> 5;
-                    int cyHi = maxTop >> 5;
+                    int cyLo = Math.Max(minTop, TerrainChunk.MinHeight) >> CubeShift;
+                    int cyHi = maxTop >> CubeShift;
                     for (int cy = cyLo; cy <= cyHi; cy++) {
                         if (budget <= 0) {
                             SkippedOverBudget++;
@@ -1197,10 +1231,7 @@ namespace Game {
                 if (d2 < nearSq || d2 > farSq || terrain == null) {
                     continue;
                 }
-                if (terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2) != null
-                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2) != null
-                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2 + 1) != null
-                    || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2 + 1) != null) {
+                if (AnyChunkAllocated(terrain, kv.Key.Cx, kv.Key.Cz)) {
                     continue;
                 }
                 drawable++;
@@ -1250,7 +1281,7 @@ namespace Game {
                 if (maxTop < TerrainChunk.MinHeight) {
                     return true;                             // 空列
                 }
-                return m_entries.ContainsKey((chunkX >> 1, maxTop >> 5, chunkZ >> 1));
+                return m_entries.ContainsKey(((chunkX >> ChunksPerCubeShift), maxTop >> CubeShift, (chunkZ >> ChunksPerCubeShift)));
             }
             catch {
                 return true;
@@ -1315,11 +1346,7 @@ namespace Game {
                 }
                 float dist = CubeDistance(kv.Key.Cx, kv.Key.Cz, camera);
                 if (MeshSlidingWindow) {
-                    bool terrainLoaded = terrain != null
-                        && (terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2) != null
-                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2) != null
-                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2, kv.Key.Cz * 2 + 1) != null
-                            || terrain.GetChunkAtCoords(kv.Key.Cx * 2 + 1, kv.Key.Cz * 2 + 1) != null);
+                    bool terrainLoaded = AnyChunkAllocated(terrain, kv.Key.Cx, kv.Key.Cz);
                     if (dist > releaseRange || terrainLoaded) {
                         if (entry.Mesh != null || entry.VoxelMesh != null) {
                             DisposeMeshes(entry);
@@ -1442,10 +1469,7 @@ namespace Game {
                 if (distSq < nearSq || distSq > farSq) {
                     continue;
                 }
-                if (terrain.GetChunkAtCoords(cx * 2, cz * 2) != null
-                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2) != null
-                    || terrain.GetChunkAtCoords(cx * 2, cz * 2 + 1) != null
-                    || terrain.GetChunkAtCoords(cx * 2 + 1, cz * 2 + 1) != null) {
+                if (AnyChunkAllocated(terrain, cx, cz)) {
                     if (countLoadedSkips) {
                         SkippedBecauseLoaded++;
                     }
@@ -1615,7 +1639,7 @@ namespace Game {
                     return r;
                 }
                 CubeSurface32 shell = entry.Shell;
-                int idx = (lx & 31) + (lz & 31) * CubeSurface32.Size;
+                int idx = (lx & (CubeSurface32.Size - 1)) + (lz & (CubeSurface32.Size - 1)) * CubeSurface32.Size;
                 int top = shell.TopContents[idx];
                 int side = shell.SideContents[0][idx];
                 r["ok"] = true;
@@ -1711,6 +1735,21 @@ namespace Game {
             string path = EnsureWorld();
             if (path == null) {
                 return;
+            }
+            // [v0.1.85] 旧版本档（例如 v1 的 32 m 壳）**先改名保留**再整档重写。
+            // 放在这里而不是读档里：读档时流还没关（实测改名报 "being used by another process"）。
+            if (!m_fileHeaderValid && Storage.FileExists(path)) {
+                string backup = path + ".legacy.bak";
+                try {
+                    if (Storage.FileExists(backup)) {
+                        Storage.DeleteFile(backup);
+                    }
+                    Storage.MoveFile(path, backup);
+                    PersistenceError = $"legacy shell store moved to {backup}";
+                }
+                catch (Exception moveError) {
+                    PersistenceError = $"legacy shell store rename failed: {moveError.Message}";
+                }
             }
             int pending = m_dirtyCubes.Count + m_tombstones.Count;
             if (pending == 0) {
@@ -1870,8 +1909,13 @@ namespace Game {
                     int version = reader.ReadInt32();
                     int count = reader.ReadInt32();
                     if (magic != SaveMagic || version != SaveVersion) {
-                        PersistenceError = $"bad header magic={magic:x8} version={version}";
+                        // [v0.1.85] 版本不符（v1 = 32 m 壳档）：记录长度不同（4,108 vs 16,396 B），逐条读会全错位。
+                        // **改名保留放到 `StartSave` 里做** —— 这里流还开着，改名实测会报
+                        // "The process cannot access the file because it is being used by another process"
+                        // （第一版就是这么写的，结果旧档被整档重写覆盖掉了；见 notes/163）。
+                        PersistenceError = $"bad header magic={magic:x8} version={version}（旧档将在下次落盘时改名保留）";
                         m_fileHeaderValid = false;
+                        m_dirty = true;
                         return;
                     }
                     m_fileHeaderValid = true;
@@ -2123,6 +2167,11 @@ namespace Game {
                 ["shellSlidingWindow"] = ShellSlidingWindow,
                 ["shellReleaseFactor"] = ShellReleaseFactor,
                 ["shellReleaseMetres"] = Math.Round(ViewRangeMetres + BandMetres * MathF.Max(ShellReleaseFactor, 1f), 1),
+                // [v0.1.85] 立方体边长/位移 —— **判据不该再写死 32/`>>5`**（回归清单已改用它）
+                ["cubeSize"] = CubeSize,
+                ["cubeShift"] = CubeShift,
+                ["chunksPerCube"] = ChunksPerCube,
+                ["shellBytesPerCube"] = ShellBytesPerCube,
                 ["shellReleasedTotal"] = ShellReleasedTotal,
                 ["shellResidentFar"] = ShellResidentFar,
                 // [v0.1.62] skippedNotReady 的精确分解
@@ -2417,7 +2466,7 @@ namespace Game {
                     return root.ToJsonString();
                 }
                 CubeSurface32 shell = CubeSurface32.Extract(terrain, cx, cy, cz);
-                int idx = (lx & 31) + (lz & 31) * CubeSurface32.Size;
+                int idx = (lx & (CubeSurface32.Size - 1)) + (lz & (CubeSurface32.Size - 1)) * CubeSurface32.Size;
                 int shellValue = shell.TopContents[idx];
                 int contents = shellValue & 0x3FF;
                 Block block = BlocksManager.Blocks[contents];
@@ -2431,9 +2480,9 @@ namespace Game {
                 root["shellSurfaceY"] = shell.TopHeight[idx] + 1;
                 root["shellLight"] = Terrain.ExtractLight(shellValue);
                 // [v0.1.56] 家具塌缩：地形里那格真实方块 vs 壳里存了什么
-                int terrainValue = terrain.GetCellValue(cx * CubeSurface32.Size + (lx & 31),
+                int terrainValue = terrain.GetCellValue(cx * CubeSurface32.Size + (lx & (CubeSurface32.Size - 1)),
                                                         shell.TopHeight[idx],
-                                                        cz * CubeSurface32.Size + (lz & 31));
+                                                        cz * CubeSurface32.Size + (lz & (CubeSurface32.Size - 1)));
                 root["terrainContents"] = Terrain.ExtractContents(terrainValue);
                 root["terrainBlock"] = BlocksManager.Blocks[Terrain.ExtractContents(terrainValue)]?.GetType().Name ?? "";
                 root["terrainData"] = Terrain.ExtractData(terrainValue);

@@ -20,7 +20,16 @@ namespace Game {
     /// 判据：`skyline.CubeSurfaceSelfCheck()`（合成体，确定性）、`skyline.CubeSurfaceSample(cx,cy,cz)`（真实世界）。
     /// </summary>
     public sealed class CubeSurface32 {
-        public const int Size = 32;
+        /// <summary>
+        /// [v0.1.85] 壳立方体边长（格）：**32 → 16** —— 里程碑 1.2 的"治本"。
+        /// 一个 16 m 立方体恰好覆盖**一个区块**（`TerrainChunk.Size = 16`）⇒
+        ///   ①"四个区块组不齐就采不了"这个概念**直接消失**（1.2 的补丁变成不需要）；
+        ///   ②壳与真地形的对齐粒度从 32 m 降到 **16 m**（接缝更细）；
+        ///   ③洞覆盖的可达半径从 `视距+32` 降到 `视距+16`（`notes/162` 量出的那条硬边界）。
+        /// 代价：同一个面积里立方体数 ×4（每个立方体 16 KiB → **4 KiB**，总字节不变），
+        /// 存档记录长度 16,396 → **4,108 B** ⇒ 旧档不兼容（见 `SkylineCubeShellStore.SaveVersion`）。
+        /// </summary>
+        public const int Size = 16;
         public const int GridCells = Size * Size;                 // 每个面 1024 格
         public const int RawBytes = Size * Size * Size * 4;       // 原始方块状态 128 KiB
         /// <summary>

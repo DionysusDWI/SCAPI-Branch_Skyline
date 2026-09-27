@@ -24,8 +24,10 @@ namespace Game {
     /// 材质按 v0.1.59 的规则替换（草→泥土、雪层/雪→雪）。
     /// </summary>
     public sealed class SurfaceVoxelShell32 {
-        public const int Size = 32;
-        public const int CellCount = Size * Size * Size;          // 32,768
+        /// <summary>[v0.1.85] 跟壳立方体一起降到 **16**（一个区块一块壳）：16³ = 4,096 体素。
+        /// 逐立方体的体素壳因此从 ~13.5 KiB 降到 ~1.7 KiB（同一面积的总量不变）。</summary>
+        public const int Size = 16;
+        public const int CellCount = Size * Size * Size;          // 4,096
         public const int MaskWords = CellCount / 64;              // 512
         /// <summary>
         /// 体素上限：`3072×4 + 4096 = 16,384 B` = **正好 16 KiB**（与列顶高度场壳同预算）。
@@ -50,10 +52,11 @@ namespace Game {
             Z = z;
         }
 
-        public static int PackIndex(int lx, int ly, int lz) => lx | (lz << 5) | (ly << 10);
-        public static int IndexX(int i) => i & 31;
-        public static int IndexZ(int i) => (i >> 5) & 31;
-        public static int IndexY(int i) => (i >> 10) & 31;
+        // [v0.1.85] 打包位数跟着 Size 走（16 → 每轴 4 位）
+        public static int PackIndex(int lx, int ly, int lz) => lx | (lz << 4) | (ly << 8);
+        public static int IndexX(int i) => i & 15;
+        public static int IndexZ(int i) => (i >> 4) & 15;
+        public static int IndexY(int i) => (i >> 8) & 15;
 
         public bool IsSolid(int lx, int ly, int lz) {
             int index = PackIndex(lx, ly, lz);
