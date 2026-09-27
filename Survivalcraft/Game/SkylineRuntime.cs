@@ -443,6 +443,8 @@ namespace Game {
             CubeWindowTick();
             // [v0.1.24] 大批写入期的光照去抖：写入停下后统一降级一次（见 SkylineBulkEdit.cs）
             TickDeferredLight();
+            // [v0.1.31] 地形顶点阴影的"随太阳重烘焙"（默认随 TerrainShadowEnabled 生效；见 SkylineTerrainShadow.cs）
+            TerrainShadowTick();
             if (Regions.Count == 0) {
                 return;
             }

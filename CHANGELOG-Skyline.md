@@ -3,6 +3,28 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.31] - 2026-09-27
+
+第四十一个版本：**家具"透明但有碰撞"诊断（用户报告 bug 的机制确认）** + 地形阴影"随太阳重烘焙"预留。
+
+**本版相对 v0.1.30 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（家具诊断）** | `skyline.FurnitureDiagnose(x,y,z)`：解析 contents/data → designIndex/rotation → 查 `SubsystemFurnitureBlockBehavior.GetDesign`，明确区分"行为子系统缺失 / **design 不存在（不生成几何 = 透明但有碰撞）** / 正常（报 resolution+顶点数）"；`skyline.FurnitureDesigns(limit)` 列出当前世界**真实存在**的设计索引 |
+| **复现 B（用户 bug）** | 同排对照（相机 (4290.5,65,9095.5) 朝西）：`data=20`（design 5）→ `design=OK res=12 verts=1004` **渲染可见**；`data=70848/72019`（照搬 `data/furniture.json` 的 value → design 2352/2644）→ `design=NULL`，**完全不可见但 `isCollidable=True`**。结论：**`data` 里的 design 索引在当前世界不存在时，家具必然"透明但有碰撞"**（跨世界搬运 / 只写 contents 的旧命令通道是典型触发）；同时修正 `notes/97 §2` 的误判（此前把"家具正常渲染"读错了） |
+| **新增 C（阴影重烘焙，预留）** | `TerrainShadowRebakeEnabled` / `TerrainShadowSunThresholdDegrees`（默认 4°）/ `TerrainShadowMinRebakeSeconds`（默认 8 s）/ `TerrainShadowRebakeRadius`（默认 256 m）：太阳方向变化超阈值后，对相机周围区块强制重建（`forceGeometryRegeneration=true`）以重烘焙顶点阴影。**实测说明**：`LightingManager.DirectionToLight1` 是 `static readonly` 常量（源码级证据）→ 当前引擎光照方向不随时间变化，该机制现版本不触发（仅开启后的首次纠偏一次），是给未来动态太阳（Iris/Dawnlight 线）预留的挂钩 |
+
+### Verified
+
+* `FurnitureDesigns`：AgentLab 有 **214 个真实设计**（如 `[5] res=12 verts=1004`、`[7] res=12 verts=504`）；
+* 同排对照截图 `data/sessions/skyline-v0131/furniture-valid-vs-invalid.png`：合法设计可见、三个无效设计完全不可见
+  （且不遮挡视线——相机正是穿过它们看向合法家具的）；
+* 阴影重烘焙：开启后首次纠偏 `rebakes=1 / lastRebakeChunks=200`（`sunDot→1`），随后因光照方向为常量而不再触发；
+  代价 ≈1 ms/区块、fps 29~31 无回归。
+
+构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.30] - 2026-09-27
 
 第四十个版本：**近景地形真阴影（CPU 第一刀）** —— 里程碑 5（Iris 真接入）把阴影判定从"只影响 LOD 低模"
