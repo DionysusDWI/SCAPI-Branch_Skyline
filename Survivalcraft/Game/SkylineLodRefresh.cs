@@ -156,6 +156,24 @@ namespace Game {
             MarkDirty(Key(x >> CellShift, z >> CellShift));
         }
 
+        /// <summary>
+        /// [v0.1.17] 区块**刚达到 Valid** 时由 `TerrainUpdater` 调用：立刻把这个单元标脏，
+        /// 让"刚加载出来/玩家刚走过的地形"在下一个 Tick 就进 LOD（而不是等轮转游标转过来，
+        /// 800+ 列时要十几秒）。可用 `SkylineRuntime.LodBackfillOnValid` 关闭做 A/B。
+        /// </summary>
+        public static void NotifyChunkValid(TerrainChunk chunk) {
+            if (!Enabled || chunk == null || !SkylineRuntime.BackfillOnValid) {
+                return;
+            }
+            MarkDirty(Key(chunk.Origin.X >> CellShift, chunk.Origin.Y >> CellShift));
+            m_backfilled++;
+        }
+
+        static long m_backfilled;
+
+        /// <summary>[v0.1.17] 因"区块刚 Valid"而标脏的次数（诊断）。</summary>
+        public static long BackfilledOnValid => m_backfilled;
+
         /// <summary>把一个 LOD 单元标脏（幂等；只用现成集合，不分配新对象）。</summary>
         public static void MarkDirty(long key) {
             m_lastEditTime = Time.RealTime;
@@ -337,6 +355,7 @@ namespace Game {
             ["dirtyTaken"] = m_dirtyTaken,
             ["dirtySkippedYoung"] = m_dirtySkippedYoung,
             ["dirtySkippedUnloaded"] = m_dirtySkippedUnloaded,
+            ["backfilledOnValid"] = m_backfilled,
             ["refreshSeconds"] = RefreshSeconds,
             ["dirtyChunksPerTick"] = DirtyChunksPerTick,
             ["sweepSecondsLeft"] = Math.Round(Math.Max(0.0, m_sweepUntil - Time.RealTime), 1)

@@ -3,6 +3,25 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.17] - 2026-09-27
+
+第二十七个版本：**"区块 Valid 即刻补采"** —— 新区块（或玩家刚走过的区块）一达到 Valid 就立刻通知
+超视距 LOD 采这个单元，而不是等轮转游标转过来（大场面游标一圈要十几秒）。
+
+**本版相对 v0.1.16 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（补采钩子）** | `TerrainUpdater` 在 `chunk.ThreadState = Valid` 处调用新的 `SkylineLod.NotifyChunkValid(chunk)`：把该 16 m 单元 `MarkDirty`（幂等，同一 Tick 多次 Valid 只入队一次）。开关 `skyline.BackfillOnValid`（默认 **true**）；诊断 `skyline.LodBackfilledOnValid` 与 `LodSurvey().refresh.backfilledOnValid` |
+| **文档 B** | `notes/87`：实现 + 两次对照测量（含"中小场面看不出吞吐收益"的诚实结论——轮转游标 60 块/秒本来就追得上 ~30 块/秒的 Valid 速率；补采的价值在 800+ 列的大场面把首帧覆盖时延从 ~13 s 压到 ~0.2 s） |
+
+### Verified
+
+* **钩子有效性**：世界加载完成后 `backfilled=285`；传送到新区 +8 s → **757（+433）**，`dirty` 消化到 0；
+  关闭开关后再传送 → 计数**不变**（开关有效）；
+* **对照**（200 列场面，+3 s）：ON `cells` +56 / OFF +78 —— 吞吐无差异（诚实记录，见 `notes/87 §3`）；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.16] - 2026-09-27
 
 第二十六个版本：**交接带覆盖度的对照实验（负结果）+ 脏队列两处修复/诊断**。

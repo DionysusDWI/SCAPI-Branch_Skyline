@@ -977,6 +977,11 @@ namespace Game {
                     }
                     chunk.ThreadState = TerrainChunkState.Valid;
                     chunk.WasUpgraded = true;
+                    // [v0.1.17] 区块刚达到 Valid：立刻通知超视距 LOD 补采这个 16 m 单元。
+                    // 轮转游标在 800+ 列的场面要十几秒才轮到一次（实测批量加载时脏队列 99.99% 都在等
+                    // 区块 Valid），"就地补采"能把"玩家刚走过/刚加载出来的地形"立刻反映到远景，
+                    // 直接改善视距边缘交接带的覆盖度（notes/86 §4）。
+                    SkylineLod.NotifyChunkValid(chunk);
                     double realTime2 = Time.RealTime;
                     ChunkUpdates++;
                     m_statistics.VerticesCount2++;

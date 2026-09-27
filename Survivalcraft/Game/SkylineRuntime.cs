@@ -201,6 +201,15 @@ namespace Game {
         /// <summary>[v0.1.15] 坡向明暗确定性自检（合成地形：平地 / 东坡 / 西坡）。</summary>
         public static string LodSlopeShadingSelfCheck() => SkylineLod.SlopeShadingSelfCheck();
 
+        /// <summary>
+        /// [v0.1.17] 区块达到 Valid 时是否立刻通知超视距 LOD 补采该单元（默认 **true**）。
+        /// 关闭后回到"只靠轮转游标 + 采样戳"的旧节奏，可用于 A/B（见 `notes/87`）。
+        /// </summary>
+        public static bool BackfillOnValid { get; set; } = true;
+
+        /// <summary>[v0.1.17] 诊断：因"区块刚 Valid"而标脏的次数。</summary>
+        public static long LodBackfilledOnValid => SkylineLod.BackfilledOnValid;
+
         public static string LodDescribe() => SkylineLod.Describe();
 
         public static string LodSurvey() => SkylineLod.Survey();
