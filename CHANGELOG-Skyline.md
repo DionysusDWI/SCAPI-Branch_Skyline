@@ -3,6 +3,33 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.37] - 2026-09-27
+
+第四十七个版本：**家具写入侧护栏**（桥/AgentBridge 侧改动）—— 用户报过的"家具透明但有碰撞"
+（机制见 v0.1.31 / `notes/97`、`notes/101`）从此在**写入当场**就能看到提示：
+写 `contents=227` 时核对 design 索引在当前世界是否存在，不存在就给出 `missingDesign` 计数与例子。
+
+**本版相对 v0.1.36 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（写入侧护栏）** | `AgentActions.FurnitureWriteGuard(...)`：对本批写入后确实是家具的格子做 `data → FurnitureBlock.GetDesignIndex → behavior.GetDesign` 判定，返回 `checked / missingDesign / examples[]（最多 5 个）/ hint`；`op:cell` 的单格与批量两条分支都已接线 |
+| **新增 B（形状通道）** | `op:shape`：形状内所有格子是同一个 value，因此 design **只查一次**，`checked = cellsWritten`（同理给 `designIndex/missingDesign`） |
+| **行为约定** | **不改写入语义**：合法/非法都照样写下去；护栏只做"当场告知"，hint 指向 `skyline.FurnitureDesigns`（当前世界真实存在的设计索引）与 `data = designIndex << 2 \| rotation` |
+| **发布侧** | `make-source-bundle.ps1` 起把 `.projects/AgentBridge`（`*.cs` + `csproj` + `Bridge/*.cs`）放进 `agentbridge/` 一并发布——这类 mod 侧能力以前无法从包里复现 |
+
+### Verified（AgentLab；世界内 214 个家具设计）
+
+| 用例 | 请求 | 结果 |
+|---|---|---|
+| 合法 design | `op:cell` data=20（design 5） | `checked=1, missingDesign=0` |
+| **非法 design（用户 bug 场景）** | `op:cell` data=70848（design 2352） | `checked=1, missingDesign=1`，例子 `[4361,68,9125] designIndex=2352` |
+| 批量混合 | 2 格：data=20 + data=72019（design 2644） | `checked=2, missingDesign=1` |
+| 合法 / 非法（形状） | `op:shape` box contents=227 | `designIndex=5 missing=0` / `designIndex=2352 missing=1` |
+
+证据：`data/sessions/skyline-v0137/furniture-guard.json`、`notes/110`。
+桥工程构建：`build-mod.ps1`，**1 个既有警告（InputInjector 过时 API）0 错误**。
+
 ## [v0.1.36] - 2026-09-27
 
 第四十六个版本：**alpha-tested 几何进太阳深度图（树叶阴影）+ 修掉一个真实并发缺陷** ——
