@@ -1241,6 +1241,9 @@ namespace Game {
         public static string CubeShellMeshTiers(int cx, int cy, int cz) =>
             SkylineCubeShellStore.MeshTiers(cx, cy, cz);
 
+        /// <summary>[v0.1.60] 切换演示层"用表面体素壳"（有体积；代价更大）。切完需重新 `CubeSurfaceHarvest`。</summary>
+        public static string CubeSurfaceVoxel(bool enabled) => SkylineCubeSurfaceDemo.SetVoxelMode(enabled);
+
         /// <summary>
         /// [v0.1.54] **按列探测**：这一列（立方体坐标 + 列内 lx/lz）在壳网格里被画成了什么？
         /// 报：壳里的值 / 方块 / 是否完整方块（`CubeBlock`）/ 列顶高度，以及

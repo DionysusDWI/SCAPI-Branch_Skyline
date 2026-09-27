@@ -654,10 +654,24 @@ namespace Game {
         static bool m_draw;
         static bool m_useMerged;
         static float m_drawYOffset;
+        /// <summary>[v0.1.60] 用**表面体素壳**（有体积）而不是列顶高度场来建演示网格。</summary>
+        static bool m_useVoxel;
+        static readonly List<SurfaceVoxelMesh> m_voxelMeshes = [];
+        static readonly List<SurfaceVoxelShell32> m_voxelShells = [];
         static string m_lastError = "";
 
         public static bool DrawEnabled => m_draw;
         public static bool UseMerged => m_useMerged;
+
+        /// <summary>[v0.1.60] 切换"演示层用表面体素壳"（默认关；切完要重新 `CubeSurfaceHarvest`）。</summary>
+        public static string SetVoxelMode(bool enabled) {
+            m_useVoxel = enabled;
+            return new JsonObject {
+                ["ok"] = true,
+                ["voxelMode"] = m_useVoxel,
+                ["note"] = "切换后需要重新 skyline.CubeSurfaceHarvest(cx,cy,cz,nx,nz) 才会生效"
+            }.ToJsonString();
+        }
 
         public static string Harvest(int cx, int cy, int cz, int nx, int nz) {
             JsonObject result = new();
@@ -710,6 +724,31 @@ namespace Game {
 
                 CubeSurfaceMesh32 culled = CubeSurfaceMesh32.Build(shells, nx, nz, false, true);
                 CubeSurfaceMesh32 merged = CubeSurfaceMesh32.Build(shells, nx, nz, true, true);
+                // [v0.1.60] 同一批立方体的**表面体素壳 + 六向贪心网格**（有体积；代价更大）
+                foreach (SurfaceVoxelMesh m in m_voxelMeshes) {
+                    m.Dispose();
+                }
+                m_voxelMeshes.Clear();
+                m_voxelShells.Clear();
+                int voxelQuads = 0, voxelBytes = 0, voxelVertices = 0, voxelNaive = 0;
+                int degraded = 0, voxelCount = 0;
+                for (int iz = 0; iz < nz; iz++) {
+                    for (int ix = 0; ix < nx; ix++) {
+                        SurfaceVoxelShell32 voxelShell =
+                            SurfaceVoxelShell32.ExtractFrom(terrain, x0 + ix, cy, z0 + iz);
+                        SurfaceVoxelMesh voxelMesh = SurfaceVoxelMesh.Build(voxelShell, true, true);
+                        m_voxelShells.Add(voxelShell);
+                        m_voxelMeshes.Add(voxelMesh);
+                        voxelQuads += voxelMesh.Quads;
+                        voxelBytes += (int)voxelMesh.VertexBytes;
+                        voxelVertices += voxelMesh.Vertices;
+                        voxelNaive += voxelMesh.NaiveFaces;
+                        voxelCount += voxelShell.VoxelCount;
+                        if (voxelShell.Degraded) {
+                            degraded++;
+                        }
+                    }
+                }
                 m_culled?.Dispose();
                 m_merged?.Dispose();
                 m_shells = shells;
@@ -731,6 +770,16 @@ namespace Game {
                 result["naiveQuads"] = culled.NaiveQuads;
                 result["culled"] = culled.DescribeObject();
                 result["merged"] = merged.DescribeObject();
+                result["voxel"] = new JsonObject {
+                    ["cubes"] = nx * nz,
+                    ["voxels"] = voxelCount,
+                    ["naiveFaces"] = voxelNaive,
+                    ["quads"] = voxelQuads,
+                    ["vertices"] = voxelVertices,
+                    ["vertexBytes"] = voxelBytes,
+                    ["degradedCubes"] = degraded,
+                    ["active"] = m_useVoxel
+                };
                 result["drawing"] = m_draw;
                 result["note"] = "culled=逐格(纹理精确) merged=贪心合并(纹理拉伸)；两者都可 skyline.CubeSurfaceDraw(true) 后画出来 A/B；"
                     + "zeroLightCells>0 = 这些列采集时**光照还没算**（区块只到 InvalidLight），壳里 light 位是 0 → 画出来是黑的："
@@ -796,11 +845,40 @@ namespace Game {
             if (!m_draw) {
                 return;
             }
+            // [v0.1.60] 表面体素模式：逐立方体画（六向贪心网格，有体积）
+            if (m_useVoxel) {
+                foreach (SurfaceVoxelMesh voxelMesh in m_voxelMeshes) {
+                    if (voxelMesh.VertexBuffer == null || voxelMesh.IndexCount == 0) {
+                        continue;
+                    }
+                    DrawVoxelMesh(camera, voxelMesh, m_drawYOffset);
+                }
+                return;
+            }
             CubeSurfaceMesh32 mesh = m_useMerged ? m_merged : m_culled;
             if (mesh == null || mesh.VertexBuffer == null || mesh.IndexCount == 0) {
                 return;
             }
             DrawMesh(camera, mesh, m_drawYOffset);
+        }
+
+        /// <summary>[v0.1.60] 画一张**表面体素网格**（同一套地形 shader / 图集 / 雾参数）。</summary>
+        public static void DrawVoxelMesh(Camera camera, SurfaceVoxelMesh mesh, float yOffset) {
+            if (mesh?.VertexBuffer == null || mesh.IndexCount == 0) {
+                return;
+            }
+            Shader shader = PrepareTerrainShader(camera, yOffset);
+            if (shader == null) {
+                return;
+            }
+            try {
+                Display.DrawIndexed(PrimitiveType.TriangleList, shader, mesh.VertexBuffer, mesh.IndexBuffer,
+                    0, mesh.IndexCount);
+            }
+            catch (Exception e) {
+                m_lastError = e.Message;
+                Log.Warning($"SkylineCubeSurfaceDemo.DrawVoxelMesh: {e.Message}");
+            }
         }
 
         /// <summary>
