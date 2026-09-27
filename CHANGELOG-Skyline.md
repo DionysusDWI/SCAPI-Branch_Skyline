@@ -7,6 +7,66 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.71] - 2026-09-28
+
+第八十一个版本：**里程碑 1.1 —— Distant Horizons 实现深挖**（本轮之前两次子代理都没做成，这一版由主 agent 自己做）。
+
+### 取源路径本身有信息量：不克隆仓库也能拿到核心代码
+
+用户给的 `TheBearodactyl/distant-horizons` 是**真实存在的非 fork 仓库**，但 **LOD 核心不在它的树里**：
+
+```
+# .gitmodules
+[submodule "coreSubProjects"]
+	path = coreSubProjects
+	url  = https://gitlab.com/jeseibel/distant-horizons-core.git
+```
+
+⇒ GitHub 那份只有**模组包装层**；真正的 LOD 算法在 GitLab 的 `distant-horizons-team/distant-horizons-core`
+（最近活动 2026-09-26）。用 GitLab 的 `repository/files/<path>/raw?ref=main` **逐文件取**即可，
+**不需要 `git clone`**（符合用户"避免未经允许克隆仓库"的口径）。
+**教训：「给我个仓库地址去学」可能只给到了壳。**
+
+参考文件落在 `notes/dh-ref/`（8 个文件 ~150 KB）。
+
+### 挖到的设计事实（可复查）
+
+| 事实 | 出处 |
+|---|---|
+| **一个 section = 64×64 个 LOD 列**；**最小 section detail level = 6（= 4×4 MC 区块）** | `DhSectionPos` L34/L53 |
+| 为什么是 64：**太小** → "成千上万个 section，每个都要自己的文件和渲染缓冲"；**太大** → 精度不够 | 类注释 L39-43 |
+| 地址**打包进一个 long**：detail(8 位) + X(28) + Z(28) | `DhSectionPos` L61-74 |
+| 四叉树每 Tick 重走：`ReentrantLock.tryLock` 防重入、**出界节点整体丢弃**、节点分五类 enable / disable / load / worldGen / **enableDeleteChildren** | `LodQuadTree` L234/L267/L586/L614/L681 |
+| **远了就 `disable` + 递归禁子节点；没上传 GPU 的节点 `addLoadSection` 按需重载** | 同上 |
+| 期望 detail level 由**距离**算，**摄像机放大还给一个方向性细化锥（CameraZoom）** | `LodQuadTree` L~636 |
+| **内存有界的真正机制**：`LodRenderSection implements AutoCloseable`，`close()` 关渲染缓冲；`RenderBufferHandler` 用 **`SortedArraySet` 按近到远**收集缓冲 | `LodRenderSection` L60/460/502、`RenderBufferHandler` L72/105/107 |
+
+⇒ **数据在磁盘（每 section 一个数据文件）、内存只留视距内的 section + 渲染缓冲；远了关缓冲、回来重载。**
+
+### 对照我们的实现（差距清单）
+
+| DH | 我们 | 差距 |
+|---|---|---|
+| 多 detail level 的**四叉树** | 三层固定半径带（16/8/4 m，无树） | 简单但**没有按距离连续选级、没有子节点回收** |
+| disable 时递归删子节点、关缓冲 | 壳有滑动窗口；**LOD 单元从不释放** | v0.1.70 加了逐出，**实测丢远景**（`cellsInMesh 148→0`）⇒ **默认关** |
+| **数据落盘 + 按需回读** | 壳已落盘；**LOD 单元表不落盘** | **2.2 的真正下一步** |
+| 渲染缓冲**近到远排序** | 三层各自 VBO，按层画 | 没有距离排序 |
+| detail level 由距离（含放大锥） | 地形 LOD 还是固定阈值（家具 LOD 已是像素判据） | 地形缺连续判据 |
+
+### 由深挖直接得到的下一步（按优先级）
+
+①**LOD 单元落盘 + 按需回读**（做完才能安全按距离逐出）；②地形 LOD 的"距离→级别"连续判据；
+③渲染缓冲近到远排序；④子节点递归回收（依赖 ①）。
+
+### 边界（不粉饰）
+
+* 只读了 **LOD / 渲染 / provider** 这条线的 8 个文件，**没读**它的 GL 层、着色器、网络同步、配置体系。
+* **不打算照搬四叉树**：Survivalcraft 的地形是 16 m 列 + 我们的"壳 + 三层带 + 手动重建"，
+  照搬会把整套推翻；**只取"数据落盘 + 缓冲可回收"两条原则**。
+* DH 是 Java + GL 即时模式风格，我们是 C# + Engine 批渲染，**性能数字不可直接类比**。
+
+详见 `notes/150-DistantHorizons深挖.md`；参考源码 `notes/dh-ref/`。
+
 ## [v0.1.70] - 2026-09-28
 
 第八十个版本：**里程碑 2.2 —— 内存"只增不减"的核查**。用户口径（逐字）：
