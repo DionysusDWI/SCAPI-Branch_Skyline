@@ -219,7 +219,7 @@ namespace Game {
                 return;
             }
             try {
-                Terrain terrain = Terrain;
+                Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
                 if (terrain == null) {
                     return;
                 }
@@ -903,6 +903,54 @@ namespace Game {
         /// <summary>[v0.1.52] 桥：同一张壳在各档下的网格代价表。</summary>
         public static string CubeShellMeshTiers(int cx, int cy, int cz) =>
             SkylineCubeShellStore.MeshTiers(cx, cy, cz);
+
+        /// <summary>
+        /// [v0.1.54] **按列探测**：这一列（立方体坐标 + 列内 lx/lz）在壳网格里被画成了什么？
+        /// 报：壳里的值 / 方块 / 是否完整方块（`CubeBlock`）/ 列顶高度，以及
+        /// **覆盖这一列的顶面四边形**与**贴着这一列的 4 个侧壁**（跨度 + 材质 + 贴图槽）。
+        /// 用途：判断"门/栅栏/台阶这类非完整方块"是不是被画成了**材质占位方盒**（顶面 + 该材质侧壁）。
+        /// </summary>
+        public static string CubeShellColumn(int cx, int cy, int cz, int lx, int lz) {
+            JsonObject root = new();
+            try {
+                Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+                if (terrain == null) {
+                    root["ok"] = false;
+                    root["err"] = "no terrain";
+                    return root.ToJsonString();
+                }
+                CubeSurface32 shell = CubeSurface32.Extract(terrain, cx, cy, cz);
+                int idx = (lx & 31) + (lz & 31) * CubeSurface32.Size;
+                int shellValue = shell.TopContents[idx];
+                int contents = shellValue & 0x3FF;
+                Block block = BlocksManager.Blocks[contents];
+                root["ok"] = true;
+                root["cube"] = new JsonArray(cx, cy, cz);
+                root["column"] = new JsonArray(lx, lz);
+                root["contents"] = contents;
+                root["block"] = block?.GetType().Name ?? "";
+                root["isFullCube"] = block is CubeBlock;
+                root["shellTopHeight"] = shell.TopHeight[idx];
+                root["shellSurfaceY"] = shell.TopHeight[idx] + 1;
+                root["shellLight"] = Terrain.ExtractLight(shellValue);
+                root["textureSlot"] = block == null ? -1
+                    : (block is CubeBlock ? block.GetFaceTextureSlot(4, shellValue)
+                                          : block.GetFaceTextureSlot(0, shellValue));
+                root["materialSlot"] = block == null ? -1 : SkylineLod.MaterialTextureSlot(block, shellValue);
+
+                CubeSurfaceMesh32 built = CubeSurfaceMesh32.Build([shell], 1, 1, false, false, 1, keepQuads: true);
+                root["topQuads"] = built.TopQuadsJson(lx, lz);
+                root["walls"] = built.WallsJson(lx, lz);
+                root["boxShape"] = built.ColumnBoxShape(lx, lz);
+                root["note"] = "boxShape = 该列在网格里的实际形状（顶面 y + 贴边侧壁跨度）；"
+                    + "顶面 + 该列材质侧壁 = 材质占位方盒";
+            }
+            catch (Exception e) {
+                root["ok"] = false;
+                root["err"] = e.Message;
+            }
+            return root.ToJsonString();
+        }
 
         /// <summary>[v0.1.53] 立刻把壳仓存下来（取证/收尾用；正常是"脏了 + 每 60 s"自动写）。</summary>
         public static string CubeShellSaveNow() {

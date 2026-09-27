@@ -74,17 +74,24 @@ namespace Game {
             public int Side;                // 0=+Z 1=-Z 2=+X 3=-X
         }
 
+        // ---- [v0.1.54] 取证用：把生成的四边形按列暴露出来（默认关，只在按列探测时保留） ----
+        public bool KeepQuads;
+        public readonly List<(int X, int Z, int W, int D, int Y, int Value)> DebugTops = [];
+        public readonly List<(int X, int Z, int Len, int LowY, int HighY, int Value, int Side)> DebugWalls = [];
+
         /// <summary>
         /// 由一组壳（`shells[ix + iz*NX]`）建一层网格。
         /// `greedy` = 是否做 2D 贪心合并；`withBuffers` = 是否创建 GPU 缓冲（只算数时省内存）。
         /// </summary>
-        public static CubeSurfaceMesh32 Build(CubeSurface32[] shells, int nx, int nz, bool greedy, bool withBuffers, int step = 1) {
+        public static CubeSurfaceMesh32 Build(CubeSurface32[] shells, int nx, int nz, bool greedy, bool withBuffers,
+                                              int step = 1, bool keepQuads = false) {
             Stopwatch watch = Stopwatch.StartNew();
             step = step switch { <= 1 => 1, 2 => 2, 4 => 4, 8 => 8, 16 => 16, _ => Pad };
             CubeSurfaceMesh32 mesh = new() {
                 NX = nx,
                 NZ = nz,
                 Step = step,
+                KeepQuads = keepQuads,
                 MinSurfaceY = int.MaxValue,
                 MaxSurfaceY = int.MinValue
             };
@@ -195,6 +202,9 @@ namespace Game {
             foreach (TopQuad q in tops) {
                 mesh.CoveredCells += q.W * q.D;
                 mesh.TopQuads++;
+                if (mesh.KeepQuads) {
+                    mesh.DebugTops.Add((q.X, q.Z, q.W, q.D, q.Y, q.Value));
+                }
                 mesh.EmitTopQuad(q);
             }
 
@@ -213,6 +223,9 @@ namespace Game {
             }
             foreach (WallQuad wall in walls) {
                 mesh.WallQuads++;
+                if (mesh.KeepQuads) {
+                    mesh.DebugWalls.Add((wall.X, wall.Z, wall.Len, wall.LowY, wall.HighY, wall.Value, wall.Side));
+                }
                 mesh.EmitWallQuad(wall);
             }
 
@@ -530,6 +543,98 @@ namespace Game {
         }
 
         public string Describe() => DescribeObject().ToJsonString();
+
+        // ---- [v0.1.54] 按列取证：这一列被画成了什么形状 ----
+
+        /// <summary>覆盖该列的顶面四边形（合并后的矩形会包含该列）。</summary>
+        public JsonArray TopQuadsJson(int lx, int lz) {
+            JsonArray a = [];
+            foreach ((int X, int Z, int W, int D, int Y, int Value) t in DebugTops) {
+                if (lx >= t.X && lx < t.X + t.W && lz >= t.Z && lz < t.Z + t.D) {
+                    a.Add(new JsonObject {
+                        ["rect"] = new JsonArray(t.X, t.Z, t.W, t.D),
+                        ["y"] = t.Y,
+                        ["contents"] = t.Value & 0x3FF,
+                        ["materialSlot"] = TextureSlotOf(t.Value)
+                    });
+                }
+            }
+            return a;
+        }
+
+        /// <summary>贴着该列的 4 个侧壁（裙边/方盒的侧面）。</summary>
+        public JsonArray WallsJson(int lx, int lz) {
+            JsonArray a = [];
+            foreach ((int X, int Z, int Len, int LowY, int HighY, int Value, int Side) w in DebugWalls) {
+                bool touches = w.Side switch {
+                    0 => w.Z == lz + 1 && lx >= w.X && lx < w.X + w.Len,
+                    1 => w.Z == lz && lx >= w.X && lx < w.X + w.Len,
+                    2 => w.X == lx + 1 && lz >= w.Z && lz < w.Z + w.Len,
+                    _ => w.X == lx && lz >= w.Z && lz < w.Z + w.Len
+                };
+                if (!touches) {
+                    continue;
+                }
+                a.Add(new JsonObject {
+                    ["side"] = w.Side switch { 0 => "+Z", 1 => "-Z", 2 => "+X", _ => "-X" },
+                    ["planeCoord"] = w.Side <= 1 ? w.Z : w.X,
+                    ["run"] = new JsonArray(w.Side <= 1 ? w.X : w.Z, w.Len),
+                    ["lowY"] = w.LowY,
+                    ["highY"] = w.HighY,
+                    ["span"] = w.HighY - w.LowY,
+                    ["contents"] = w.Value & 0x3FF,
+                    ["materialSlot"] = TextureSlotOf(w.Value)
+                });
+            }
+            return a;
+        }
+
+        /// <summary>该列的"实际形状"摘要：顶面高度 + 侧壁跨度 → 判断是不是 1 m 的材质方盒。</summary>
+        public JsonObject ColumnBoxShape(int lx, int lz) {
+            int topY = -1;
+            foreach ((int X, int Z, int W, int D, int Y, int Value) t in DebugTops) {
+                if (lx >= t.X && lx < t.X + t.W && lz >= t.Z && lz < t.Z + t.D) {
+                    topY = t.Y;
+                    break;
+                }
+            }
+            int walls = 0, minLow = int.MaxValue, maxHigh = int.MinValue;
+            foreach ((int X, int Z, int Len, int LowY, int HighY, int Value, int Side) w in DebugWalls) {
+                bool touches = w.Side switch {
+                    0 => w.Z == lz + 1 && lx >= w.X && lx < w.X + w.Len,
+                    1 => w.Z == lz && lx >= w.X && lx < w.X + w.Len,
+                    2 => w.X == lx + 1 && lz >= w.Z && lz < w.Z + w.Len,
+                    _ => w.X == lx && lz >= w.Z && lz < w.Z + w.Len
+                };
+                if (!touches) {
+                    continue;
+                }
+                walls++;
+                minLow = Math.Min(minLow, w.LowY);
+                maxHigh = Math.Max(maxHigh, w.HighY);
+            }
+            bool isOneMetreBox = walls > 0 && minLow == topY - 1 && maxHigh == topY;
+            return new JsonObject {
+                ["topY"] = topY,
+                ["walls"] = walls,
+                ["wallLowY"] = walls > 0 ? minLow : null,
+                ["wallHighY"] = walls > 0 ? maxHigh : null,
+                ["oneMetreBox"] = isOneMetreBox,
+                ["note"] = isOneMetreBox ? "顶面 + 1 m 侧壁 = 材质占位方盒"
+                    : (walls == 0 ? "只有顶面（四周邻居同高 → 侧面被剔除，视觉上仍与邻居连成一片）"
+                                  : "侧壁跨度不是 1 m（可能是落差裙边或组外边界的闭盒）")
+            };
+        }
+
+        static int TextureSlotOf(int value) {
+            try {
+                Block block = BlocksManager.Blocks[value & 0x3FF];
+                return block is CubeBlock ? block.GetFaceTextureSlot(4, value) : block.GetFaceTextureSlot(0, value);
+            }
+            catch {
+                return -1;
+            }
+        }
     }
 
     /// <summary>
