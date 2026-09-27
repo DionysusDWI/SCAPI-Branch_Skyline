@@ -1570,6 +1570,42 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.84] **只读**：直接读**壳仓里存的那一份**（不是从地形重算！）。
+        /// 为什么需要它：`CubeShellColumn` 是"从地形现采一遍"，所以地形一卸载就只能看到 AirBlock，
+        /// 证明不了"壳有没有把新建筑采下来"。判据必须是**仓库里真正存了什么**。
+        /// </summary>
+        public static JsonObject StoredShellProbe(int cx, int cy, int cz, int lx, int lz) {
+            JsonObject r = new();
+            try {
+                if (!m_entries.TryGetValue((cx, cy, cz), out Entry entry) || entry.Shell == null) {
+                    r["ok"] = true;
+                    r["exists"] = false;
+                    return r;
+                }
+                CubeSurface32 shell = entry.Shell;
+                int idx = (lx & 31) + (lz & 31) * CubeSurface32.Size;
+                int top = shell.TopContents[idx];
+                int side = shell.SideContents[0][idx];
+                r["ok"] = true;
+                r["exists"] = true;
+                r["partial"] = entry.Partial;
+                r["validChunks"] = entry.ValidChunks;
+                r["shellTopHeight"] = (int)shell.TopHeight[idx];
+                r["topContents"] = top & 0x3FF;
+                r["topBlock"] = BlocksManager.Blocks[top & 0x3FF]?.GetType().Name ?? "";
+                r["topLight"] = (top >> 10) & 0xF;
+                r["side0Contents"] = side & 0x3FF;
+                r["side0Block"] = BlocksManager.Blocks[side & 0x3FF]?.GetType().Name ?? "";
+                r["quadCount"] = shell.QuadCount;
+            }
+            catch (Exception e) {
+                r["ok"] = false;
+                r["err"] = e.Message;
+            }
+            return r;
+        }
+
         /// <summary>清空（换世界/测试收尾用）。</summary>
         public static void Clear() {
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
@@ -2261,6 +2297,14 @@ namespace Game {
             }
             return SkylineCubeShellStore.Survey();
         }
+
+        /// <summary>
+        /// [v0.1.84] **只读**：读壳仓里真正存的那一格（`storedShellProbe`）。
+        /// 与 `CubeShellColumn`（从地形现采）不同，这一条在地形已卸载时**照样能答**，
+        /// 所以它能回答"大建筑之后壳有没有被重采"。
+        /// </summary>
+        public static string CubeShellStored(int cx, int cy, int cz, int lx, int lz) =>
+            SkylineCubeShellStore.StoredShellProbe(cx, cy, cz, lx, lz).ToJsonString();
 
         /// <summary>壳接管后让现有 LOD 层让位（默认 true；false = 两层叠着画，用于 A/B 看穿插）。</summary>
         public static string CubeShellRestrictLod(bool restrict) {
