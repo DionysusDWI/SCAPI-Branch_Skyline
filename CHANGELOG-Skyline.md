@@ -3,6 +3,26 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.11] - 2026-09-27
+
+第二十一个版本：**两个剩余里程碑的第一步** —— ①里程碑 3（32³ 立方区块）的可执行**寻址门禁**；
+②里程碑 5（Iris/Dawnlight 真接入）的**LOD 只读网格访问器**。
+
+**本版相对 v0.1.10 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（寻址自检门禁）** | `Game.SkylineInvariants.CheckChunkAddressing()`：用**临时区块**做写读往返，断言"`CalculateCellIndex` + 索引访问器"与"(x,y,z) 访问器"落到同一格，并额外核对"索引减一 = y 减一"（跨 256 层段边界也成立）。这是 v0.1.8 那类回归（写入方与读取方各自自洽、潜伏 4 个版本）的可执行防线；桥可直接调用，32³ 第 2 步施工前后各跑一次作为**落地门禁** |
+| **新增 B（Iris 第 1 步）** | 新文件 `SkylineLodIris.cs`（partial）：暴露只读网格访问器 —— `Coarse/FineVertexBuffer`、`Coarse/FineIndexBuffer`、`…IndexCount`、`MeshVersion`、`VertexLayout`（`TerrainVertex` 布局），`IrisMeshInfo()`（一次性握手 JSON）、`DrawWithShader(shader)`（用外部 Shader 画粗+细层，异常吞掉记 `lastError`）。默认 `ExternalShaderHooked=false` 时行为与 v0.1.10 **逐位一致** |
+| **文档 C** | `notes/81-32立方区块第2步施工计划.md`（32³ 第 2 步的 5 期施工计划、每期验收判据与施工纪律：世界副本、门禁、可观测、可回滚）；`notes/82-Iris只读网格访问器.md`（本步形状、零影响保证、剩余两步的选型） |
+
+### Verified
+
+* **寻址自检**：`CheckChunkAddressing` → `ok:true, checkedCells:2816, mismatches:0, indexWalkChecks:352, indexWalkMismatches:0`；
+* **Iris 握手**：`IrisMeshInfo` 返回 `meshVersion/单元与索引统计/顶点布局/单元查询与绘制入口`（例：`coarseCells:153, coarseIndices:1098, fineCells:1019, fineIndices:7890, vertexLayout:"TerrainVertex … stride=20"`）；
+* **零影响**：同场景 `LodDescribe` 各项与 v0.1.10 一致、渲染/帧率无变化；
+* 构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+
 ## [v0.1.10] - 2026-09-27
 
 第二十个版本：**列顶高度就地维护**——编辑方块时立刻更新区块的"顶面高度"字段，不再等光照阶段排队。
