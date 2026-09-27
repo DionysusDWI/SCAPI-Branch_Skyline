@@ -29,8 +29,10 @@ namespace Game {
         /// <summary>
         /// [v0.1.61] **把 32³ 壳网格也画进 G-buffer**（里程碑 1.4）。
         /// 默认开；关掉 = 逐位回到 v0.1.60 的"G-buffer 只含三层远景 LOD"。
-        /// 判定与主画面的壳层**完全同一套**（`SkylineCubeShellStore.CollectDrawableMeshes`），
-        /// 并用同一个 `BandLift` 偏移，所以 G-buffer 里的壳与主画面里的壳是同一批几何、同一个位置。
+        /// 判定与主画面的壳层**同一套带规则**（`SkylineCubeShellStore.CollectDrawableMeshes`），
+        /// 并用同一个 `BandLift` 偏移，所以 G-buffer 里的壳与主画面里的壳是**同一批几何、同一个位置**。
+        /// **[v0.1.94] 唯一的差别**：主画面那条另有**视锥剔除**，这里**不剔**（本 pass 的投影扩展过远平面）
+        /// ⇒ G-buffer 的壳集是主画面的**超集**，多出来的都是画面外的立方体，不会掉覆盖。
         /// </summary>
         public static bool IncludeShells { get; set; } = true;
         /// <summary>

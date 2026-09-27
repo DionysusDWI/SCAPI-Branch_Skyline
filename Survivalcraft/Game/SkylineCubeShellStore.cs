@@ -91,6 +91,24 @@ namespace Game {
         public static float MaxDrawMs { get; set; } = 1.5f;
         /// <summary>[v0.1.81] 上一帧壳绘制**实际耗时**（毫秒）—— 预算的判据就靠它。</summary>
         public static float LastDrawMs { get; private set; }
+
+        /// <summary>
+        /// [v0.1.94] **视锥剔除**（默认开）：整块落在相机视锥外的壳立方体**不画**（外接球保守判定）。
+        ///
+        /// 为什么必须做：候选集是**整圈环带**（只有距离带 `[0, 视距+BandMetres]` + "地形已释放"两个筛子），
+        /// 完全没有"在不在画面里"的判断。16 m 壳粒度（v0.1.85）把候选推到 **3,000+**，于是
+        /// **防呆个数上限（1024）先于时间预算生效** ⇒ 实测只画到 **363~379 m**（候选最远 895.6 m），
+        /// 也就是"近带之外**整整一圈**都没画"。而画面里最多只看得到约 1/3 的环带。
+        ///
+        /// 判据（可证伪）：开关**开/关的画面必须一致**（剔除只该丢"看不见的"——A/B 像素差在噪声内），
+        /// 而 `drawCandidatesLastFrame` / `frustumCulledLastFrame` 必须明显变化。
+        /// 关掉 = 逐位回到 v0.1.93 的行为（A/B 用）。
+        /// </summary>
+        public static bool FrustumCull { get; set; } = true;
+        /// <summary>[v0.1.94] 本帧因视锥剔除丢掉的立方体数（累计见 <see cref="FrustumCulledTotal"/>）。</summary>
+        public static int FrustumCulledLastFrame { get; private set; }
+        public static long FrustumCulledTotal { get; private set; }
+
         /// <summary>[v0.1.81] 上一帧真正的绘制次数（= `drawnLastFrame`，单列出来便于对表）。</summary>
         public static int DrawCallsLastFrame { get; private set; }
         /// <summary>网格口径：true = 贪心合并（四边形最少）、false = 逐格（纹理精确）。</summary>
@@ -1443,10 +1461,16 @@ namespace Game {
         /// [v0.1.80] 收集"本帧可画的壳立方体"（带内 `[视距−BandInset, 视距+BandMetres]` + 地形已释放），
         /// **按距离从近到远**排序后返回（复用同一个 `List`，不分配）。
         /// `countLoadedSkips` = 主画面路径才统计"因地形还在而跳过"。
+        ///
+        /// [v0.1.94] `frustum != null` 时再加一层**视锥剔除**（外接球 vs 6 个平面，保守判定）。
+        /// 调用方**必须**传"正在用它画的那个相机"的视锥；**扩展过远平面的投影**
+        /// （`SkylineGBuffer` 的 `ExtendFarPlane`）不能拿主相机的视锥来剔 —— 那会把本来要进 G-buffer
+        /// 的远处壳剔掉，所以 G-buffer 那条路传 `null`（逐位保持 v0.1.93 的行为）。
         /// </summary>
         static List<(float DistSq, int Cx, int Cy, int Cz)> CollectDrawCandidates(
-                Vector3 viewPosition, Terrain terrain, bool countLoadedSkips) {
+                Vector3 viewPosition, Terrain terrain, bool countLoadedSkips, BoundingFrustum frustum) {
             m_drawScratch.Clear();
+            FrustumCulledLastFrame = 0;
             float viewRange = ViewRangeMetres;
             // [v0.1.84] **洞覆盖（milestone 2.1 的兼容性那一半）**：
             //   旧口径是"只在带内 `[视距−8, 视距+768]` 画壳"，内边界是为了"别在真地形上叠一层"。
@@ -1469,6 +1493,16 @@ namespace Game {
                 if (distSq < nearSq || distSq > farSq) {
                     continue;
                 }
+                // [v0.1.94] 视锥剔除：外接球半径取**整边长**（真外接球是 16·√3/2 ≈ 13.9 m），
+                // 留了约 15% 余量 —— 剔除必须保守，否则屏幕边缘会缺块。
+                if (frustum != null) {
+                    float wy = kv.Key.Cy * CubeSize + CubeSize * 0.5f;
+                    if (!frustum.Intersection(new BoundingSphere(new Vector3(wx, wy, wz), CubeSize))) {
+                        FrustumCulledLastFrame++;
+                        FrustumCulledTotal++;
+                        continue;
+                    }
+                }
                 if (AnyChunkAllocated(terrain, cx, cz)) {
                     if (countLoadedSkips) {
                         SkippedBecauseLoaded++;
@@ -1489,8 +1523,9 @@ namespace Game {
         /// <summary>
         /// [v0.1.61] **只读**：列出"这一帧真会被画出来"的壳网格（里程碑 1.4 的入口）。
         ///
-        /// 判定与 `Draw` **完全同一套**（带内 `[视距−BandInset, 视距+BandMetres]` + 地形已释放 + 四邻齐全），
-        /// 所以"G-buffer 里有的 == 主画面壳层里有的"，不会出现两套口径。
+        /// 判定与 `Draw` **同一套带规则与距离顺序**（带内 `[视距−BandInset, 视距+BandMetres]` +
+        /// 地形已释放 + 四邻齐全），**只差一层视锥剔除**（v0.1.94 起 `Draw` 有、这里没有，原因见上）
+        /// ⇒ 这里是主画面的**超集**：多出来的全是"画面外"的立方体，不会出现"G-buffer 缺了主画面有的壳"。
         /// **不修改任何状态**（不刷 `LastUsed`、不动统计、不建网格）—— 因此离屏渲染可以安全调用。
         /// </summary>
         public static List<(VertexBuffer VertexBuffer, IndexBuffer IndexBuffer, int IndexCount, bool IsVoxel,
@@ -1506,8 +1541,10 @@ namespace Game {
             }
             Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
             // [v0.1.80] 候选**按距离升序**（与主画面 `Draw` 共用同一套顺序与筛选）
+            // [v0.1.94] 这里**不剔视锥**（传 `null`）：G-buffer 用的是 `ExtendFarPlane` 扩展过远平面的
+            // 投影，拿主相机视锥来剔会把本该进 G-buffer 的远处壳丢掉。
             List<(float DistSq, int Cx, int Cy, int Cz)> candidates =
-                CollectDrawCandidates(viewPosition, terrain, false);
+                CollectDrawCandidates(viewPosition, terrain, false, null);
             for (int ci = 0; ci < candidates.Count; ci++) {
                 if (list.Count >= MaxDrawPerFrame) {
                     break;
@@ -1558,8 +1595,10 @@ namespace Game {
                     return;
                 }
                 // [v0.1.80] **按距离优先**：候选按近到远排序后截断到预算 —— 顶满时丢掉的是最远的那批
+                // [v0.1.94] 主画面这条**带视锥剔除**（`FrustumCull`）；G-buffer 那条传 `null`（见下）。
                 List<(float DistSq, int Cx, int Cy, int Cz)> candidates =
-                    CollectDrawCandidates(viewPosition, terrain, true);
+                    CollectDrawCandidates(viewPosition, terrain, true,
+                        FrustumCull ? camera.ViewFrustum : null);
                 int drawn = 0;
                 float maxDist = 0f;
                 Stopwatch drawWatch = Stopwatch.StartNew();     // [v0.1.81] 时间预算的计时器
@@ -2253,6 +2292,10 @@ namespace Game {
                 ["drawCandidateMinDistMetres"] = Math.Round(DrawCandidateMinDistMetres, 1),
                 ["drawCandidateMaxDistMetres"] = Math.Round(DrawCandidateMaxDistMetres, 1),
                 ["drawOrder"] = "距离升序（近的先画）；预算顶满时丢掉的是**最远**的那批",
+                // [v0.1.94] 视锥剔除：候选集从"整圈环带"收成"画面里那一片"，绘制预算才用在看得见的地方
+                ["frustumCull"] = FrustumCull,
+                ["frustumCulledLastFrame"] = FrustumCulledLastFrame,
+                ["frustumCulledTotal"] = FrustumCulledTotal,
                 // [v0.1.84] 洞覆盖（milestone 2.1 的兼容性那一半）
                 ["shellHoleFill"] = ShellHoleFill,
                 ["holeFillCubesLastFrame"] = HoleFillCubesLastFrame,
