@@ -62,8 +62,24 @@ namespace Game {
         public static float BandInset { get; set; } = 8f;
         /// <summary>带内抬高（米）：让真高在带内压过 16 m 平滑面（0 = 不抬，用于 A/B）。</summary>
         public static float BandLift { get; set; } = 0.35f;
-        /// <summary>带内每帧最多画多少个壳（防止一次画几百个 draw call）。</summary>
-        public static int MaxDrawPerFrame { get; set; } = 192;
+        /// <summary>
+        /// 带内每帧最多画多少个壳（防呆硬上限）。**[v0.1.81] 默认 192 → 1024**：
+        /// 实测把预算抬到 512 后**把 283 个候选全画完，fps 与 cap 192 时相同（30.1 vs 29.2~31）** ⇒
+        /// 192 在当前的网格规模下**过保守**，所以它退回成"防呆上限"，
+        /// 真正的取舍交给 <see cref="MaxDrawMs"/> 的**时间预算**。
+        /// </summary>
+        public static int MaxDrawPerFrame { get; set; } = 1024;
+
+        /// <summary>
+        /// [v0.1.81] **绘制的时间预算**（毫秒/帧）：按距离从近到远画，用到预算为止。
+        /// 为什么不用"数个数"：网格规模随壳数 / 体素网格 / 档位变化，固定个数无法跟着变；
+        /// 时间预算跟着**机器与当帧网格规模**自动走。`0` = 不限时（只按 `MaxDrawPerFrame` 截断），用于 A/B。
+        /// </summary>
+        public static float MaxDrawMs { get; set; } = 1.5f;
+        /// <summary>[v0.1.81] 上一帧壳绘制**实际耗时**（毫秒）—— 预算的判据就靠它。</summary>
+        public static float LastDrawMs { get; private set; }
+        /// <summary>[v0.1.81] 上一帧真正的绘制次数（= `drawnLastFrame`，单列出来便于对表）。</summary>
+        public static int DrawCallsLastFrame { get; private set; }
         /// <summary>网格口径：true = 贪心合并（四边形最少）、false = 逐格（纹理精确）。</summary>
         public static bool UseMergedMesh { get; set; } = true;
 
@@ -1375,6 +1391,9 @@ namespace Game {
         public static int DrawCandidatesLastFrame { get; private set; }
         /// <summary>[v0.1.80] 因为预算被丢掉的绘制数（累计）。</summary>
         public static long DrawSkippedByBudgetTotal { get; private set; }
+        /// <summary>[v0.1.81] 因为**时间预算**被丢掉的绘制数（累计）与"上一帧是否被时间预算截断"。</summary>
+        public static long DrawSkippedByTimeTotal { get; private set; }
+        public static bool DrawTimeStoppedLastFrame { get; private set; }
         /// <summary>[v0.1.80] 本帧**实际画到的最远距离**（米）—— 距离优先的可断言形式。</summary>
         public static float DrawnMaxDistMetres { get; private set; }
         /// <summary>[v0.1.80] 本帧候选里最近/最远的距离（米）—— 用来对"丢掉的确实是最远的"下断言。</summary>
@@ -1498,9 +1517,17 @@ namespace Game {
                     CollectDrawCandidates(viewPosition, terrain, true);
                 int drawn = 0;
                 float maxDist = 0f;
+                Stopwatch drawWatch = Stopwatch.StartNew();     // [v0.1.81] 时间预算的计时器
+                DrawTimeStoppedLastFrame = false;               // [v0.1.81] 每帧重算（以前是粘性标志）
                 for (int ci = 0; ci < candidates.Count; ci++) {
                     if (drawn >= MaxDrawPerFrame) {
                         DrawSkippedByBudgetTotal += candidates.Count - ci;
+                        break;
+                    }
+                    // [v0.1.81] 时间预算：用掉预算就停（**因为在候选里是从近到远，所以停掉的必然是最远的**）
+                    if (MaxDrawMs > 0f && drawWatch.Elapsed.TotalMilliseconds >= MaxDrawMs) {
+                        DrawSkippedByTimeTotal += candidates.Count - ci;
+                        DrawTimeStoppedLastFrame = true;
                         break;
                     }
                     (float DistSq, int Cx, int Cy, int Cz) c = candidates[ci];
@@ -1532,6 +1559,8 @@ namespace Game {
                     drawn++;
                     maxDist = MathF.Max(maxDist, MathF.Sqrt(c.DistSq));
                 }
+                LastDrawMs = (float)drawWatch.Elapsed.TotalMilliseconds;
+                DrawCallsLastFrame = drawn;
                 DrawnMaxDistMetres = maxDist;
                 DrawnLastFrame = drawn;
             }
@@ -2094,7 +2123,12 @@ namespace Game {
                 ["budget"] = new JsonObject {
                     ["inlineHarvestPerCall"] = InlineHarvestPerCall,
                     ["meshBudgetMs"] = MeshBudgetMs,
-                    ["maxDrawPerFrame"] = MaxDrawPerFrame
+                    ["maxDrawPerFrame"] = MaxDrawPerFrame,
+                    // [v0.1.81] 时间预算（主控制）+ 上一帧实测耗时
+                    ["maxDrawMs"] = (double)MaxDrawMs,
+                    ["lastDrawMs"] = Math.Round(LastDrawMs, 3),
+                    ["drawTimeStoppedLastFrame"] = DrawTimeStoppedLastFrame,
+                    ["drawSkippedByTimeTotal"] = DrawSkippedByTimeTotal
                 },
                 // [v0.1.80] 距离优先的绘制顺序：候选数 / 因预算丢掉多少 / **本帧画到的最远距离**
                 ["drawCandidatesLastFrame"] = DrawCandidatesLastFrame,
