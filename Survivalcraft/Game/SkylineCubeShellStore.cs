@@ -145,6 +145,22 @@ namespace Game {
         public static long NotReadyMissing2 { get; private set; }
         public static long NotReadyMissing3 { get; private set; }
         public static long NotReadyMissing4 { get; private set; }
+        /// <summary>[v0.1.79] 上面四个计数里**近带（交接缝）**的那部分 —— 这才是本版放宽门槛要救的那批。</summary>
+        public static long NotReadyMissing1Near { get; private set; }
+        public static long NotReadyMissing2Near { get; private set; }
+        public static long NotReadyMissing3Near { get; private set; }
+        public static long NotReadyMissing4Near { get; private set; }
+        /// <summary>[v0.1.79] 近带上"因为门槛不够"被拒的采集尝试次数（放宽到 1 后应当归零）。</summary>
+        public static long PartialNearThresholdRejects { get; private set; }
+        /// <summary>
+        /// [v0.1.79] **只有靠近带放宽才采到的壳数**（直接反事实计数）：
+        /// 这些立方体满足 `近带 ∧ valid ≥ 近带门槛`，但**不满足远带门槛** ——
+        /// 也就是说 v0.1.78 的规则会把它们**全部丢掉**。这一条是"放宽到底救了多少"的直接证据，
+        /// 不需要拿两条不同路线去 A/B（那种 A/B 会被地形差异混淆，本轮实测已被自己的数据否掉）。
+        /// </summary>
+        public static long PartialRescuedByNearTotal { get; private set; }
+        /// <summary>[v0.1.79] 进入过 `TryCapturePartial` 的采集尝试数（分母）。</summary>
+        public static long PartialAttemptsTotal { get; private set; }
         /// <summary>缺的区块**根本没分配**（在加载半径外）的次数。</summary>
         public static long NotReadyAbsent { get; private set; }
         /// <summary>缺的区块**已分配但还没到 Valid**（内容/光照还没算完）的次数。</summary>
@@ -160,6 +176,21 @@ namespace Game {
         public static bool PartialCapture { get; set; } = true;
         /// <summary>[v0.1.62] 至少要有几个区块 Valid 才采（1~3；默认 2 = 过半就采）。</summary>
         public static int PartialMinValidChunks { get; set; } = 2;
+        /// <summary>
+        /// [v0.1.79] **近带**（交接缝）上的部分壳门槛：默认 **1** —— 只要有 1 个区块 Valid 就采。
+        /// 为什么近带要放宽：`notes/138` 实测"缺 3 个区块"的立方体（跨在刚释放的那一行上）
+        /// **永远等不到四个齐全**；而近带正是"加载区块边界 ↔ 32³ LOD 块"的交接缝 ——
+        /// 那里少一块壳，就有整整 32 m 的块状条纹改由 16 m 粗 LOD 顶替，
+        /// 这正是里程碑 1.2 说的"区隔"。远带仍用 2：远带缺象限本来就是 LOD 的活，
+        /// 用 1 会让常驻部分壳暴涨（`notes/138` 实测 98%），得不偿失。
+        /// </summary>
+        public static int PartialMinValidChunksNear { get; set; } = 1;
+        /// <summary>[v0.1.79] 近带半径 = `视距 + PartialNearMetres`（米）。默认 96 m，与交接带长度一致。</summary>
+        public static float PartialNearMetres { get; set; } = 96f;
+        /// <summary>[v0.1.79] 用近带门槛采到的部分壳数（累计）与当前常驻数（普查）。</summary>
+        public static long PartialCapturedNearTotal { get; private set; }
+        public static int PartialCubesNear { get; private set; }
+
         public static long PartialCapturedTotal { get; private set; }
         /// <summary>当前常驻的部分壳数（普查）。</summary>
         public static int PartialCubes { get; private set; }
@@ -267,6 +298,7 @@ namespace Game {
             public bool MeshIsVoxel;             // 当前常驻的是哪一类网格
             public bool Partial;                 // [v0.1.62] 组不齐时采的"部分壳"（缺口留给 LOD 补）
             public int ValidChunks;              // [v0.1.62] 采的时候 2×2 里有几个区块是 Valid（1~4）
+            public bool PartialNear;             // [v0.1.79] 它是在近带（交接缝）用放宽门槛采的吗
             public double LastUsed;
         }
 
@@ -428,6 +460,11 @@ namespace Game {
         /// </summary>
         static void AccumulateMissingChunks(Terrain terrain, int cx, int cz) {
             int missing = 0;
+            // [v0.1.79] 近带 = 交接缝（`视距 − 8 … 视距 + PartialNearMetres`）。那里的失败单独记，
+            // 否则"放宽门槛到底救了多少"只能靠推理。
+            bool near = PartialMinValidChunksNear > 0
+                && CubeDistance(cx, cz, SkylineLod.CameraViewPosition())
+                    <= ViewRangeMetres + PartialNearMetres;
             for (int dx = 0; dx < 2; dx++) {
                 for (int dz = 0; dz < 2; dz++) {
                     TerrainChunk chunk = terrain?.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
@@ -446,6 +483,14 @@ namespace Game {
                 case 2: NotReadyMissing2++; break;
                 case 3: NotReadyMissing3++; break;
                 default: NotReadyMissing4++; break;
+            }
+            if (near) {
+                switch (missing) {
+                    case 1: NotReadyMissing1Near++; break;
+                    case 2: NotReadyMissing2Near++; break;
+                    case 3: NotReadyMissing3Near++; break;
+                    default: NotReadyMissing4Near++; break;
+                }
             }
         }
 
@@ -474,9 +519,23 @@ namespace Game {
                 return false;
             }
             int valid = CountValidChunks(terrain, key.Cx, key.Cz);
-            if (valid < Math.Clamp(PartialMinValidChunks, 1, 3)) {
+            // [v0.1.79] **近带放宽到 1**：交接缝上的立方体常常只剩 1 个象限 Valid（其余刚被释放），
+            // 等它凑齐等于永远不采 → 那 32 m 就只能由粗 LOD 顶替（"区隔"）。
+            // `PartialMinValidChunksNear <= 0` = 关掉这条放宽（逐位回到 v0.1.78 的远近同门槛）
+            bool near = PartialMinValidChunksNear > 0
+                && CubeDistance(key.Cx, key.Cz, SkylineLod.CameraViewPosition())
+                    <= ViewRangeMetres + PartialNearMetres;
+            int farThreshold = Math.Clamp(PartialMinValidChunks, 1, 3);
+            int threshold = Math.Clamp(near ? PartialMinValidChunksNear : PartialMinValidChunks, 1, 3);
+            PartialAttemptsTotal++;
+            if (valid < threshold) {
+                if (near) {
+                    PartialNearThresholdRejects++;       // [v0.1.79] 近带"门槛不够"被拒（放宽到 1 后应为 0）
+                }
                 return false;
             }
+            // [v0.1.79] **直接反事实**：满足近带门槛但**不满足远带门槛** ⇒ v0.1.78 的规则会丢掉它
+            bool rescuedByNear = near && valid < farThreshold;
             CubeSurface32 shell = CubeSurface32.Extract(terrain, key.Cx, key.Cy, key.Cz);
             if (shell.QuadCount == 0) {
                 return false;
@@ -485,11 +544,18 @@ namespace Game {
                 Shell = shell,
                 LastUsed = Time.RealTime,
                 Partial = true,
-                ValidChunks = valid
+                ValidChunks = valid,
+                PartialNear = near
             };
             m_entries[key] = entry;
             TryHarvestVoxelShell(entry, terrain, key.Cx, key.Cy, key.Cz);
             PartialCapturedTotal++;
+            if (near) {
+                PartialCapturedNearTotal++;
+            }
+            if (rescuedByNear) {
+                PartialRescuedByNearTotal++;
+            }
             HarvestedTotal++;
             MarkCubeDirty(key);
             if (m_queued.Add(key)) {
@@ -1213,12 +1279,16 @@ namespace Game {
             VoxelDegradedCubes = 0;
             VoxelDroppedVoxels = 0;
             PartialCubes = 0;                    // [v0.1.62]
+            PartialCubesNear = 0;                // [v0.1.79]
             int s1 = 0, s2 = 0, s4 = 0, s8 = 0, s16 = 0, s32 = 0;
             bool budgetHit = false;
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
                 Entry entry = kv.Value;
                 if (entry.Partial) {
                     PartialCubes++;                      // [v0.1.62] 部分壳普查
+                    if (entry.PartialNear) {
+                        PartialCubesNear++;              // [v0.1.79] 其中用近带放宽门槛采的
+                    }
                 }
                 if (entry.VoxelShell != null) {
                     VoxelShellCubes++;                       // [v0.1.60] 实数一遍，避免计数器漂移
@@ -1919,11 +1989,25 @@ namespace Game {
                 ["notReadyMissing2"] = NotReadyMissing2,
                 ["notReadyMissing3"] = NotReadyMissing3,
                 ["notReadyMissing4"] = NotReadyMissing4,
+                // [v0.1.79] 交接缝（近带）上的失败分解 —— 本版放宽门槛要救的正是这批
+                ["notReadyMissing1Near"] = NotReadyMissing1Near,
+                ["notReadyMissing2Near"] = NotReadyMissing2Near,
+                ["notReadyMissing3Near"] = NotReadyMissing3Near,
+                ["notReadyMissing4Near"] = NotReadyMissing4Near,
+                ["partialNearThresholdRejects"] = PartialNearThresholdRejects,
+                // [v0.1.79] 直接反事实：只有靠放宽才采到的壳数 / 采集尝试总数
+                ["partialRescuedByNearTotal"] = PartialRescuedByNearTotal,
+                ["partialAttemptsTotal"] = PartialAttemptsTotal,
                 ["notReadyAbsent"] = NotReadyAbsent,
                 ["notReadyUnvalid"] = NotReadyUnvalid,
                 // [v0.1.62] 部分壳
                 ["partialCapture"] = PartialCapture,
                 ["partialMinValidChunks"] = PartialMinValidChunks,
+                // [v0.1.79] 交接缝的近带门槛（1）+ 近带半径（视距 + 96 m）
+                ["partialMinValidChunksNear"] = PartialMinValidChunksNear,
+                ["partialNearMetres"] = (double)PartialNearMetres,
+                ["partialCapturedNearTotal"] = PartialCapturedNearTotal,
+                ["partialCubesNear"] = PartialCubesNear,
                 ["partialCapturedTotal"] = PartialCapturedTotal,
                 ["partialCubes"] = PartialCubes,
                 ["meshedCubes"] = MeshedTotal,
@@ -2073,6 +2157,19 @@ namespace Game {
             SkylineCubeShellStore.PartialCapture = enabled;
             if (minValid > 0) {
                 SkylineCubeShellStore.PartialMinValidChunks = Math.Clamp(minValid, 1, 3);
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.79] **交接缝的近带部分壳门槛**：`minValidNear` 调"近带（视距 + `nearMetres`）里
+        /// 至少几个区块 Valid 就采"（1~3，默认 1）；`minValidNear = 0` 或 `nearMetres &lt;= 0`
+        /// 即**关掉这条放宽**（逐位回到 v0.1.78 的"远近都按 `PartialMinValidChunks`"）。
+        /// </summary>
+        public static string CubeShellPartialNear(int minValidNear, float nearMetres = -1f) {
+            SkylineCubeShellStore.PartialMinValidChunksNear = Math.Clamp(minValidNear, 0, 3);
+            if (nearMetres > 0f) {
+                SkylineCubeShellStore.PartialNearMetres = nearMetres;
             }
             return SkylineCubeShellStore.Survey();
         }
