@@ -516,6 +516,8 @@ namespace Game {
                     TerrainRenderer.DrawOpaque(camera);
                     // [v0.1.0] 超视距 LOD 层：在视距之外补一层粗网格（见 Game/SkylineLod.cs）
                     SkylineLod.Draw(camera);
+                    // [v0.1.50] 32³ 表面壳网格实验层（默认关；见 Game/CubeSurface32Mesh.cs）
+                    SkylineCubeSurfaceDemo.DrawIfEnabled(camera);
                     TerrainRenderer.DrawAlphaTested(camera);
                 }
                 else if (drawOrder == m_drawOrders[1]) {

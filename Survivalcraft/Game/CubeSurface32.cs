@@ -89,10 +89,14 @@ namespace Game {
                         int value = terrain.GetCellValue(wx, oy + ly, wz);
                         if (Terrain.ExtractContents(value) != 0) {
                             surface.TopHeight[idx] = (short)(oy + ly);
+                            // [v0.1.50] **光照取"空气那一侧"**：SC 里实心格自己的 light 位经常是 0
+                            // （只有暴露在光里的格子才带 light；实测平台石砖 = 0、地表雪块 = 15）。
+                            // 顶面的受光 = 方块上方那格的 light，这才是"顶面光照"的语义。
+                            int light = SurfaceLight(terrain, wx, oy + ly + 1, wz, value);
                             if (Terrain.ExtractData(value) != 0) {
                                 surface.DataCells++;
                             }
-                            surface.TopContents[idx] = (ushort)(value & ValueMask);
+                            surface.TopContents[idx] = (ushort)(PackLight(value, light));
                             break;
                         }
                     }
@@ -100,7 +104,8 @@ namespace Game {
                         int value = terrain.GetCellValue(wx, oy + ly, wz);
                         if (Terrain.ExtractContents(value) != 0) {
                             surface.BottomHeight[idx] = (short)(oy + ly);
-                            surface.BottomContents[idx] = (ushort)(value & ValueMask);
+                            int light = SurfaceLight(terrain, wx, oy + ly - 1, wz, value);
+                            surface.BottomContents[idx] = (ushort)(PackLight(value, light));
                             break;
                         }
                     }
@@ -124,10 +129,29 @@ namespace Game {
             for (int i = 0; i < Size; i++) {
                 int value = terrain.GetCellValue(x + dAlongX * i, y, z + dAlongZ * i);
                 if (Terrain.ExtractContents(value) != 0) {
-                    return (ushort)(value & ValueMask);
+                    // 侧面同样取"空气那一侧"（扫描路径上紧邻的前一格）的光照。
+                    int light = SurfaceLight(terrain,
+                        x + dAlongX * (i - 1), y, z + dAlongZ * (i - 1), value);
+                    return (ushort)(PackLight(value, light));
                 }
             }
             return 0;
+        }
+
+        /// <summary>
+        /// `(x,y,z)` 是**空气那一侧**的格子：它是空气就用它自己的 light，否则退回方块自己的 light。
+        /// 越界（超出世界上下界）会读到 0 → light 0，这种情况由 `zeroLightCells` 计数如实报出。
+        /// </summary>
+        public static int SurfaceLight(Terrain terrain, int x, int y, int z, int ownValue) {
+            int neighbor = terrain.GetCellValue(x, y, z);
+            return Terrain.ExtractContents(neighbor) == 0
+                ? Terrain.ExtractLight(neighbor)
+                : Terrain.ExtractLight(ownValue);
+        }
+
+        /// <summary>把"方块自己的 contents/data 判定 + 外部给的光照"重新打包成壳里的 ushort。</summary>
+        static int PackLight(int value, int light) {
+            return (value & 0x3FF) | ((light & 0xF) << 10);
         }
     }
 
@@ -209,7 +233,8 @@ namespace Game {
                     }
                 }
                 // 校验 B：与引擎自己的列顶编码对表（只比"引擎顶面确实落在本立方体内"的列）。
-                int topChecked = 0, topMismatch = 0;
+                // 高度与方块必须逐列一致；光照按 v0.1.50 的口径比（空气那一侧的 light）。
+                int topChecked = 0, topMismatch = 0, lightChecked = 0, lightMismatch = 0;
                 string firstMismatch = null;
                 for (int lx = 0; lx < CubeSurface32.Size; lx++) {
                     for (int lz = 0; lz < CubeSurface32.Size; lz++) {
@@ -224,26 +249,35 @@ namespace Game {
                         int idx = lx + lz * CubeSurface32.Size;
                         int engineValue = terrain.GetCellValue(wx, engineTop, wz);
                         topChecked++;
-                        if ((engineValue & CubeSurface32.ValueMask) != surface.TopContents[idx]
+                        int shellValue = surface.TopContents[idx];
+                        if (Terrain.ExtractContents(engineValue) != Terrain.ExtractContents(shellValue)
                             || engineTop != surface.TopHeight[idx]) {
                             topMismatch++;
                             if (firstMismatch == null) {
-                                firstMismatch = $"({wx},{wz}) engine=(h{engineTop},v{engineValue & CubeSurface32.ValueMask}) "
-                                    + $"shell=(h{surface.TopHeight[idx]},v{surface.TopContents[idx]})";
+                                firstMismatch = $"({wx},{wz}) engine=(h{engineTop},c{Terrain.ExtractContents(engineValue)}) "
+                                    + $"shell=(h{surface.TopHeight[idx]},c{Terrain.ExtractContents(shellValue)})";
                             }
+                        }
+                        int expectedLight = CubeSurface32.SurfaceLight(terrain, wx, engineTop + 1, wz, engineValue);
+                        lightChecked++;
+                        if (expectedLight != Terrain.ExtractLight(shellValue)) {
+                            lightMismatch++;
                         }
                     }
                 }
                 result["unloadedColumns"] = unloaded;
                 result["topChecked"] = topChecked;
                 result["topMismatches"] = topMismatch;
+                result["lightChecked"] = lightChecked;
+                result["lightMismatches"] = lightMismatch;
                 result["dataCells"] = surface.DataCells;
                 if (firstMismatch != null) {
                     result["firstMismatch"] = firstMismatch;
                 }
                 result["note"] = "只读抽样：顶/底=列内最高/最低实心块，侧面=沿轴第一个实心块；层号即高度；"
                     + "unloadedColumns>0 说明该立方体含假空列（区块未分配）；topChecked 只统计引擎顶面落在本立方体内的列；"
-                    + "topChecked/topMismatches 比的是 contents+light（ValueMask=0x3FFF），dataCells 是带 data 位的壳格数（家具等变体是已知缺口）";
+                    + "topChecked 比「高度+方块」、lightChecked 比「空气那一侧的光照」（v0.1.50 口径）；"
+                    + "dataCells 是带 data 位的壳格数（家具等变体是已知缺口）";
             }
             catch (Exception e) {
                 result["ok"] = false;
