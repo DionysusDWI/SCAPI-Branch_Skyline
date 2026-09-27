@@ -158,6 +158,7 @@ Texture2D u_texture;
 SamplerState u_samplerState;
 float3 u_light1;
 float3 u_light2;
+float3 u_sunDir;
 float u_topLight;
 float u_slopeStrength;
 float u_sunAmount;
@@ -180,7 +181,8 @@ void main(
 	if (v_slopeTop > 0.5)
 	{
 		// [v0.1.77] 顶面：**坡向明暗**（单盏太阳；与 SkylineLod.SlopeGainFromNormal 逐字同式）
-		float3 sun = normalize(u_light1);
+		// [v0.1.78] 太阳方向改成**真太阳**（u_sunDir = TrackedLightDirection），不再用固定的 u_light1
+		float3 sun = normalize(u_sunDir);
 		float slopeDot = dot(n, sun) / max(dot(float3(0.0, 1.0, 0.0), sun), 0.0001);
 		float slopeGain = lerp(1.0, clamp(slopeDot, 0.35, 1.0), u_slopeStrength);
 		lit = lerp(1.0, slopeGain, u_sunAmount);
@@ -223,6 +225,7 @@ precision highp float;
 uniform sampler2D u_texture;
 uniform vec3 u_light1;
 uniform vec3 u_light2;
+uniform vec3 u_sunDir;
 uniform float u_topLight;
 uniform float u_slopeStrength;
 uniform float u_sunAmount;
@@ -244,7 +247,8 @@ void main()
 	if (v_slopeTop > 0.5)
 	{
 		// [v0.1.77] top face: slope shading, single sun, same formula as SkylineLod.SlopeGainFromNormal
-		vec3 sun = normalize(u_light1);
+		// [v0.1.78] sun direction is the tracked sun (u_sunDir), not the fixed u_light1
+		vec3 sun = normalize(u_sunDir);
 		float slopeDot = dot(n, sun) / max(dot(vec3(0.0, 1.0, 0.0), sun), 0.0001);
 		float slopeGain = mix(1.0, clamp(slopeDot, 0.35, 1.0), u_slopeStrength);
 		lit = mix(1.0, slopeGain, u_sunAmount);
@@ -325,6 +329,9 @@ void main()
                 // 光照常量**直接取自游戏**（不是我们自己编的数）：方向光与归一化基准
                 shader.GetParameter("u_light1", true).SetValue(LightingManager.DirectionToLight1);
                 shader.GetParameter("u_light2", true).SetValue(LightingManager.DirectionToLight2);
+                // [v0.1.78] 坡向明暗用**真太阳**（与 CPU 侧 `SkylineLod.SlopeSunDirection()` 同源）；
+                // 立面的六面因子仍用游戏本体的固定方向光 u_light1/u_light2（那是游戏自己的光照模型）。
+                shader.GetParameter("u_sunDir", true).SetValue(SkylineLod.SlopeSunDirection());
                 shader.GetParameter("u_topLight", true).SetValue(SkylineFaceShading.TopFactor);
                 // [v0.1.77] 坡向明暗的两个 uniform：强度与日照量 —— 与 CPU 侧 `SlopeGainFromNormal` 同源，
                 // 所以两条路径算的必然是同一个数（这就是"坡向明暗迁到 GPU"能断言到量化误差的前提）。
@@ -705,7 +712,11 @@ void main()
                 ["lastError"] = m_lastError,
                 ["light1"] = new JsonArray(LightingManager.DirectionToLight1.X, LightingManager.DirectionToLight1.Y, LightingManager.DirectionToLight1.Z),
                 ["light2"] = new JsonArray(LightingManager.DirectionToLight2.X, LightingManager.DirectionToLight2.Y, LightingManager.DirectionToLight2.Z),
-                ["topLight"] = Math.Round(SkylineFaceShading.TopFactor, 4)
+                ["topLight"] = Math.Round(SkylineFaceShading.TopFactor, 4),
+                // [v0.1.78] 坡向明暗用的太阳方向（真太阳）——回归清单断言它 == TrackedLightDirection()
+                ["sunDir"] = new JsonArray(SkylineLod.SlopeSunDirection().X, SkylineLod.SlopeSunDirection().Y,
+                    SkylineLod.SlopeSunDirection().Z),
+                ["sunSource"] = "SkylineLod.SlopeSunDirection() = SkylineRuntime.TrackedLightDirection()"
             };
             result["note"] = "体积着色器的光照常量直接取自 LightingManager（不是另编的一套）；"
                 + "顶点属性见 skyline.LodVertexInfo()；A/B 证据用 skyline.LodVolumeCompare()";

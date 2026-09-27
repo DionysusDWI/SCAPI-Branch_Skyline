@@ -320,5 +320,15 @@ namespace Game {
         /// </summary>
         public static string LodLayerCapture(int channel, int size, bool attrShader) =>
             SkylineLodVolume.CaptureLodLayers(channel, size, attrShader);
+
+        /// <summary>[v0.1.78] 坡向/自阴影当前使用的**太阳方向**（只读；`dotWithTracked` 恒为 1）。</summary>
+        public static string LodSlopeSun() => SkylineLod.SlopeSunInfo().ToJsonString();
+
+        /// <summary>
+        /// [v0.1.78] **坡向太阳探针**（只读）：抽样 LOD 单元，对"追踪到的太阳"与"游戏固定方向光"
+        /// 各算一遍坡向增益 → 报 `meanGainTracked / meanGainFixed / meanAbsDelta`。
+        /// </summary>
+        public static string LodSlopeSunProbe(int maxCells = 512) =>
+            SkylineLod.SlopeSunProbe(maxCells).ToJsonString();
     }
 }

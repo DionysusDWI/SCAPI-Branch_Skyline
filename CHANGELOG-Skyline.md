@@ -7,6 +7,68 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.78] - 2026-09-28
+
+第八十八个版本：里程碑 3.4 —— **把 LOD 的坡向明暗 / 自阴影统一到"真太阳"**。
+用户口径（逐字）："太阳追踪功能很重要，**不要让光源点偏离太阳**"。
+
+### 问题：影子和坡向用的是两个不同的太阳
+
+v0.1.65 之后，GPU 阴影捕获与地形顶点阴影烘焙都已改用
+`SkylineRuntime.TrackedLightDirection()`（与天上那个太阳同式），
+但 **LOD 的坡向明暗（v0.1.15 起）与自阴影（v0.1.19 起）一直用游戏本体的常量
+`LightingManager.DirectionToLight1`** —— 于是长期处于"**影子跟着太阳转、远景山体的明暗不跟着转**"
+的自相矛盾状态。
+
+实测偏离量（AgentLab）：LOD 坡向方向与真太阳的夹角 = **104.93°**（另一时刻 104.47°）。
+这不是微调，是"受光面根本不是一个方向"。
+
+### 改法
+
+| 项 | 内容 |
+|---|---|
+| **`SkylineLod.SlopeSunDirection()`** | 新增：`=> SkylineRuntime.TrackedLightDirection()`，全项目唯一的太阳真值（关掉 `SunTracking` 即回固定光，用于 A/B 与回退） |
+| **一次取好、两处共用** | `RebuildMesh` 每次重建取一次 `lodSun`，**坡向明暗与自阴影共用同一个向量** ⇒ "影子跟着太阳转"与"坡向跟着太阳转"必然一致 |
+| **`u_sunDir`** | 片元里顶面坡向公式改用它；**立面六面因子仍用 `u_light1/u_light2`**（那是游戏自己的光照模型，跟着太阳动会让 LOD 的墙与近景真方块的墙亮度不一致） |
+| **自检显式传方向** | `SlopeShadingSelfCheck` / `SelfShadowSelfCheck` 以前隐式用全局光向，现在**显式传固定光** —— 判据不能随"现在几点"变化，否则会变成"有时过有时不过" |
+| **`SkylineLod.SlopeSunProbe(n)`** | 新增**只读探针**：抽样 n 个 LOD 单元，对"追踪太阳"与"固定光"各算一遍坡向增益（纯函数 `SlopeGainPure`，不碰统计量） |
+
+### 验收
+
+**① 方向一致性**：`tracking=True`、`dotWithTracked = 1.0`、`deviationDegFromFixedLight = 104.93°`。
+
+**② 两列并排**（`LodSlopeSunProbe(512)`）：`meanGainTracked 0.958` /
+`meanGainFixed 0.963` / `meanAbsDelta 0.0722`（折成 8 位顶点色 ≈ 18/255）。
+
+**③ 拨动时刻，坡向真的跟着太阳转**（`SunSetTimeOfDay`，每档等 2 s 让 LOD 重建）：
+
+| 请求时刻 | 实测 timeOfDay | 光源仰角 | 追踪太阳的坡向增益 | 固定光的坡向增益 |
+|---|---|---|---|---|
+| 0.30 | 0.302 | 25.7° | **0.94583** | 0.963（不变） |
+| 0.50 | 0.502 | 33.5° | **0.95096** | 0.963（不变） |
+| 0.70 | 0.702 | 5.3° | **0.90226** | 0.963（不变） |
+
+三个时刻光源方向最大夹角 **108.0°**；追踪太阳的增益**跨度 0.0487**，固定光那列**一个数都不动**
+—— 这就是"上一版的坡向是死的、这一版是活的"的直接对照。测试后已还原 `TimeOfDayMode` 与观测时刻。
+
+**④ 回归门禁**：**PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。新增判据 `lod-slope-sun`
+（`SunTracking=true` + LOD 烘焙方向 == `TrackedLightDirection()` + **GPU 的 `u_sunDir` 也是同一方向**，
+防"CPU 跟着太阳、GPU 不跟"）；`lod-attr-selfcheck` 仍 PASS（两条路径一起改用真太阳）。
+
+### 没做 / 风险（如实）
+
+* **自阴影仍在 CPU**（可见性射线步进），本版只是让它**跟着太阳转**；
+* 立面的六面因子仍用固定方向光 —— **故意的**，与游戏真方块口径一致；
+* `m_sunAmount` 的昼夜淡出仍只按 `SkyLightValue`，没有与"月亮方向"联动；
+* 拨动时刻会改存档里的 `TimeOfDayOffset`（脚本已还原 `TimeOfDayMode` 与观测时刻），
+  这类测试只应在测试世界做。
+
+证据：`data/sessions/skyline-v0178/`（`lod-sun.json`、`regression.json`、`lod-gpu-shading.json`）、
+`notes/156`。构建：`Survivalcraft.Windows` Release，**0 警告 0 错误**。
+源码包内含本版补丁 `height-v0178.patch`、全部历史补丁与 `agentbridge/` 源码。
+
+---
+
 ## [v0.1.77] - 2026-09-28
 
 第八十七个版本：**里程碑 1.3 的 GPU 侧补齐 —— 坡向明暗迁到片元**，并打掉回归清单里

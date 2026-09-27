@@ -758,8 +758,9 @@ namespace Game {
         /// 向太阳方向步进，判断该单元是否被 LOD 高度场里的更高地形遮挡。
         /// 返回 1（无遮挡）或 1-strength（在阴影中）。字典里没有的单元按"无数据"跳过（不算遮挡）。
         /// </summary>
-        static float SelfShadowFactor(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) {
-            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+        static float SelfShadowFactor(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize,
+                                      Vector3 sun) {
+            sun = sun.LengthSquared() > 1e-8f ? Vector3.Normalize(sun) : Vector3.UnitY;
             float step = cellSize * 0.5f;
             float x = cx * cellSize + cellSize * 0.5f;
             float y = height + 1f;
@@ -798,8 +799,10 @@ namespace Game {
             // 射线从原点出发第 3 步（z≈27 格）正落在该格、此时高度 ≈85 < 100 → 应判为阴影；
             // 而背光侧那一格（-z 方向）不看这堵墙 → 应判为受光。
             dict[Key(0, 1)] = new Cell { Height = (short)high };
-            float shadowed = SelfShadowFactor(dict, 0, 0, low, cellSize);
-            float lit = SelfShadowFactor(dict, 0, -2, low, cellSize);
+            // [v0.1.78] 同样显式传固定光方向（判据不依赖当前时刻）
+            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float shadowed = SelfShadowFactor(dict, 0, 0, low, cellSize, sun);
+            float lit = SelfShadowFactor(dict, 0, -2, low, cellSize, sun);
             bool ok = shadowed < 0.999f && lit >= 0.999f;
             return $"selfShadowSelfCheck strength={SelfShadowStrength:0.##} "
                 + $"behindWall={shadowed:0.###} sunSide={lit:0.###} ok={ok}";
@@ -865,10 +868,21 @@ namespace Game {
         /// 直接用 `CalculateLighting` 得到的增益在实测里恒为 1（看不出起伏），
         /// 所以这里只取**一盏太阳**（DirectionToLight1），与 Dawnlight/Iris 的单向太阳一致。
         /// </summary>
-        static float SlopeGainFromNormal(Vector3 normal) {
-            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
-            float lit = Vector3.Dot(normal, sun) / MathF.Max(Vector3.Dot(Vector3.UnitY, sun), 0.0001f);
-            float gain = MathUtils.Lerp(1f, MathUtils.Clamp(lit, 0.35f, 1f), SlopeShadingStrength);
+        /// <summary>
+        /// [v0.1.78] 坡向明暗 / 自阴影使用的**太阳方向**：统一走 v0.1.65 的真太阳
+        /// `SkylineRuntime.TrackedLightDirection()`（关掉 `SunTracking` 即回固定光）。
+        /// 用户口径（逐字）："**太阳追踪功能很重要，不要让光源点偏离太阳**" ——
+        /// v0.1.15~v0.1.77 的 LOD 坡向/自阴影一直用游戏本体的**固定**方向光，
+        /// 于是"影子跟着太阳转、坡向不跟着转"这两件事互相矛盾；本版把它们统一到同一个真值。
+        /// </summary>
+        public static Vector3 SlopeSunDirection() => SkylineRuntime.TrackedLightDirection();
+
+        static float SlopeGainFromNormal(Vector3 normal) => SlopeGainFromNormal(normal, SlopeSunDirection());
+
+        /// <summary>坡向增益（**显式传太阳**的版本，自检用它保持"不依赖当前时刻"的确定性）。</summary>
+        static float SlopeGainFromNormal(Vector3 normal, Vector3 sun) {
+            sun = sun.LengthSquared() > 1e-8f ? Vector3.Normalize(sun) : Vector3.UnitY;
+            float gain = SlopeGainPure(normal, sun);
             m_slopeStatMin = MathF.Min(m_slopeStatMin, gain);   // v0.1.15：诊断——全网格累计（几个浮点运算）
             m_slopeStatMax = MathF.Max(m_slopeStatMax, gain);
             m_slopeStatSum += gain;
@@ -876,13 +890,95 @@ namespace Game {
             return gain;
         }
 
+        /// <summary>[v0.1.78] 坡向增益的**纯函数**版本（不碰统计量）—— 探针与 A/B 用它，保证只读。</summary>
+        static float SlopeGainPure(Vector3 normal, Vector3 sun) {
+            sun = sun.LengthSquared() > 1e-8f ? Vector3.Normalize(sun) : Vector3.UnitY;
+            float lit = Vector3.Dot(normal, sun) / MathF.Max(Vector3.Dot(Vector3.UnitY, sun), 0.0001f);
+            return MathUtils.Lerp(1f, MathUtils.Clamp(lit, 0.35f, 1f), SlopeShadingStrength);
+        }
+
         /// <summary>[v0.1.15/v0.1.77] 单个单元的坡向增益（法线取自 <see cref="SlopeNormal"/>）。</summary>
-        static float SlopeLightGain(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize) =>
-            SlopeGainFromNormal(SlopeNormal(dict, cx, cz, height, cellSize));
+        static float SlopeLightGain(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize,
+                                    Vector3 sun) =>
+            SlopeGainFromNormal(SlopeNormal(dict, cx, cz, height, cellSize), sun);
 
         /// <summary>[v0.1.15] 坡向明暗的**确定性自检**（不依赖世界地形）：
         /// 平地 → 增益 = 1；十格高的坡：**背光侧**增益 &lt; 1（更暗）、**迎光侧**被夹到 1（不炸亮）、
         /// 两侧差异明显（说明确实是"单向太阳"而不是两盏镜像光抵消）。</summary>
+        /// <summary>
+        /// [v0.1.78] 坡向/自阴影**当前**使用的太阳方向（只读；给 `LodSurvey` 与回归清单断言用）。
+        /// `dotWithTracked` 恒为 1 —— 这就是"不要让光源点偏离太阳"的可断言形式。
+        /// </summary>
+        public static JsonObject SlopeSunInfo() {
+            Vector3 dir = SlopeSunDirection();
+            Vector3 tracked = SkylineRuntime.TrackedLightDirection();
+            return new JsonObject {
+                ["tracking"] = SkylineRuntime.SunTracking,
+                ["useMoonAtNight"] = SkylineRuntime.SunUseMoonAtNight,
+                ["source"] = "SkylineRuntime.TrackedLightDirection()（与天上那个太阳同式；关掉 SunTracking 即回固定光）",
+                ["dir"] = new JsonArray(dir.X, dir.Y, dir.Z),
+                ["tracked"] = new JsonArray(tracked.X, tracked.Y, tracked.Z),
+                ["dotWithTracked"] = Math.Round((double)Vector3.Dot(dir, tracked), 6),
+                ["elevationDeg"] = Math.Round(MathF.Asin(MathUtils.Clamp(dir.Y, -1f, 1f)) * 180f / MathF.PI, 2),
+                ["deviationDegFromFixedLight"] = Math.Round(
+                    MathF.Acos(MathUtils.Clamp(Vector3.Dot(dir,
+                        Vector3.Normalize(LightingManager.DirectionToLight1)), -1f, 1f)) * 180f / MathF.PI, 2)
+            };
+        }
+
+        /// <summary>
+        /// [v0.1.78] **坡向太阳探针**（只读）：对当前 LOD 单元字典里一个稳定抽样的子集，
+        /// 分别用**追踪到的太阳**与**游戏固定方向光**算坡向增益，报均值/差异。
+        /// 用途：①量化"统一到真太阳"改了多少（固定光那列就是 v0.1.77 的行为）；
+        /// ②把世界时刻拨到不同值再调它，就能看到坡向**跟着太阳转**（见 `heightlab/skyline-v0178-lod-sun.py`）。
+        /// </summary>
+        public static JsonObject SlopeSunProbe(int maxCells) {
+            JsonObject result = new();
+            try {
+                int limit = Math.Clamp(maxCells <= 0 ? 512 : maxCells, 1, 20000);
+                long[] keys = new long[m_cells.Count];
+                m_cells.Keys.CopyTo(keys, 0);
+                Array.Sort(keys);
+                int n = Math.Min(limit, keys.Length);
+                Vector3 tracked = SlopeSunDirection();
+                Vector3 fixedSun = Vector3.Normalize(LightingManager.DirectionToLight1);
+                double sumTracked = 0, sumFixed = 0, sumAbsDelta = 0;
+                float minT = 2f, maxT = -1f;
+                for (int i = 0; i < n; i++) {
+                    long key = keys[i];
+                    int cx = (int)(key >> 32), cz = (int)(key & 0xFFFFFFFF);
+                    Cell cell = m_cells[key];
+                    Vector3 normal = SlopeNormal(m_cells, cx, cz, cell.Height, CellSize);
+                    float gT = SlopeGainPure(normal, tracked);
+                    float gF = SlopeGainPure(normal, fixedSun);
+                    sumTracked += gT;
+                    sumFixed += gF;
+                    sumAbsDelta += MathF.Abs(gT - gF);
+                    minT = MathF.Min(minT, gT);
+                    maxT = MathF.Max(maxT, gT);
+                }
+                result["ok"] = true;
+                result["cells"] = n;
+                result["cellsTotal"] = m_cells.Count;
+                result["strength"] = Math.Round(SlopeShadingStrength, 4);
+                result["sunAmount"] = Math.Round(m_sunAmount, 4);
+                result["trackedDir"] = new JsonArray(tracked.X, tracked.Y, tracked.Z);
+                result["fixedDir"] = new JsonArray(fixedSun.X, fixedSun.Y, fixedSun.Z);
+                result["meanGainTracked"] = n > 0 ? Math.Round(sumTracked / n, 5) : 0.0;
+                result["meanGainFixed"] = n > 0 ? Math.Round(sumFixed / n, 5) : 0.0;
+                result["meanAbsDelta"] = n > 0 ? Math.Round(sumAbsDelta / n, 5) : 0.0;
+                result["minGainTracked"] = n > 0 ? Math.Round(minT, 5) : 0.0;
+                result["maxGainTracked"] = n > 0 ? Math.Round(maxT, 5) : 0.0;
+                result["note"] = "meanGainFixed 那一列就是 v0.1.77 及以前的行为（固定方向光）；"
+                    + "两者差多少，就是\"把坡向统一到真太阳\"改了的外观量。";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result;
+        }
+
         public static string SlopeShadingSelfCheck() {
             var flat = new Dictionary<long, Cell>();
             var eastStep = new Dictionary<long, Cell>();
@@ -900,9 +996,11 @@ namespace Game {
             }
             eastStep[Key(1, 1)] = new Cell { Height = (short)(height + 10) };
             westStep[Key(-1, 1)] = new Cell { Height = (short)(height + 10) };
-            float gFlat = SlopeLightGain(flat, 0, 0, height, cellSize);
-            float gEast = SlopeLightGain(eastStep, 0, 0, height, cellSize);
-            float gWest = SlopeLightGain(westStep, 0, 0, height, cellSize);
+            // [v0.1.78] 自检**显式传固定光方向**：判据必须不随"现在几点"变化（确定性的前提）。
+            Vector3 sun = Vector3.Normalize(LightingManager.DirectionToLight1);
+            float gFlat = SlopeLightGain(flat, 0, 0, height, cellSize, sun);
+            float gEast = SlopeLightGain(eastStep, 0, 0, height, cellSize, sun);
+            float gWest = SlopeLightGain(westStep, 0, 0, height, cellSize, sun);
             float darker = MathF.Min(gEast, gWest);
             float brighter = MathF.Max(gEast, gWest);
             bool ok = MathF.Abs(gFlat - 1f) < 0.001f && darker < 0.96f
@@ -1264,6 +1362,9 @@ namespace Game {
                 indices = m_indexScratch;
             }
             var light = new Color((byte)220, (byte)220, (byte)220);
+            // [v0.1.78] 这一次重建用的太阳方向（**一次取好**，循环里不再重复取）：坡向明暗与自阴影共用，
+            // 也就是"影子跟着太阳转"和"坡向跟着太阳转"用同一个真值。
+            Vector3 lodSun = SlopeSunDirection();
             int vi = 0, ii = 0, built = 0;
             // 写一个顶点：属性路径多写面法线（`face` 沿用 CellFace 编号 0=+Z 1=+X 2=-Z 3=-X 4=+Y 5=-Y）
             // 与材质 id（方块值）。非属性路径与 v0.1.59 逐位一致。
@@ -1316,13 +1417,13 @@ namespace Game {
                     // 坡向明暗：**GPU 路径不在 CPU 烘焙**（着色器按顶点法线逐片元算同一个式子），否则会算两遍。
                     if (SlopeShadingStrength > 0f && !gpuShade) {
                         // v0.1.19：坡向明暗按日照量淡出
-                        gain *= MathUtils.Lerp(1f, SlopeGainFromNormal(topNormal), m_sunAmount);
+                        gain *= MathUtils.Lerp(1f, SlopeGainFromNormal(topNormal, lodSun), m_sunAmount);
                     }
                     if (SelfShadowStrength > 0f) {
                         // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）。
                         // [v0.1.77] 这是**可见性**计算（要在高度场里步进），CPU/GPU 两条路径**都**按当前口径
                         // 烘焙进顶点色 —— 着色器负责的是"按法线算明暗"，不是"算可见性"。
-                        float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize);
+                        float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize, lodSun);
                         // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
                         gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
                         if (layer == 0) {
@@ -1730,6 +1831,8 @@ namespace Game {
                 ["vertexAttributes"] = SkylineRuntime.LodVertexAttributes,
                 ["vertexStride"] = SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20,
                 ["attrShader"] = SkylineRuntime.LodAttrShaderOn,
+                // [v0.1.78] 坡向/自阴影用的光源方向（= 真太阳；`dotWithTracked` 恒为 1）
+                ["slopeSun"] = SlopeSunInfo(),
                 ["meshVertices"] = m_vertexCount + m_vertexCountFine + m_vertexCountNear,
                 ["meshVertexBytes"] = (long)(m_vertexCount + m_vertexCountFine + m_vertexCountNear)
                     * (SkylineRuntime.LodVertexAttributes ? SkylineLodVertex.Stride : 20),
