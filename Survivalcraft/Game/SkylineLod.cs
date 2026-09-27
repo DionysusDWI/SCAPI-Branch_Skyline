@@ -162,7 +162,7 @@ namespace Game {
             // （12:45 实测：目标单元 7.2 s 才刷新，超出 1 s 判据）。现在：
             //   本轮 = 最多 DirtyChunksPerTick 个脏重采 + 最多 ChunksPerTick 个轮转采集。
             int rotationBudget = Math.Max(ChunksPerTick, 1);
-            int dirtyBudget = Math.Max(DirtyChunksPerTick, 0);
+            int dirtyBudget = EffectiveDirtyBudget;      // v0.1.16：队列越长处理越多（上限 DirtyChunksMaxPerTick）
             int rotationUsed = 0;
             int dirtyUsed = 0;
             for (int n = 0; n < rotationBudget + dirtyBudget; n++) {

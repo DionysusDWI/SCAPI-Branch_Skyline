@@ -45,6 +45,14 @@ namespace Game {
         public static int DirtyChunksPerTick { get; set; } = 8;
 
         /// <summary>
+        /// [v0.1.16] 脏重采的**上限自适应**：队列越长，每 Tick 处理越多（上限 = 本值），
+        /// 避免"内容大批变更（世界加载/大面积编辑）"时队列积压（实测：一次把内容距离调到 256 m
+        /// 后 `dirty=510/q=510` 长期挂着，LOD 刷新时延被拖到 0.5 s 级）。
+        /// 单次重采只做 256 列顶面查询 + 256 次取样，代价很小，所以上限可以给到 64。
+        /// </summary>
+        public static int DirtyChunksMaxPerTick { get; set; } = 64;
+
+        /// <summary>
         /// 编辑后的**沉降期**（秒）：LOD 的采样数据源是 `TerrainChunk.GetTopHeightFast`（区块的
         /// "顶面高度"字段），它由地形更新器的光照阶段重算——而光照阶段是**排队**跑的（实测编辑后
         /// 约 0.3 s 到位）。不等沉降就重采会采到旧顶面，而且采样戳随后会被当成"刚采过"，
@@ -104,6 +112,11 @@ namespace Game {
         static int m_resampledDirty;
         static int m_resampledStamp;
         static int m_resampledSweep;
+        // v0.1.16：脏通道诊断计数
+        static long m_dirtyScans;
+        static long m_dirtyTaken;
+        static long m_dirtySkippedYoung;
+        static long m_dirtySkippedUnloaded;
 
         // ---------------- 只读状态 ----------------
 
@@ -111,6 +124,16 @@ namespace Game {
         public static int PendingResamples => m_dirtyQueue.Count;
         public static int ResampledTotal => m_resampledTotal;
         public static int ResampledDirty => m_resampledDirty;
+
+        /// <summary>[v0.1.16] 本 Tick 实际允许的脏重采数（= 队列长度 / 16，夹在 [DirtyChunksPerTick, 上限]）。</summary>
+        internal static int EffectiveDirtyBudget {
+            get {
+                int floor = Math.Max(DirtyChunksPerTick, 0);
+                int max = Math.Max(DirtyChunksMaxPerTick, floor);
+                int adaptive = m_dirtyQueue.Count / 16;
+                return Math.Clamp(Math.Max(floor, adaptive), floor, max);
+            }
+        }
 
         /// <summary>Reset()/Load()（含切世界）时清空刷新状态：与 m_cells / m_cellsFine 同生命周期。</summary>
         static void ResetRefreshState() {
@@ -168,19 +191,28 @@ namespace Game {
                     m_dirtyTime.Remove(key);
                     continue;                               // 队列里有重复项 / 已经重采过了
                 }
-                // v0.1.8：等沉降期再采（队列 FIFO，队首最新 → 队首没到点就整体再等，不重排队）。
+                // v0.1.8/0.1.16：等沉降期再采。**注意**：标脏会刷新时间戳（重复编辑），所以队首可能
+                // 一直是"刚标脏"的项 —— 早期实现在这里 `return false`（认为"队首没到点，整队都没到点"），
+                // 结果被反复编辑的队首把整条脏队列**锁死**（实测 `dirty=510/q=510` 60 s 不降，
+                // 只有 0.33 次/秒的重采）。现在改成"跳过该项、放到队尾，继续看后面的项"。
                 if (DirtySettleSeconds > 0f
                     && m_dirtyTime.TryGetValue(key, out double dirtyAt)
                     && now - dirtyAt < DirtySettleSeconds) {
-                    return false;
+                    m_dirtyQueue.Dequeue();
+                    m_dirtyQueue.Enqueue(key);
+                    m_dirtySkippedYoung++;
+                    continue;
                 }
+                m_dirtyScans++;
                 TerrainChunk candidate = terrain.GetChunkAtCoords((int)(key >> 32), (int)(key & 0xFFFFFFFF));
                 if (candidate == null || candidate.ThreadState < TerrainChunkState.Valid) {
                     m_dirtyQueue.Dequeue();
                     m_dirtyQueue.Enqueue(key);              // 还没加载 → 留到以后
+                    m_dirtySkippedUnloaded++;
                     continue;
                 }
                 m_dirtyQueue.Dequeue();
+                m_dirtyTaken++;
                 chunk = candidate;
                 return true;
             }
@@ -299,6 +331,12 @@ namespace Game {
             ["stamps"] = m_stamps.Count,
             ["dirtySettleSeconds"] = Math.Round(DirtySettleSeconds, 2),
             ["dirtyVerifySeconds"] = Math.Round(DirtyVerifySeconds, 2),
+            ["dirtyChunksMaxPerTick"] = DirtyChunksMaxPerTick,
+            ["effectiveDirtyBudget"] = EffectiveDirtyBudget,
+            ["dirtyScans"] = m_dirtyScans,
+            ["dirtyTaken"] = m_dirtyTaken,
+            ["dirtySkippedYoung"] = m_dirtySkippedYoung,
+            ["dirtySkippedUnloaded"] = m_dirtySkippedUnloaded,
             ["refreshSeconds"] = RefreshSeconds,
             ["dirtyChunksPerTick"] = DirtyChunksPerTick,
             ["sweepSecondsLeft"] = Math.Round(Math.Max(0.0, m_sweepUntil - Time.RealTime), 1)

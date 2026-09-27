@@ -438,7 +438,12 @@ namespace Game {
         public virtual void PrepareForDrawing(Camera camera) {
             // [v0.1.14] 相机的更新地点带 y：`SkylineRuntime.SphereLoadingEnabled` 打开时走球形加载窗
             // （默认关 → 内部按 2D 处理，行为与原来逐位一致）。
-            SetUpdateLocation(camera.GameWidget.PlayerData.PlayerIndex, camera.ViewPosition, m_subsystemSky.VisibilityRange, 64f);
+            // [v0.1.16] 内容距离可调（`SphereLoadingContentRadius`）：默认 0 = 沿用 64；
+            // 调大能让超视距 LOD 的细环被采到（LOD 只能采样已加载区块），代价是常驻列数/内存上升。
+            float contentDistance = SkylineRuntime.SphereLoadingContentRadius > 0
+                ? SkylineRuntime.SphereLoadingContentRadius
+                : 64f;
+            SetUpdateLocation(camera.GameWidget.PlayerData.PlayerIndex, camera.ViewPosition, m_subsystemSky.VisibilityRange, contentDistance);
             if (m_synchronousUpdateFrame == Time.FrameIndex) {
                 List<TerrainChunk> list = DetermineSynchronousUpdateChunks(camera.ViewPosition, camera.ViewDirection);
                 if (list.Count > 0) {

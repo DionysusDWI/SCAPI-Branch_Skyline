@@ -164,6 +164,15 @@ namespace Game {
         /// </summary>
         public static bool SphereLoadingEnabled { get; set; }
 
+        /// <summary>
+        /// [v0.1.16] 球形加载窗的**内容距离**（米）：0 = 沿用调用方的默认（64，即 content = max(64, visibility)）。
+        /// 调大（例如 256）会让超视距 LOD 的**细环**也能被采到——LOD 只能采样"已加载"的区块，
+        /// 而引擎默认的 content=64/视距=128 意味着 136~256 m 的细环平时根本没加载过，
+        /// 于是视距边缘的 LOD 是"稀疏补丁"（实测细层仅 530 个单元）。代价是常驻列数与内存上升，
+        /// 所以做成开关 + 可测项（见 `notes/86`）。
+        /// </summary>
+        public static int SphereLoadingContentRadius { get; set; }
+
         /// <summary>当前已分配的区块列数（验证球形加载窗用）。</summary>
         public static int AllocatedChunkCount =>
             GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain?.AllocatedChunks?.Length ?? -1;
