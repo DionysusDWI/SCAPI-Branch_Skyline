@@ -38,6 +38,15 @@
   扫"视距 −8 −`BackfillInsideMetres`(64) … 视距 +`BackfillRelMetres`(192)"的 32 m 网格，
   凡**还没有壳**且 2×2 区块都已 Valid 的立方体就地采好，于是地形释放时壳已就位、边界不留洞。
   每 Tick 预算 `BackfillPerTick`(2) / `BackfillBudgetMs`(3 ms)，实测 0.10~0.16 ms/Tick |
+| **部分壳**（1.2 的补丁，本轮新增） | `TryCapturePartial` + `skyline.CubeShellPartialCapture(enabled, minValid)`：
+  2×2 组不齐时**也采**（≥ `PartialMinValidChunks`(默认 2) 个区块 Valid），缺的象限在壳里就是空列、
+  网格不画；**`HasShellInBand` 对部分壳返回 false → 那片 LOD 不让位、缺口由 LOD 补**（更好的覆盖，不是拿坏数据盖好数据）。
+  触发点：入队重试耗尽 / 卸载前预扫判 `!ready` |
+| **壳滑动窗口**（里程碑 2，本轮新增） | `ReleaseDistantShells` + `skyline.CubeShellSlidingWindow(enabled, releaseFactor)`：
+  离相机超过 `视距 + BandMetres × 1.25`（默认 **1088 m**）的壳**从内存释放**，
+  每 Tick 最多 64 个；**不写墓碑**（磁盘记录保留）→ "走过一次就有远景"不变，但内存不再单调增长 |
+| **`skippedNotReady` 精确分解**（本轮新增） | `notReadyPendingExhausted / notReadyLeaving / notReadyMissing1..4 / notReadyAbsent / notReadyUnvalid`：
+  先量清楚"洞到底怎么丢的"再改架构（这一条直接推翻了上一轮的诊断，见下） |
 
 ### Verified（AgentLab）
 
@@ -103,6 +112,19 @@
   `meanAbsDiff 7.19 / maxAbsDiff 51 / diffPxGt8 1500/5673`。已排查：法线正确、几何一致、雾两边都关、格式契约逐位一致；
   把"坡向明暗+自阴影"置 0 后差距仍在（7.19），恢复后升到 **10.25 / max 136**（`slopeSelfShadowGap`）——
   说明这是**两层不同的差距**，面因子本身就没对齐。**自检保持 `ok:false`**，没有放宽阈值让它变绿。
+
+**部分壳 + 壳滑动窗口的实测**（AgentLab，视距 128 m；`data/sessions/skyline-v0162/`）：
+
+* **先纠正上一轮的诊断**：把 `skippedNotReady` 分解后实测 **缺失 1/2/3/4 个区块 = 194/264/244/0** ——
+  **缺 4 个的一次都没有**，缺 2~3 个占多数。所以不是"最外一圈凑不齐"，而是**区域按区块行整条收缩**：
+  一个 32 m 立方体横跨 2 个区块行，整行释放时它一次失去 2~3 个区块，**从来没有"四个同时 Valid"的时刻**。
+* **部分壳救回率**（三段行走 A/B）：关 = **0%**；`minValid=2` = **45%**（+243 个）；`minValid=1` = **61%**（+210 个/40 s）。
+* **屏幕 A/B**：同一视角/位置、`minValid=2`，差分 **3,955 px = 0.43%**，无肉眼可见劣化。
+  **诚实边界**：`minValid=1` 时 **398/406 = 98% 的常驻壳是部分壳**，远距离观感**本轮只看了 1 个视角**，
+  所以默认取 `minValid=2`，多视角验证列为待办。
+* **壳滑动窗口**：载入即释放 82 个超距壳（690→608）；行走期间常驻 **613→613→404**（释放累计 816），
+  而**上一轮未开窗时**同长度行走是 **460→690（净增 230）**。释放**不写墓碑**，磁盘记录保留。
+* 现场：`cubes 406`、列顶壳 6.34 MiB、体素壳 6.34 MiB、网格 1.96 MiB、`fps 30.3`、内存 27.3/63.2 GB。
 
 ## [v0.1.59] - 2026-09-29
 

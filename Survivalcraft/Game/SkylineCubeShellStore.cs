@@ -119,6 +119,51 @@ namespace Game {
         public static int BackfillReadyCubes { get; private set; }
         public static double LastBackfillMs { get; private set; }
 
+        // ---------------- 滑动窗口：按距离释放壳（v0.1.62，里程碑 2） ----------------
+        /// <summary>
+        /// [v0.1.62] 壳的**滑动窗口**：离相机超过 `视距 + BandMetres × ShellReleaseFactor` 的壳
+        /// 从**内存**里释放。**磁盘记录保留、不写墓碑** —— 所以"走过一次就有远景"这个性质不变，
+        /// 玩家再走回来时按正常路径重新采（或下次读档时从文件里读回来），
+        /// 但内存不再随"走过多少地方"单调增长（用户口径：及时把已卸载区块的内容移出内存、避免只增不减）。
+        /// </summary>
+        public static bool ShellSlidingWindow { get; set; } = true;
+        /// <summary>[v0.1.62] 释放半径系数（× `BandMetres`）。1.25 → 视距 + 960 m；带只画到 视距+768 m，所以是安全的。</summary>
+        public static float ShellReleaseFactor { get; set; } = 1.25f;
+        /// <summary>[v0.1.62] 每 Tick 最多释放几个（一次性拿掉几千个会抖，摊到多帧）。</summary>
+        public static int ShellReleasePerTick { get; set; } = 64;
+        public static long ShellReleasedTotal { get; private set; }
+        /// <summary>当前仍在内存里、但已经超出释放半径的壳数（0 = 滑动窗口跟得上）。</summary>
+        public static int ShellResidentFar { get; private set; }
+
+        // ---------------- `skippedNotReady` 的精确分解（v0.1.62，先把洞源量清楚再改） ----------------
+        /// <summary>入队重试 8 次仍凑不齐 2×2 而放弃的次数（`HarvestPending` 路径）。</summary>
+        public static long NotReadyPendingExhausted { get; private set; }
+        /// <summary>卸载前预扫时凑不齐 2×2 的次数（`OnChunksLeavingRange` 路径）。</summary>
+        public static long NotReadyLeaving { get; private set; }
+        /// <summary>缺失区块数 = 1/2/3/4 的分布（判据：如果几乎全是 1，说明只差一圈边界）。</summary>
+        public static long NotReadyMissing1 { get; private set; }
+        public static long NotReadyMissing2 { get; private set; }
+        public static long NotReadyMissing3 { get; private set; }
+        public static long NotReadyMissing4 { get; private set; }
+        /// <summary>缺的区块**根本没分配**（在加载半径外）的次数。</summary>
+        public static long NotReadyAbsent { get; private set; }
+        /// <summary>缺的区块**已分配但还没到 Valid**（内容/光照还没算完）的次数。</summary>
+        public static long NotReadyUnvalid { get; private set; }
+
+        // ---------------- 部分壳（v0.1.62，1.2 的补丁：组不齐也要能采） ----------------
+        /// <summary>
+        /// [v0.1.62] 允许在"2×2 组不齐"时也把壳采下来（标记为部分壳）。
+        /// 依据是实测数据：沿路走 70 s，`skippedNotReady` 涨 702，其中缺 1/2/3 个区块的是
+        /// **194/264/244、缺 4 个的 0** —— 区域是**按区块行整条收缩**的，
+        /// 跨在"刚释放的那行"上的立方体**没有任何一刻是四个都 Valid 的**，光靠等永远等不到。
+        /// </summary>
+        public static bool PartialCapture { get; set; } = true;
+        /// <summary>[v0.1.62] 至少要有几个区块 Valid 才采（1~3；默认 2 = 过半就采）。</summary>
+        public static int PartialMinValidChunks { get; set; } = 2;
+        public static long PartialCapturedTotal { get; private set; }
+        /// <summary>当前常驻的部分壳数（普查）。</summary>
+        public static int PartialCubes { get; private set; }
+
         // ---------------- 存档 P4（v0.1.53） ----------------
         /// <summary>存档开关。</summary>
         public static bool PersistenceEnabled { get; set; } = true;
@@ -214,6 +259,8 @@ namespace Game {
             public SurfaceVoxelShell32 VoxelShell;
             public SurfaceVoxelMesh VoxelMesh;
             public bool MeshIsVoxel;             // 当前常驻的是哪一类网格
+            public bool Partial;                 // [v0.1.62] 组不齐时采的"部分壳"（缺口留给 LOD 补）
+            public int ValidChunks;              // [v0.1.62] 采的时候 2×2 里有几个区块是 Valid（1~4）
             public double LastUsed;
         }
 
@@ -366,6 +413,123 @@ namespace Game {
                 }
             }
             return true;
+        }
+
+        /// <summary>
+        /// [v0.1.62] 把"这次为什么凑不齐 2×2"记清楚：缺 1/2/3/4 个，以及缺的是"根本没分配"还是"分配了没 Valid"。
+        /// 先量清楚再改架构（上一轮我按直觉判成"边界环"，但 840 m 行走只该扫过约 26 个环上立方体，
+        /// 与实测 +1238 差 50 倍 —— 所以直觉是错的，必须用数据定因）。
+        /// </summary>
+        static void AccumulateMissingChunks(Terrain terrain, int cx, int cz) {
+            int missing = 0;
+            for (int dx = 0; dx < 2; dx++) {
+                for (int dz = 0; dz < 2; dz++) {
+                    TerrainChunk chunk = terrain?.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+                    if (chunk == null) {
+                        missing++;
+                        NotReadyAbsent++;
+                    }
+                    else if (chunk.ThreadState < TerrainChunkState.Valid) {
+                        missing++;
+                        NotReadyUnvalid++;
+                    }
+                }
+            }
+            switch (missing) {
+                case 1: NotReadyMissing1++; break;
+                case 2: NotReadyMissing2++; break;
+                case 3: NotReadyMissing3++; break;
+                default: NotReadyMissing4++; break;
+            }
+        }
+
+        /// <summary>[v0.1.62] 一个立方体的 2×2 里有几个区块是"已分配且 Valid"。</summary>
+        static int CountValidChunks(Terrain terrain, int cx, int cz) {
+            int n = 0;
+            for (int dx = 0; dx < 2; dx++) {
+                for (int dz = 0; dz < 2; dz++) {
+                    TerrainChunk chunk = terrain?.GetChunkAtCoords(cx * 2 + dx, cz * 2 + dz);
+                    if (chunk != null && chunk.ThreadState >= TerrainChunkState.Valid) {
+                        n++;
+                    }
+                }
+            }
+            return n;
+        }
+
+        /// <summary>
+        /// [v0.1.62] **部分壳**：2×2 组不齐时也把它采下来（`Entry.Partial = true`）。
+        /// 缺的象限在壳里就是"空列"，网格自然不画；而 `HasShellInBand` 对部分壳返回 **false**，
+        /// 于是**那一片的 LOD 不让位**、缺的象限由 LOD 补上 —— 是"更好的覆盖"，不是"拿坏数据盖住好数据"。
+        /// 采体素壳时 `SurfaceVoxelShell32` 会把读到未加载的邻居**按实心保守处理**，所以不会凭空长墙。
+        /// </summary>
+        static bool TryCapturePartial(Terrain terrain, (int Cx, int Cy, int Cz) key) {
+            if (!PartialCapture || terrain == null || m_entries.ContainsKey(key) || m_entries.Count >= MaxCubes) {
+                return false;
+            }
+            int valid = CountValidChunks(terrain, key.Cx, key.Cz);
+            if (valid < Math.Clamp(PartialMinValidChunks, 1, 3)) {
+                return false;
+            }
+            CubeSurface32 shell = CubeSurface32.Extract(terrain, key.Cx, key.Cy, key.Cz);
+            if (shell.QuadCount == 0) {
+                return false;
+            }
+            Entry entry = new() {
+                Shell = shell,
+                LastUsed = Time.RealTime,
+                Partial = true,
+                ValidChunks = valid
+            };
+            m_entries[key] = entry;
+            TryHarvestVoxelShell(entry, terrain, key.Cx, key.Cy, key.Cz);
+            PartialCapturedTotal++;
+            HarvestedTotal++;
+            MarkCubeDirty(key);
+            if (m_queued.Add(key)) {
+                m_meshQueue.Enqueue(key);
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// [v0.1.62] **壳的滑动窗口**：释放超出 `视距 + BandMetres × ShellReleaseFactor` 的壳（只出内存，不写墓碑）。
+        /// 每 Tick 最多 `ShellReleasePerTick` 个，避免一次性拿掉几千个造成抖动；
+        /// `ShellResidentFar` 一直报"还没释放完的超出数"，所以"跟不跟得上"是可断言的。
+        /// </summary>
+        static void ReleaseDistantShells() {
+            ShellResidentFar = 0;
+            if (!ShellSlidingWindow || m_entries.Count == 0) {
+                return;
+            }
+            Vector3 camera = SkylineLod.CameraViewPosition();
+            float releaseRange = ViewRangeMetres + BandMetres * MathF.Max(ShellReleaseFactor, 1f);
+            float releaseSq = releaseRange * releaseRange;
+            int budget = Math.Max(0, ShellReleasePerTick);
+            List<(int Cx, int Cy, int Cz)> drop = null;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                float dist = CubeDistance(kv.Key.Cx, kv.Key.Cz, camera);
+                if (dist * dist <= releaseSq) {
+                    continue;
+                }
+                ShellResidentFar++;
+                if (budget <= 0) {
+                    continue;
+                }
+                drop ??= [];
+                drop.Add(kv.Key);
+                budget--;
+            }
+            if (drop == null) {
+                return;
+            }
+            foreach ((int Cx, int Cy, int Cz) key in drop) {
+                if (m_entries.TryGetValue(key, out Entry entry)) {
+                    ReleaseEntry(entry);
+                    m_entries.Remove(key);          // 注意：**不** MarkCubeRemoved → 磁盘记录保留
+                    ShellReleasedTotal++;
+                }
+            }
         }
 
         /// <summary>
@@ -668,7 +832,11 @@ namespace Game {
                     int retries = m_pendingSet.TryGetValue(key, out int n) ? n + 1 : 1;
                     if (retries > MaxPendingRetries) {
                         m_pendingSet.TryRemove(key, out _);
-                        SkippedNotReady++;
+                        NotReadyPendingExhausted++;
+                        AccumulateMissingChunks(terrain, key.Cx, key.Cz);
+                        if (!TryCapturePartial(terrain, key)) {      // [v0.1.62] 组不齐也采（部分壳）
+                            SkippedNotReady++;
+                        }
                         continue;                                // 放弃（下次区块再 Valid 时会重新入队）
                     }
                     m_pendingSet[key] = retries;
@@ -725,7 +893,8 @@ namespace Game {
                 return false;
             }
             (int Cx, int Cy, int Cz) key = (worldX >> 5, height >> 5, worldZ >> 5);
-            if (!m_entries.ContainsKey(key)) {
+            // [v0.1.62] **部分壳不让 LOD 让位**：缺的象限要留给 LOD 补（否则那一片会变成洞）。
+            if (!m_entries.TryGetValue(key, out Entry entry) || entry.Partial) {
                 return false;
             }
             if (!NeighborhoodComplete(key.Cx, key.Cy, key.Cz)) {
@@ -798,7 +967,39 @@ namespace Game {
                         }
                     }
                     if (!ready) {
-                        SkippedNotReady++;
+                        NotReadyLeaving++;
+                        AccumulateMissingChunks(terrain, cube.Cx, cube.Cz);
+                        // [v0.1.62] 组不齐也采（部分壳）。注意：上面那个 `ready` 循环是**提前 break** 的，
+                        // 它的 minTop/maxTop 此时不可信 —— 所以这里**重新**只按"还 Valid 的那几个区块"取顶面范围。
+                        int pMin = int.MaxValue, pMax = int.MinValue;
+                        for (int dx = 0; dx < 2; dx++) {
+                            for (int dz = 0; dz < 2; dz++) {
+                                TerrainChunk sibling = terrain.GetChunkAtCoords(cube.Cx * 2 + dx, cube.Cz * 2 + dz);
+                                if (sibling == null || sibling.ThreadState < TerrainChunkState.Valid) {
+                                    continue;
+                                }
+                                for (int x = 0; x < TerrainChunk.Size; x++) {
+                                    for (int z = 0; z < TerrainChunk.Size; z++) {
+                                        int top = sibling.GetTopHeightFast(x, z);
+                                        if (top > pMax) {
+                                            pMax = top;
+                                        }
+                                        if (top < pMin) {
+                                            pMin = top;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        bool anyPartial = false;
+                        if (pMax >= TerrainChunk.MinHeight) {
+                            for (int cy = Math.Max(pMin, TerrainChunk.MinHeight) >> 5; cy <= pMax >> 5; cy++) {
+                                anyPartial |= TryCapturePartial(terrain, (cube.Cx, cy, cube.Cz));
+                            }
+                        }
+                        if (!anyPartial) {
+                            SkippedNotReady++;
+                        }
                         continue;
                     }
                     if (maxTop < TerrainChunk.MinHeight) {
@@ -865,6 +1066,7 @@ namespace Game {
                 BackfillBandShells(Terrain);   // [v0.1.61] 带内主动补采：地形还在就先采好（无缝转换的数据侧）
                 PrewarmVoxelShells(Terrain);   // [v0.1.60] 最近档补采/刷新表面体素壳（升级迁移 + 地形改动）
                 EvictIfNeeded();
+                ReleaseDistantShells();        // [v0.1.62] 滑动窗口：远处的壳出内存（磁盘记录保留）
                 BuildMeshes();
                 UpdateBandCoverage();
             }
@@ -1004,10 +1206,14 @@ namespace Game {
             VoxelShellCubes = 0;
             VoxelDegradedCubes = 0;
             VoxelDroppedVoxels = 0;
+            PartialCubes = 0;                    // [v0.1.62]
             int s1 = 0, s2 = 0, s4 = 0, s8 = 0, s16 = 0, s32 = 0;
             bool budgetHit = false;
             foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
                 Entry entry = kv.Value;
+                if (entry.Partial) {
+                    PartialCubes++;                      // [v0.1.62] 部分壳普查
+                }
                 if (entry.VoxelShell != null) {
                     VoxelShellCubes++;                       // [v0.1.60] 实数一遍，避免计数器漂移
                     if (entry.VoxelShell.Degraded) {         // 降级/丢体素的**当前**普查（不是累计值）
@@ -1623,6 +1829,26 @@ namespace Game {
                 ["backfillMissingCubes"] = BackfillMissingCubes,
                 ["backfillReadyCubes"] = BackfillReadyCubes,
                 ["lastBackfillMs"] = Math.Round(LastBackfillMs, 3),
+                // [v0.1.62] 滑动窗口（里程碑 2）
+                ["shellSlidingWindow"] = ShellSlidingWindow,
+                ["shellReleaseFactor"] = ShellReleaseFactor,
+                ["shellReleaseMetres"] = Math.Round(ViewRangeMetres + BandMetres * MathF.Max(ShellReleaseFactor, 1f), 1),
+                ["shellReleasedTotal"] = ShellReleasedTotal,
+                ["shellResidentFar"] = ShellResidentFar,
+                // [v0.1.62] skippedNotReady 的精确分解
+                ["notReadyPendingExhausted"] = NotReadyPendingExhausted,
+                ["notReadyLeaving"] = NotReadyLeaving,
+                ["notReadyMissing1"] = NotReadyMissing1,
+                ["notReadyMissing2"] = NotReadyMissing2,
+                ["notReadyMissing3"] = NotReadyMissing3,
+                ["notReadyMissing4"] = NotReadyMissing4,
+                ["notReadyAbsent"] = NotReadyAbsent,
+                ["notReadyUnvalid"] = NotReadyUnvalid,
+                // [v0.1.62] 部分壳
+                ["partialCapture"] = PartialCapture,
+                ["partialMinValidChunks"] = PartialMinValidChunks,
+                ["partialCapturedTotal"] = PartialCapturedTotal,
+                ["partialCubes"] = PartialCubes,
                 ["meshedCubes"] = MeshedTotal,
                 ["harvestedTotal"] = HarvestedTotal,
                 ["evictedTotal"] = EvictedTotal,
@@ -1746,6 +1972,30 @@ namespace Game {
             SkylineCubeShellStore.BackfillPerTick = Math.Max(0, perTick);
             if (relMetres >= 0f) {
                 SkylineCubeShellStore.BackfillRelMetres = relMetres;
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.62] **壳的滑动窗口**（里程碑 2）：`enabled=false` 逐位回到"壳一直常驻、只受 `MaxCubes` 上限约束"的行为；
+        /// `releaseFactor ≥ 1` 调释放半径（× `BandMetres`）。释放**只出内存、不写墓碑**（磁盘记录保留）。
+        /// </summary>
+        public static string CubeShellSlidingWindow(bool enabled, float releaseFactor = -1f) {
+            SkylineCubeShellStore.ShellSlidingWindow = enabled;
+            if (releaseFactor >= 0f) {
+                SkylineCubeShellStore.ShellReleaseFactor = MathF.Max(releaseFactor, 1f);
+            }
+            return SkylineCubeShellStore.Survey();
+        }
+
+        /// <summary>
+        /// [v0.1.62] **部分壳开关**（1.2 的补丁）：`enabled=false` 逐位回到"必须 2×2 全 Valid 才采"的行为；
+        /// `minValid` 调"至少几个区块 Valid 才采"（1~3，默认 2）。关掉可用于 A/B 看它到底救回多少。
+        /// </summary>
+        public static string CubeShellPartialCapture(bool enabled, int minValid = -1) {
+            SkylineCubeShellStore.PartialCapture = enabled;
+            if (minValid > 0) {
+                SkylineCubeShellStore.PartialMinValidChunks = Math.Clamp(minValid, 1, 3);
             }
             return SkylineCubeShellStore.Survey();
         }
