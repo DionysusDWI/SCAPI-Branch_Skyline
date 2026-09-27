@@ -154,6 +154,28 @@ namespace Game {
             set => SkylineLod.ExternalShaderHooked = value;
         }
 
+        // ---------------------------------------------------------------- v0.1.14：球形加载窗
+
+        /// <summary>
+        /// 球形加载窗总开关（**默认关闭** = 与 2D 加载逐位一致）。打开后相机的 update location 走
+        /// 椭球判据 `dx² + (dy/m)² + dz² ≤ content²`（m = `SubsystemSky.VisibilityRangeYMultiplier`，
+        /// 竖直用"该列内容带 bottom..top"）——相机远高于地形时，正下方的列不再被强制常驻
+        /// （远景交给超视距 LOD）；已卸载列的内容带会被记住，避免"卸载→未知→又装回"的抖动。
+        /// </summary>
+        public static bool SphereLoadingEnabled { get; set; }
+
+        /// <summary>当前已分配的区块列数（验证球形加载窗用）。</summary>
+        public static int AllocatedChunkCount =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain?.AllocatedChunks?.Length ?? -1;
+
+        /// <summary>球形加载窗诊断：开关 / 已分配列数 / 内容带缓存条数 / 竖直系数。</summary>
+        public static string SphereLoadingDescribe() {
+            TerrainUpdater updater = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater;
+            float ym = GameManager.Project?.FindSubsystem<SubsystemSky>(true)?.VisibilityRangeYMultiplier ?? 1f;
+            return $"sphereLoading enabled={SphereLoadingEnabled} allocatedChunks={AllocatedChunkCount} "
+                + $"bandCache={updater?.ColumnBandCacheCount ?? -1} yMultiplier={ym:0.##}";
+        }
+
         /// <summary>LOD 网格元数据（层/单元尺寸/半径/索引数），供光影包读取。</summary>
         public static string LodMeshMetadata() => SkylineLod.MeshMetadata();
 

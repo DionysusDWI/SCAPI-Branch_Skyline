@@ -119,6 +119,12 @@ namespace Game {
         public struct UpdateLocation {
             public Vector2 Center;
 
+            /// <summary>[v0.1.14] 相机/玩家的世界 y —— 球形加载窗要用（2D 调用方保持 0）。</summary>
+            public float CenterY;
+
+            /// <summary>[v0.1.14] 是否对该更新地点启用**球形（椭球）加载窗**：竖直方向按"列内容带"裁剪。</summary>
+            public bool SphereWindow;
+
             public Vector2? LastChunksUpdateCenter;
 
             public float VisibilityDistance;
@@ -267,9 +273,38 @@ namespace Game {
                 || !value.LastChunksUpdateCenter.HasValue
                 || Vector2.DistanceSquared(center, value.LastChunksUpdateCenter.Value) > 64f) {
                 value.Center = center;
+                value.CenterY = 0f;
+                value.SphereWindow = false;
                 value.VisibilityDistance = visibilityDistance;
                 value.ContentDistance = contentDistance;
                 value.LastChunksUpdateCenter = center;
+                m_pendingLocations[locationIndex] = value;
+            }
+        }
+
+        /// <summary>
+        /// [v0.1.14] 带 y 的更新地点：`SkylineRuntime.SphereLoadingEnabled` 打开时启用**球形加载窗**——
+        /// 椭球判据 `dx² + (dy/m)² + dz² ≤ content²`（m = `SubsystemSky.VisibilityRangeYMultiplier`，
+        /// 与雾/`notes/64` 视觉球一致），竖直方向用"该列的内容带 bottom..top"，
+        /// 未加载过的新列按 2D 保守处理（见 `IsChunkInRangeForUpdate`）。
+        /// 默认关闭 → 与 2D 行为逐位一致。
+        /// </summary>
+        public virtual void SetUpdateLocation(int locationIndex, Vector3 center, float visibilityDistance, float contentDistance) {
+            contentDistance = MathUtils.Max(contentDistance, visibilityDistance);
+            m_updateParameters.Locations.TryGetValue(locationIndex, out UpdateLocation value);
+            Vector2 centerXZ = center.XZ;
+            if (contentDistance != value.ContentDistance
+                || visibilityDistance != value.VisibilityDistance
+                || MathF.Abs(center.Y - value.CenterY) > 8f
+                || value.SphereWindow != SkylineRuntime.SphereLoadingEnabled
+                || !value.LastChunksUpdateCenter.HasValue
+                || Vector2.DistanceSquared(centerXZ, value.LastChunksUpdateCenter.Value) > 64f) {
+                value.Center = centerXZ;
+                value.CenterY = center.Y;
+                value.SphereWindow = SkylineRuntime.SphereLoadingEnabled;
+                value.VisibilityDistance = visibilityDistance;
+                value.ContentDistance = contentDistance;
+                value.LastChunksUpdateCenter = centerXZ;
                 m_pendingLocations[locationIndex] = value;
             }
         }
@@ -401,7 +436,9 @@ namespace Game {
         }
 
         public virtual void PrepareForDrawing(Camera camera) {
-            SetUpdateLocation(camera.GameWidget.PlayerData.PlayerIndex, camera.ViewPosition.XZ, m_subsystemSky.VisibilityRange, 64f);
+            // [v0.1.14] 相机的更新地点带 y：`SkylineRuntime.SphereLoadingEnabled` 打开时走球形加载窗
+            // （默认关 → 内部按 2D 处理，行为与原来逐位一致）。
+            SetUpdateLocation(camera.GameWidget.PlayerData.PlayerIndex, camera.ViewPosition, m_subsystemSky.VisibilityRange, 64f);
             if (m_synchronousUpdateFrame == Time.FrameIndex) {
                 List<TerrainChunk> list = DetermineSynchronousUpdateChunks(camera.ViewPosition, camera.ViewDirection);
                 if (list.Count > 0) {
@@ -467,11 +504,101 @@ namespace Game {
             return false;
         }
 
+        // ============================================================================================
+        // [v0.1.14] 球形加载窗（里程碑 3："球形视距 + 32³ 球形加载"的第一步）
+        //   * 2D 判据（原版）＝ |Δxz| ≤ content；
+        //   * 球形判据（`SkylineRuntime.SphereLoadingEnabled`）＝ dx²+(dy/m)²+dz² ≤ content²，
+        //     其中 dy 取"相机 y 到该列**内容带** bottom..top 的距离"（相机在带内 → dy=0，退化为 2D），
+        //     m = `SubsystemSky.VisibilityRangeYMultiplier`（与雾/notes/64 视觉球同一常数）；
+        //   * 列被卸载时把它的内容带记进 `m_columnBandCache`，避免"卸载→未知→又装回来"的抖动；
+        //   * 从未加载过的新列按 2D 保守处理（世界生成不会因为"高度未知"而被跳过）。
+        // ============================================================================================
+
+        readonly Dictionary<long, int> m_columnBandCache = [];
+
+        /// <summary>已缓存"内容带"的列数（诊断用）。</summary>
+        public int ColumnBandCacheCount => m_columnBandCache.Count;
+
+        bool IsChunkInRangeForUpdate(Vector2 chunkCenter, ref UpdateLocation location) {
+            if (!location.SphereWindow) {
+                return IsChunkInRange(chunkCenter, ref location);
+            }
+            float dx = chunkCenter.X - location.Center.X;
+            float dz = chunkCenter.Y - location.Center.Y;
+            float h2 = dx * dx + dz * dz;
+            float r = location.ContentDistance;
+            if (h2 > r * r) {
+                return false;
+            }
+            int cx = (int)MathF.Floor(chunkCenter.X) >> TerrainChunk.SizeBits;
+            int cz = (int)MathF.Floor(chunkCenter.Y) >> TerrainChunk.SizeBits;
+            if (!TryGetColumnBand(cx, cz, out int top, out int bottom)) {
+                return true;                                  // 高度未知（从未加载过）→ 保守
+            }
+            float dy = location.CenterY < bottom
+                ? bottom - location.CenterY
+                : (location.CenterY > top ? location.CenterY - top : 0f);
+            float m = MathF.Max(m_subsystemSky?.VisibilityRangeYMultiplier ?? 1f, 0.05f);
+            dy /= m;
+            return h2 + dy * dy <= r * r;
+        }
+
+        bool IsChunkInRangeForUpdate(Vector2 chunkCenter, UpdateLocation[] locations) {
+            for (int i = 0; i < locations.Length; i++) {
+                if (IsChunkInRangeForUpdate(chunkCenter, ref locations[i])) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>取某列的"内容带"（bottom..top）：已加载且光照/高度已算好 → 现场采样 5 个角/中心；
+        /// 否则用卸载时缓存的带；都没有 → 返回 false（调用方按保守处理）。</summary>
+        bool TryGetColumnBand(int cx, int cz, out int top, out int bottom) {
+            TerrainChunk chunk = m_terrain.GetChunkAtCoords(cx, cz);
+            if (chunk != null && chunk.State >= TerrainChunkState.InvalidVertices1) {
+                int tTop = TerrainChunk.MinHeight;
+                int tBottom = TerrainChunk.HeightMinusOne;
+                for (int i = 0; i < 5; i++) {
+                    int lx = i == 0 ? TerrainChunk.Size / 2 : (i <= 2 ? 0 : TerrainChunk.SizeMinusOne);
+                    int lz = i == 0 ? TerrainChunk.Size / 2 : (i == 1 || i == 3 ? 0 : TerrainChunk.SizeMinusOne);
+                    int h = chunk.GetTopHeightFast(lx, lz);
+                    if (h < TerrainChunk.MinHeight) {
+                        h = TerrainChunk.MinHeight;
+                    }
+                    tTop = MathUtils.Max(tTop, h);
+                    tBottom = MathUtils.Min(tBottom, chunk.GetBottomHeightFast(lx, lz));
+                }
+                top = tTop;
+                bottom = tBottom;
+                return true;
+            }
+            long key = ((long)cx << 32) | (uint)cz;
+            if (m_columnBandCache.TryGetValue(key, out int packed)) {
+                top = (packed >> 11) + TerrainChunk.MinHeight;
+                bottom = (packed & 0x7FF) + TerrainChunk.MinHeight;
+                return true;
+            }
+            top = bottom = 0;
+            return false;
+        }
+
+        void RememberColumnBand(TerrainChunk chunk) {
+            if (!TryGetColumnBand(chunk.Coords.X, chunk.Coords.Y, out int top, out int bottom)) {
+                return;
+            }
+            if (m_columnBandCache.Count > 40000) {
+                m_columnBandCache.Clear();                    // 简单上限：极端飞行时不要无限增长
+            }
+            long key = ((long)chunk.Coords.X << 32) | (uint)chunk.Coords.Y;
+            m_columnBandCache[key] = ((top - TerrainChunk.MinHeight) << 11) | (bottom - TerrainChunk.MinHeight);
+        }
+
         public virtual bool AllocateAndFreeChunks(UpdateLocation[] locations) {
             bool result = false;
             TerrainChunk[] allocatedChunks = m_terrain.AllocatedChunks;
             foreach (TerrainChunk terrainChunk in allocatedChunks) {
-                if (!IsChunkInRange(terrainChunk.Center, locations)) {
+                if (!IsChunkInRangeForUpdate(terrainChunk.Center, locations)) {
                     bool noToFree = false;
                     ModsManager.HookAction(
                         "ToFreeChunks",
@@ -488,6 +615,7 @@ namespace Game {
                     foreach (SubsystemBlockBehavior blockBehavior in m_subsystemBlockBehaviors.BlockBehaviors) {
                         blockBehavior.OnChunkDiscarding(terrainChunk);
                     }
+                    RememberColumnBand(terrainChunk);          // [v0.1.14] 卸载前记住内容带（球形窗用）
                     m_subsystemTerrain.TerrainSerializer.SaveChunk(terrainChunk);
                     m_terrain.FreeChunk(terrainChunk);
                 }
@@ -500,7 +628,7 @@ namespace Game {
                         Vector2 chunkCenter = new((k + 0.5f) * TerrainChunk.Size, (l + 0.5f) * TerrainChunk.Size);
                         TerrainChunk chunkAtCoords = m_terrain.GetChunkAtCoords(k, l);
                         if (chunkAtCoords == null) {
-                            if (IsChunkInRange(chunkCenter, ref locations[j])) {
+                            if (IsChunkInRangeForUpdate(chunkCenter, ref locations[j])) {
                                 result = true;
                                 m_terrain.AllocateChunk(k, l);
                                 DowngradeChunkNeighborhoodState(new Point2(k, l), 0, TerrainChunkState.NotLoaded, false);

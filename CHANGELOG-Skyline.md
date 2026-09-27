@@ -3,6 +3,29 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.14] - 2026-09-27
+
+第二十四个版本：**球形加载窗**（里程碑 3"球形视距 + 球形加载机制"的第一步）——
+把相机的 update location 从"2D 圆"换成"**3D 椭球 + 列内容带**"。**默认关闭**（`skyline.SphereLoadingEnabled`）。
+
+**本版相对 v0.1.13 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **新增 A（球形加载窗）** | `UpdateLocation` 增加 `CenterY`/`SphereWindow`，新增 `SetUpdateLocation(int, Vector3, vis, content)`（`PrepareForDrawing` 改用；2D 重载保持不变）。判据 `dx² + (dy/m)² + dz² ≤ content²`：`dy` = 相机 y 到**该列内容带** `bottom..top` 的距离（相机在带内 → 退化为 2D），`m = SubsystemSky.VisibilityRangeYMultiplier`（与雾/`notes/64` 视觉球同一常数，随天气变化） |
+| **新增 B（防抖动）** | 内容带来源：已加载且 `State ≥ InvalidVertices1` → 现场采样 5 个角/中心；否则查 `m_columnBandCache`（**卸载前记住**）；再否则按 2D 保守（未加载过的新列不会被"高度未知"跳过 → 世界生成不受影响） |
+| 诊断 | `skyline.SphereLoadingDescribe()`（开关/已分配列数/内容带缓存/竖直系数）、`skyline.AllocatedChunkCount` |
+
+### Verified
+
+* **高空（y=420，视距 128）**：开关关 → 已分配列 **206**、进程工作集 **1036.4 MB**；
+  开关开 → 列 **36（-82.5%）**、工作集 **964.5 MB（-71.9 MB ≈ -7%）**，25 s 内稳定，`bandCache=170`；
+* **地表（y=70.5）**：开 → 198~200 列（基线 206），40 s soak 稳定（无"卸载↔装回"抖动），
+  fps 28.6~30.2（上限 30）；
+* **下降回地表**：列数恢复 200，数据完好（`cell(3104,68,7937)=SnowBlock light=15`），无"掉进未加载地形"；
+* **默认关闭零影响**：关开关 @420 列数 = 206（与历史一致）；
+* 游戏日志无新增异常（仅既存的 `Models/Alpaca*` 资源缺失）；构建 `Survivalcraft.Windows` Release **0 警告 0 错误**。
+
 ## [v0.1.13] - 2026-09-27
 
 第二十三个版本：**32³ 三维窗口账本（里程碑 3 的 P2 第一刀）**——在真实游戏循环里量出
