@@ -3,6 +3,35 @@
 本文件只记录 **Skyline 分支相对上游 SCAPI 源码**的特化改动。
 格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)。
 
+## [v0.1.42] - 2026-09-27
+
+第五十二个版本：**大规模建筑压测 #2 + `op:shape` 写入门禁**（桥侧修复）—— 压测顺手抓到并修掉
+"`op:shape` 报成功、实际一格没写"的假成功问题。
+
+**本版相对 v0.1.41 的变更**：
+
+| 类别 | 内容 |
+|---|---|
+| **修复 A（写入门禁）** | `Shapes.Run` 逐格走 `AgentActions.EnsureWriteTargetLoaded(...)`（与 `op:cell` 同一条门禁；`force` 语义一致），写入后**逐格回读**校验；返回新增 `cellsWritten`（= 校验通过数）、`verifyMismatches`、`cellsSkippedNotLoaded`、`forced`，未写入时附 `hint`（含 `firstError`） |
+| **修复 B（误导提示）** | `EnsureWriteTargetLoaded` 改 `internal`（供 Shapes 复用），并把"列根本没分配"的提示改对：**`force:true` 在这种情况下没用**（没有存储可写），正确路径是 `ChunkResidencyMode=true` + `EnsureRegionLoaded(x1,z1,x2,z2)` + 轮询 `ResidencyStatus` 到 `contentsReady == chunks` |
+
+### Verified（AgentLab；压测三栋：大厅 13,736 格 / 高塔 15,752 格（y 68..323）/ 实心 32³ 32,768 格）
+
+| 场景 | planned | written | skipped | **skippedNotLoaded** | verifyMismatches |
+|---|---|---|---|---|---|
+| 远端建塔（玩家 ~130 m 外） | 15,752 | **0** | 0 | **15,752** | 0 |
+| 同上 + `force:true` | 15,752 | 0 | 0 | **15,752**（提示已改） | 0 |
+| **先 `EnsureRegionLoaded`（4 列/8 MB）再建塔** | 15,752 | **15,752** | 0 | **0** | **0**（6.7 ms） |
+| 大厅重跑（玩家 30 m 内） | 13,736 | 10,986 | 2,750 | 0 | 0 |
+| 实心 32³（驻留 12 列/24 MB） | 32,768 | **32,768** | 0 | 0 | **0**（46.4 ms） |
+
+* **单位成本**：空心壳 **0.44 µs/格**（13,736 / 6 ms），实心体 **1.17 µs/格**（32,768 / 38.5 ms）——实心约 2.7×；
+* **压测后门禁**：`CheckChunkAddressing` **2816 格 / 0 不一致**；`CubeInvariantsCheck(4096)` **4122 格 / 0 不一致**；
+* **光影回归**：`GpuShadowCapture` 在三栋在场时 ok、覆盖 155,565 px（14.836%）、**自检 True**（10 点）、
+  200 列 + 200 alpha 列、近图 791,462 px / 0.25 m/texel；fps 29.7~30；进程 749 → 826 MB（含 12 列驻留 ≈ 24 MB）。
+
+证据：`data/sessions/skyline-v0142/`、`notes/115`。桥工程构建：1 个既有警告 0 错误。
+
 ## [v0.1.41] - 2026-09-27
 
 第五十一个版本：**Axiom（用户给定仓库）对照归档 + `op:shape mode=spiral`** —— 学习项 #6 的首轮归档，
