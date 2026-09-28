@@ -40,6 +40,12 @@ namespace Game {
         /// <summary>灯的半径 = 光强 × 这个系数（SC 的光每格衰减 1，光强 15 ≈ 15 格）。</summary>
         public static float RadiusPerLight { get; set; } = 1.0f;
 
+        /// <summary>[v0.1.106] **彩色光源雾**强度（0 = 关）。口径来自 Iris 光影包
+        /// **Complementary Reimagined** 的 `lib/atmospherics/fog/coloredLightFog.glsl`：
+        /// 那里沿视线在**彩色光照体**（`GetLightVolume`，由 `lib/voxelization/` 写入）里步进积分；
+        /// 我们没有体素化那套设施，改用**同一份 K 近邻灯列表**给雾上色（适配，如实标注）。</summary>
+        public static float FogTintStrength { get; set; } = 0.6f;
+
         public const int ShaderMaxLights = 8;
 
         public sealed class Emitter {
@@ -54,6 +60,10 @@ namespace Game {
         static readonly List<(float DistSq, Emitter Emitter)> m_collected = [];
         static readonly Vector4[] m_posRadius = new Vector4[ShaderMaxLights];
         static readonly Vector3[] m_colors = new Vector3[ShaderMaxLights];
+        /// <summary>[v0.1.106] 收集到的灯的**包围球**（xyz=中心, w=半径）。着色器先用它做一次
+        /// "这个片元到底在不在任何灯的影响范围内"的判定 —— 不在就整段跳过（实测：不加这一步的
+        /// 全屏循环代价是 **−8.8%**，见 notes/201）。</summary>
+        static Vector4 m_bounds;
         static int m_count;
         static long m_recordedChunks, m_collectFrames;
         static string m_lastError = "";
@@ -162,6 +172,20 @@ namespace Game {
                 }
                 m_collected.Sort(static (a, b) => a.DistSq.CompareTo(b.DistSq));
                 int n = Math.Min(Math.Min(MaxLights, ShaderMaxLights), m_collected.Count);
+                // 包围球：中心 = 这些灯的均值，半径 = 中心到最远"灯位置 + 灯半径"的距离
+                Vector3 sum = Vector3.Zero;
+                for (int i = 0; i < n; i++) {
+                    Emitter l = m_collected[i].Emitter;
+                    sum += new Vector3(l.X + 0.5f, l.Y + 0.5f, l.Z + 0.5f);
+                }
+                Vector3 center = n > 0 ? sum / n : Vector3.Zero;
+                float boundR = 0f;
+                for (int i = 0; i < n; i++) {
+                    Emitter l = m_collected[i].Emitter;
+                    float lr = MathF.Max(l.Amount * RadiusPerLight, 1f);
+                    boundR = MathF.Max(boundR, Vector3.Distance(center, new Vector3(l.X + 0.5f, l.Y + 0.5f, l.Z + 0.5f)) + lr);
+                }
+                m_bounds = new Vector4(center.X, center.Y, center.Z, boundR);
                 for (int i = 0; i < n; i++) {
                     Emitter l = m_collected[i].Emitter;
                     float radius = MathF.Max(l.Amount * RadiusPerLight, 1f);
@@ -195,6 +219,9 @@ namespace Game {
             if (name.Contains("Torch")) {
                 return new Vector3(1.00f, 0.78f, 0.45f);      // 火把：暖黄
             }
+            if (name.Contains("Magma") || name.Contains("Lava")) {
+                return new Vector3(1.00f, 0.55f, 0.25f);      // 岩浆：橙红（本轮 A/B 就靠它看得出来）
+            }
             if (name.Contains("Lamp") || name.Contains("Lantern") || name.Contains("Light")) {
                 return new Vector3(1.00f, 0.92f, 0.70f);      // 灯/灯笼：暖白
             }
@@ -221,6 +248,9 @@ namespace Game {
             }
             shader.GetParameter("u_plPosRadius", true).SetValue(flat);
             shader.GetParameter("u_plColor", true).SetValue(cols);
+            shader.GetParameter("u_plBounds", true).SetValue(m_bounds);
+            shader.GetParameter("u_plTint", true)
+                .SetValue(Enabled && m_count > 0 ? MathF.Max(FogTintStrength, 0f) : 0f);
         }
 
         public static string Describe() {

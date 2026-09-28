@@ -769,6 +769,8 @@ float u_shadowKernelSlopeScale;
 // [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色），由 `SkylinePointLights.Bind` 写好
 float u_plStrength;
 float u_plCount;
+float u_plTint;
+float4 u_plBounds;
 float4 u_plPosRadius[8];
 float3 u_plColor[8];
 float u_shadowEnable;
@@ -1094,6 +1096,10 @@ void main(
 	// 地形片元没有法线 ⇒ 只有距离衰减与颜色，没有 N·L 那一项（notes/201 如实记）。
 	if (u_plStrength > 0.0 && u_plCount > 0.5)
 	{
+		// 先做一次包围球判定：**不在任何灯的影响范围内就整段跳过**（不加这一步的全屏循环实测 −8.8%）
+		float3 plBound = v_world - u_plBounds.xyz;
+		if (dot(plBound, plBound) < u_plBounds.w * u_plBounds.w)
+		{
 		float3 plAcc = float3(0.0, 0.0, 0.0);
 		for (int pli = 0; pli < 8; pli++)
 		{
@@ -1111,6 +1117,7 @@ void main(
 			plAcc += u_plColor[pli] * max(plAtt, 0.0);
 		}
 		result.rgb += plAcc * u_plStrength;
+		}
 	}
 	result.rgb = lerp(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（替换被 FogDisabled 置 0 的原版雾）：沿视线 8 步积分
@@ -1154,6 +1161,39 @@ void main(
 				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
 				// [v0.1.70] 雾色与游戏按天空/天气算的 u_fogColor 混合：下雨/黄昏时雾会跟着变色
 				float3 vfCol = lerp(u_vfColor, max(u_fogColor, float3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				// [v0.1.106] **彩色光源雾**（Iris 光影包 Complementary 的 `coloredLightFog.glsl` 适配）：
+				// 用它那套「沿视线在彩色光照体里积分」的思路，但我们没有体素化设施，
+				// 改用**同一份 K 近邻灯列表**给雾上色；先做包围球判定，不在灯附近就整段跳过。
+				if (u_plTint > 0.0 && u_plCount > 0.5)
+				{
+					float3 plb = v_world - u_plBounds.xyz;
+					if (dot(plb, plb) < u_plBounds.w * u_plBounds.w)
+					{
+						float3 plTint = float3(0.0, 0.0, 0.0);
+						float plW = 0.0;
+						for (int ti = 0; ti < 8; ti++)
+						{
+							if (float(ti) >= u_plCount)
+							{
+								break;
+							}
+							float4 tpr = u_plPosRadius[ti];
+							float td = length(tpr.xyz - v_world);
+							if (td >= tpr.w)
+							{
+								continue;
+							}
+							float ta = (exp(-td / max(tpr.w * 1.5, 0.1)) - 0.513417) / (1.0 - 0.513417);
+							plTint += u_plColor[ti] * max(ta, 0.0);
+							plW += max(ta, 0.0);
+						}
+						if (plW > 0.0)
+						{
+							float tk = saturate(plW) * u_plTint;
+							vfCol = lerp(vfCol, plTint / max(plW, 1e-4), tk);
+						}
+					}
+				}
 				result.rgb = lerp(result.rgb, vfCol, vfAlpha);
 				if (u_vfSunShaft > 0.0)
 				{
@@ -1213,6 +1253,8 @@ uniform float u_shadowKernelSlopeScale;
 // [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色）
 uniform float u_plStrength;
 uniform float u_plCount;
+uniform float u_plTint;
+uniform vec4 u_plBounds;
 uniform vec4 u_plPosRadius[8];
 uniform vec3 u_plColor[8];
 uniform float u_shadowEnable;
@@ -1522,6 +1564,10 @@ void main()
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）
 	if (u_plStrength > 0.0 && u_plCount > 0.5)
 	{
+		// 包围球提前退出（与 HLSL 段同一算法）
+		vec3 plBound = v_world - u_plBounds.xyz;
+		if (dot(plBound, plBound) < u_plBounds.w * u_plBounds.w)
+		{
 		vec3 plAcc = vec3(0.0, 0.0, 0.0);
 		for (int pli = 0; pli < 8; pli++)
 		{
@@ -1539,6 +1585,7 @@ void main()
 			plAcc += u_plColor[pli] * max(plAtt, 0.0);
 		}
 		result.rgb += plAcc * u_plStrength;
+		}
 	}
 	result.rgb = mix(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（与 HLSL 段同一算法）
@@ -1582,6 +1629,37 @@ void main()
 				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
 				// [v0.1.70] 雾色与 u_fogColor 混合（与 HLSL 段同一算法）
 				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				// [v0.1.106] 彩色光源雾（与 HLSL 段同一算法）
+				if (u_plTint > 0.0 && u_plCount > 0.5)
+				{
+					vec3 plb = v_world - u_plBounds.xyz;
+					if (dot(plb, plb) < u_plBounds.w * u_plBounds.w)
+					{
+						vec3 plTint = vec3(0.0, 0.0, 0.0);
+						float plW = 0.0;
+						for (int ti = 0; ti < 8; ti++)
+						{
+							if (float(ti) >= u_plCount)
+							{
+								break;
+							}
+							vec4 tpr = u_plPosRadius[ti];
+							float td = length(tpr.xyz - v_world);
+							if (td >= tpr.w)
+							{
+								continue;
+							}
+							float ta = (exp(-td / max(tpr.w * 1.5, 0.1)) - 0.513417) / (1.0 - 0.513417);
+							plTint += u_plColor[ti] * max(ta, 0.0);
+							plW += max(ta, 0.0);
+						}
+						if (plW > 0.0)
+						{
+							float tk = clamp(plW, 0.0, 1.0) * u_plTint;
+							vfCol = mix(vfCol, plTint / max(plW, 1e-4), tk);
+						}
+					}
+				}
 				result.rgb = mix(result.rgb, vfCol, vfAlpha);
 				if (u_vfSunShaft > 0.0)
 				{
