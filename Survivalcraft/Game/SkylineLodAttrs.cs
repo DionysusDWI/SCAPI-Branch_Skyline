@@ -135,6 +135,10 @@ namespace Game {
             //   地面 `PASS` 但**只比了 6 个像素** —— 那是"没东西可比的通过"，不是"两路一致"的证据。
             //   这里在自检期间临时关掉它，让 LOD 把整条带画出来；结束时**连网格一起还原**。
             bool savedRestrictLod = SkylineCubeShellStore.RestrictLod;
+            // [v0.1.99] 云层阴影的相位含时间（`CloudWind × Time.RealTime`）⇒ 两次抓帧之间会变，
+            //   而**这条自检比的就是"两次抓帧必须逐位一致"**（属性开/关只是顶点布局不同）。
+            //   所以自检期间把它关掉：它检查的是顶点属性/着色器管道，不是云影。
+            bool savedCloudShadow = SkylineLodCloudShadow.Enabled;
             try {
                 Camera camera = ActiveCamera;
                 if (camera == null) {
@@ -144,6 +148,7 @@ namespace Game {
                 }
                 size = Math.Clamp(size <= 0 ? 256 : size, 64, Math.Min(Display.MaxTextureSize, 1024));
                 SkylineCubeShellStore.RestrictLod = false;
+                SkylineLodCloudShadow.Enabled = false;
                 SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层
                 SkylineLod.SelfShadowStrength = 0f;
                 SkylineRuntime.LodAttrShaderOn = false;
@@ -181,6 +186,7 @@ namespace Game {
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
+                SkylineLodCloudShadow.Enabled = savedCloudShadow;
                 RebuildNow();
                 if (attrImage == null || bakedImage == null || gpuImage == null) {
                     result["ok"] = false;
@@ -229,6 +235,7 @@ namespace Game {
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
+                SkylineLodCloudShadow.Enabled = savedCloudShadow;
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;

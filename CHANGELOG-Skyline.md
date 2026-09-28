@@ -7,6 +7,59 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.99] - 2026-09-28
+
+第一百零六个版本：**LOD 参与云层阴影**（里程碑 2.3 的第二项：用户口径里的"云层阴影"）。
+
+### 为什么这样做
+
+体积云画在**天空穹顶**上，自己不给地面投任何影子。"云遮住太阳 → 地面变暗"在视觉上是**低频**的
+（云是几百米尺度），所以不必逐体素做昂贵可见性：沿**太阳方向**在云带里积一次光学厚度、
+乘进 LOD 的顶点色即可；而 LOD 的坡向/自阴影本来也是烘进顶点色的 ⇒ **CPU 烘焙与 GPU 体积着色两条路径自动一致**。
+
+### 与看得见的云**同源**（这是这一项的关键）
+
+`SkylineLodCloudShadow` 逐式复制 `SkylineVolumetricSky` 的 shader：
+`hash12` / `vnoise2` / `volDensityAt`（竖向剖面 + 高度剪切 + 双八度 0.65/0.35）、
+`wind = CloudWind × Time.RealTime`（与 `BindBand` 的 `wind * time` 同相位）、
+以及 `od *= dt * density` / `alpha = 1 - exp(-od)` 这套光学厚度口径。
+挂在 LOD 顶点色 gain 上：`1 - Depth·(1 - factor)`，`Depth` 默认 **0.55**；
+夜里（`sunAmount < 0.05`）与太阳贴近地平线时直接返回 1。
+桥开关：`skyline.LodCloudShadow`（默认开）/ `skyline.LodCloudShadowDepth` / `skyline.LodCloudShadowSelfCheck()`。
+
+### 实测（`skyline-v0199-cloud-shadow.py`，`ok=True`）
+
+| 判据 | 实测 |
+|---|---|
+| 确定性自检 | `ok=true`；沿风向 64 个采样点 **min 0.004 / max 1 / avg 0.477**（常数会失败） |
+| 真的在参与 | `cloudShadowSampledCells=189`、**`cloudShadowAffectedCells=102`（54%）**、`minFactor=0.0403`、`avgFactor=0.6343` |
+| 关掉后 | `sampled=affected=0`、`min=avg=1`（逐位回到 v0.1.98） |
+| 画面可见 | 1600 px 截图，**稳定像素掩膜**上开/关差 **13,466 px** |
+
+### 如实记
+
+* **同设置连拍噪声可以极大**：云影相位含 `Time.RealTime`，风不冻结时两张"同设置"截图差 **525,123 px**
+  ⇒ 云影 A/B **必须冻结 `CloudWind`**（脚本已改）；
+* 第二次运行时云影只影响 2/88 格，是因为**同一工作区的另一个会话正在驱动同一个游戏**
+  （`skyline-v0198-farfield-matrix.py` 移动相机/改 LOD 状态）⇒ 那次数据不可用；
+  本轮发现后**立即停止了自己的测量**，并把"同一时刻只允许一方驱动桥"写进 notes/178。
+
+### 顺带修掉自己引入的一个真问题（门禁抓到的）
+
+云影相位含时间 ⇒ 自检两次抓帧的顶点色不同，**打破 v0.1.61 起的"属性开/关逐位一致"判据**
+（门禁报 `strideContract identical=False`）。两处改动：
+
+* `AttrSelfCheck` 期间**临时关掉云影**（它检查的是顶点属性/着色器管道，不是云影）——
+  与 v0.1.95 "自检临时关 `RestrictLod`"同一套脚手架口径；
+* 云影是**烘进顶点色**的低频项 ⇒ 云的相位走了、影子却不跟：新增 `RefreshSeconds`（默认 **2 s**）
+  周期性请一次 LOD 重建，让影子**真的跟着云走**（重建在毫秒级）。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0199/`（`cloud-shadow.json`、`cloudshadow-on/off-*.png`）、`notes/178`。
+
 ## [v0.1.98] - 2026-09-28
 
 第一百零五个版本：**加载距离之外的 LOD 统一到 32³** + **阴影按"最小体素"参与**，并附一份**否定证据**。

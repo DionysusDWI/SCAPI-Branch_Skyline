@@ -166,6 +166,7 @@ namespace Game {
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
+        static double m_nextCloudShadowRebuild;   // [v0.1.99] 云影周期性重建的时间点
 
         /// <summary>
         /// [v0.1.51] 让 LOD 立刻重建一次网格 —— 壳仓新增/淘汰壳之后调用（壳一多，LOD 要让位的那片就变了，
@@ -506,6 +507,14 @@ namespace Game {
                 // 它在 `SkylineLodRefresh.cs` 里，但那个文件也是 `partial class SkylineLod`，所以直接调。
                 PruneStamps();
                 Harvest();
+                // [v0.1.99] 里程碑 2.3：**云影要跟着云走**。云影是烘进顶点色的低频项，
+                //   而云的相位随 `Time.RealTime` 变 —— 所以开着云影时按 `RefreshSeconds`（默认 2 s）
+                //   主动请一次重建；实测重建在毫秒级，代价可接受（见 notes/178）。
+                if (SkylineLodCloudShadow.Enabled && SkylineLodCloudShadow.RefreshSeconds > 0f
+                    && now >= m_nextCloudShadowRebuild) {
+                    m_nextCloudShadowRebuild = now + MathF.Max(SkylineLodCloudShadow.RefreshSeconds, 0.25f);
+                    m_dirty = true;
+                }
                 if (m_dirty && now >= m_nextRebuild) {
                     RebuildMesh();
                     m_nextRebuild = now + MathF.Max(MeshRebuildSeconds, 0.5f);
@@ -1342,6 +1351,9 @@ namespace Game {
         static void RebuildMeshCore(Dictionary<long, Cell> dict, int cellShift,
                                     float minDist, float maxDist, int layer,
                                     Dictionary<long, Cell> shadowDict = null, int shadowCellSize = 0) {
+            if (layer == 0) {
+                SkylineLodCloudShadow.ResetStats();     // [v0.1.99] 云影统计按"最粗那一层"重建一次
+            }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
                 return;
@@ -1532,8 +1544,17 @@ namespace Game {
                 Vector3 topNormal = SlopeNormal(dict, cx, cz, topHeight, cellSize);
                 bool gpuShade = attr && SkylineRuntime.LodAttrShaderOn;
                 Color cellLight = cellBase;
-                if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f) {
+                if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f || SkylineLodCloudShadow.Enabled) {
                     float gain = 1f;
+                    // [v0.1.99] 里程碑 2.3：**云层阴影**（与体积云 shader 同源的低频项）——
+                    //   用户口径里的"云层阴影"：云遮住太阳 → 地面变暗。它是低频的，烘进顶点色即可，
+                    //   而且这样 CPU 烘焙/GPU 体积着色两条路径**自动一致**（与自阴影同一做法）。
+                    if (SkylineLodCloudShadow.Enabled) {
+                        float cloudFactor = SkylineLodCloudShadow.Factor(
+                            x0 + cellSize * 0.5f, topHeight, z0 + cellSize * 0.5f, lodSun, m_sunAmount);
+                        SkylineLodCloudShadow.Note(cloudFactor);
+                        gain *= SkylineLodCloudShadow.ShadeFactor(cloudFactor);
+                    }
                     // 坡向明暗：**GPU 路径不在 CPU 烘焙**（着色器按顶点法线逐片元算同一个式子），否则会算两遍。
                     if (SlopeShadingStrength > 0f && !gpuShade) {
                         // v0.1.19：坡向明暗按日照量淡出
@@ -1989,6 +2010,14 @@ namespace Game {
                 ["minVoxelShadowSizeBlocks"] = UniformBeyondLoaded
                     ? (CellSize << Math.Clamp(UniformExtraShift, 0, 3)) : CellSize,
                 ["minVoxelShadowMarchBlocks"] = CellSize,
+                // [v0.1.99] 里程碑 2.3：云层阴影（与体积云 shader 同源）
+                ["cloudShadowEnabled"] = SkylineLodCloudShadow.Enabled,
+                ["cloudShadowDepth"] = SkylineLodCloudShadow.Depth,
+                ["cloudShadowSteps"] = SkylineLodCloudShadow.Steps,
+                ["cloudShadowSampledCells"] = SkylineLodCloudShadow.SampledCells,
+                ["cloudShadowAffectedCells"] = SkylineLodCloudShadow.AffectedCells,
+                ["cloudShadowMinFactor"] = Math.Round(SkylineLodCloudShadow.LastMinFactor, 4),
+                ["cloudShadowAvgFactor"] = Math.Round(SkylineLodCloudShadow.LastAvgFactor, 4),
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,

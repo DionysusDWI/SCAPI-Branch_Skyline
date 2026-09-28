@@ -171,6 +171,38 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
+        /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），
+        /// 沿太阳方向在云带里积一次、烘进 LOD 顶点色 ⇒ 与"看得见的云"对齐，
+        /// 且 CPU 烘焙 / GPU 体积着色两条路径自动一致（与自阴影同一做法）。
+        /// 关掉 = 逐位回到 v0.1.98（A/B 用）。
+        /// </summary>
+        public static bool LodCloudShadow {
+            get => SkylineLodCloudShadow.Enabled;
+            set {
+                if (SkylineLodCloudShadow.Enabled != value) {
+                    SkylineLodCloudShadow.Enabled = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.99] 云影**最多压暗多少**（0..1，默认 0.55）。改动会立刻重建 LOD。</summary>
+        public static float LodCloudShadowDepth {
+            get => SkylineLodCloudShadow.Depth;
+            set {
+                float v = Math.Clamp(value, 0f, 1f);
+                if (MathF.Abs(SkylineLodCloudShadow.Depth - v) > 1e-4f) {
+                    SkylineLodCloudShadow.Depth = v;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.99] 云影确定性自检：沿风向移动 64 个采样点，因子必须**有变化**且在 (0,1] 内。</summary>
+        public static string LodCloudShadowSelfCheck() => SkylineLodCloudShadow.SelfCheck();
+
         /// <summary>v0.1.1：LOD 开启时把视图雾的跨度拉远到 LOD 半径的 90%，
         /// 让"视距边缘的真实地形"与 LOD 层共用同一条雾曲线（消除交接跳变）。</summary>
         public static bool LodFogExtend {
