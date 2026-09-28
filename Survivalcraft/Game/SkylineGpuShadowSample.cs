@@ -21,7 +21,19 @@ namespace Game {
     /// 命中近盒就用近图（接触阴影更锐），否则回退远图（512 m → 1 m/texel）。
     /// </summary>
     public static partial class SkylineRuntime {
-        public static bool GpuShadowSampleEnabled { get; set; }
+        /// <summary>[v0.1.112] **太阳阴影采样：默认改为开**（原来默认关）。
+        ///
+        /// 为什么改默认：2026-09-28 复核发现"本分支最显眼的光影功能其实一直没开"
+        /// —— 用户口径是"可以把 Fog 关掉以便于测试光影的视觉效果"，但关雾之后画面里
+        /// **没有投影**（`GpuShadowSampleEnabled=false`）。三条证据支持打开：
+        ///   ①**性能预算过**（`notes/208`：视距 192、混合负载、阴影开着 —— mean 91.8% / p5 78.6% /
+        ///     p1 71.8%，显存 0.69 GB ≤ 7、内存 26.0 GB ≤ 40，六条判据全过）；
+        ///   ②**画面确实更好**（固定机位/钉时刻/冻风：关→开差 296,413 px、maxΔ 143，树影与明暗层次
+        ///     正常，LOD 交接处没有露缝）；
+        ///   ③**夜间那种"整体压暗"的假阴影已被修掉**（见 `ShadowDayFactor`：夜里 40,481 px → 72 px）。
+        /// 不想用就一条调用关掉：`skyline.GpuShadowSampleEnabled=false`（代价与画面证据见 `notes/208`）。
+        /// </summary>
+        public static bool GpuShadowSampleEnabled { get; set; } = true;
 
         public static float GpuShadowSampleStrength { get; set; } = 0.45f;
 
@@ -163,6 +175,9 @@ namespace Game {
                 ["sunYFloor"] = (double)GpuShadowSoftSunYFloor,
                 ["bias"] = (double)GpuShadowSampleBias,
                 ["strength"] = (double)GpuShadowSampleStrength,
+                // [v0.1.112] 实测口径：昼光因子（0=夜 ⇒ 太阳阴影整体消失；1=白天）
+                ["dayFactor"] = (double)ShadowDayFactor,
+                ["dayFactorOverride"] = (double)GpuShadowDayFactorOverride,
                 ["sunRecaptureDeg"] = (double)GpuShadowSunRecaptureDegrees,
                 ["kernel"] = GpuShadowKernel,
                 ["kernelSamples"] = GpuShadowKernel switch {
@@ -406,6 +421,49 @@ namespace Game {
         public static bool ShadowSampleReady =>
             GpuShadowSampleEnabled && m_gpuShadowHasMap && m_gpuShadowRt != null;
 
+        /// <summary>
+        /// **[v0.1.112] 阴影的"昼光因子"**（0..1）：太阳阴影的强度必须跟着**昼光**走。
+        ///
+        /// 为什么必须加：本分支的阴影判定只问"这一点在深度图后面吗"，**不看太阳还照不照得亮**。
+        /// 实测（2026-09-28，`data/sessions/skyline-v0112/shadow-default/`）：正午开/关太阳阴影差
+        /// 30,976 px，而**夜里（timeOfDay=0.75、太阳在地平线下）仍然差 26,651 px**（maxΔ 112）
+        /// —— 夜里没有太阳，却还在按深度图压暗 ⇒ 这是错的。
+        /// 现在把"游戏自己的昼光强度"（`SubsystemSky.SkyLightIntensity`：0=夜、1=白天、晨昏之间线性）
+        /// 乘到阴影项上：夜里 → 0（阴影消失），日出/日落 → 平滑减弱。
+        /// </summary>
+        public static float ShadowDayFactor { get; private set; } = 1f;
+
+        /// <summary>
+        /// **[v0.1.112] 昼光因子的测试覆盖值**：**负值（默认 -1）** = 跟随游戏昼光；
+        /// `0..1` = 固定成该值。**这是给 A/B 用的**：`= 1` 就逐位回到"改之前"的行为
+        /// （阴影强度与太阳在不在天上无关），于是"改前 vs 改后"能在**同一个版本**里对照，
+        /// 不需要留一份旧构建。
+        /// </summary>
+        public static float GpuShadowDayFactorOverride { get; set; } = -1f;
+
+        /// <summary>[v0.1.112] 取"游戏自己的昼光强度"当阴影强度因子（0=夜 / 1=白天 / 晨昏线性）。
+        ///
+        /// 口径说明：用 `SubsystemSky.SkyLightIntensity`（每帧由 `SubsystemSky.Update` 从
+        /// `CalculateLightIntensity(timeOfDay)` 写入），而不是"太阳仰角自己算一个" —— 这样
+        /// **与游戏自己的明暗完全同步**（下雨、日食等调制一起带上），也不会多出一套太阳模型。
+        /// 取不到天空子系统时**保持上一次的值**（不写死 1，免得在极端时序下突然亮一帧）。
+        /// </summary>
+        static void RefreshShadowDayFactor() {
+            try {
+                if (GpuShadowDayFactorOverride >= 0f) {
+                    ShadowDayFactor = Math.Clamp(GpuShadowDayFactorOverride, 0f, 1f);
+                    return;
+                }
+                SubsystemSky sky = GameManager.Project?.FindSubsystem<SubsystemSky>(true);
+                if (sky != null) {
+                    ShadowDayFactor = Math.Clamp(sky.SkyLightIntensity, 0f, 1f);
+                }
+            }
+            catch {
+                // 保持上一次的值（不抛）
+            }
+        }
+
         /// <summary>[v0.1.105] 把**阴影图 + 体积雾/神光**那一组 uniform 绑到**任意** shader 上
         /// （远景 LOD 层复用同一套；地形那条路由 `ResolveOpaqueShader` 自己绑）。
         ///
@@ -415,6 +473,7 @@ namespace Game {
         /// </summary>
         public static string BindShadowFogParams(Shader shader, bool shadows) {
             try {
+                RefreshShadowDayFactor();
                 shader.GetParameter("u_shadowEnable", true).SetValue(shadows ? 1f : 0f);
                 shader.GetParameter("u_shadowMap", true).SetValue(shadows ? m_gpuShadowRt : m_gpuShadowDummyRt);
                 shader.GetParameter("u_shadowSampler", true).SetValue(m_gpuShadowSampler);
@@ -434,6 +493,7 @@ namespace Game {
                     (m_gpuShadowHasNearMap && m_gpuShadowRtNear != null) ? 1f : 0f);
                 shader.GetParameter("u_shadowBias", true).SetValue(GpuShadowSampleBias);
                 shader.GetParameter("u_shadowStrength", true).SetValue(GpuShadowSampleStrength);
+                shader.GetParameter("u_shadowDayFactor", true).SetValue(ShadowDayFactor);
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
                 shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
                 shader.GetParameter("u_shadowDebug", true).SetValue(0f);
@@ -552,6 +612,7 @@ namespace Game {
                 // [v0.1.107] **两套变体**：`POINT_LIGHTS` 开/关是两个 program。
                 // 为什么必须这样做：点光源那段代码的代价**全在循环体**（实测 `MaxLights=0` 时与关闭完全相同），
                 // 而它在"站在灯旁边"时是 −8.8% ⇒ 关掉时必须**根本不编译这段代码**，而不是靠 uniform 早退。
+                RefreshShadowDayFactor();          // [v0.1.112] 阴影强度随昼光走（见 ShadowDayFactor）
                 Shader shader;
                 if (SkylinePointLights.Enabled) {
                     m_gpuShadowOpaqueShaderPl ??= new Shader(GpuShadowOpaqueVsh, GpuShadowOpaquePsh,
@@ -595,6 +656,7 @@ namespace Game {
                     (m_gpuShadowHasNearMap && m_gpuShadowRtNear != null) ? 1f : 0f);
                 shader.GetParameter("u_shadowBias", true).SetValue(GpuShadowSampleBias);
                 shader.GetParameter("u_shadowStrength", true).SetValue(GpuShadowSampleStrength);
+                shader.GetParameter("u_shadowDayFactor", true).SetValue(ShadowDayFactor);
                 shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
                 shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
                 shader.GetParameter("u_shadowDebug", true).SetValue((float)GpuShadowDebugMode);
@@ -781,6 +843,8 @@ float u_depthMaxNear;
 float u_nearCascade;
 float u_shadowBias;
 float u_shadowStrength;
+// [v0.1.112] 昼光因子：太阳阴影的强度按游戏自己的昼光强度缩放（夜间 = 0 ⇒ 没有太阳阴影）
+float u_shadowDayFactor;
 float u_shadowFlipY;
 float u_shadowDepth16;
 float u_shadowDebug;
@@ -1066,7 +1130,7 @@ void main(
 		if (!inside)
 		{
 			lit = 1.0;
-			result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+			result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
 		}
 		else
 		{
@@ -1138,7 +1202,8 @@ void main(
 			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
 			lit = step(fragDepth, mapDepth + u_shadowBias);
 		}
-		result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		// [v0.1.112] 乘上**昼光因子**：夜里（0）太阳阴影消失、晨昏之间平滑减弱（见 `ShadowDayFactor`）
+		result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
 		}
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 `DistanceAttenuationHL` 曲线（逐字同式）。
@@ -1292,6 +1357,8 @@ uniform float u_depthMaxNear;
 uniform float u_nearCascade;
 uniform float u_shadowBias;
 uniform float u_shadowStrength;
+// [v0.1.112] 昼光因子（与 HLSL 段同一变量）
+uniform float u_shadowDayFactor;
 uniform float u_shadowFlipY;
 uniform float u_shadowDepth16;
 uniform float u_shadowDebug;
@@ -1566,7 +1633,7 @@ void main()
 		float lit = 1.0;
 		if (!inside)
 		{
-			result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+			result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
 		}
 		else
 		{
@@ -1631,7 +1698,8 @@ void main()
 			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
 			lit = step(fragDepth, mapDepth + u_shadowBias);
 		}
-		result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		// [v0.1.112] 乘上**昼光因子**：夜里（0）太阳阴影消失、晨昏之间平滑减弱（见 `ShadowDayFactor`）
+		result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
 		}
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）

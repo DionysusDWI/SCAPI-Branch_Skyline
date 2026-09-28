@@ -201,6 +201,9 @@ float u_depthMaxNear;
 float u_nearCascade;
 float u_shadowBias;
 float u_shadowStrength;
+// [v0.1.112] 昼光因子（阴影强度按昼光缩放；本层只用于体积神光的可见性判定，但 uniform 必须声明，
+//   否则共享的 BindShadowFogParams 会在缺参数处抛异常、后面那一串雾 uniform 全部绑不上）
+float u_shadowDayFactor;
 float u_shadowFlipY;
 float u_shadowDepth16;
 float u_shadowEnable;
@@ -504,6 +507,7 @@ uniform float u_depthMaxNear;
 uniform float u_nearCascade;
 uniform float u_shadowBias;
 uniform float u_shadowStrength;
+uniform float u_shadowDayFactor;
 uniform float u_shadowFlipY;
 uniform float u_shadowDepth16;
 uniform float u_shadowEnable;
