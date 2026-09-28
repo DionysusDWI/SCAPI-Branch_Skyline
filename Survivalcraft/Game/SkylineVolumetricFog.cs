@@ -71,6 +71,33 @@ namespace Game {
         /// <summary>步数（**固定 8**，与云同一口径：手工展开）。</summary>
         public static int FogSteps { get; } = 8;
 
+        /// <summary>[v0.1.104] **体积神光（体积雾里的单次散射）**强度。0 = 关（逐位回到 v0.1.103）。
+        ///
+        /// 口径来源：Dawnlight 的 `ShaftLighting.psh`（屏幕空间沿太阳方向的光轴 + Bayer 抖动）。
+        /// **我们没有场景深度纹理** ⇒ 不能照搬屏幕空间那一路；这里走的是**适配路线**：
+        /// 复用我们已经在做的**世界空间雾积分**（8 步），每一步问一次"这一小段烟有没有被太阳照到"
+        /// （投影进太阳深度图做一次遮挡判定），再乘**前向散射相位**累加。
+        /// 于是"从树影/建筑缝隙里漏进来的光柱"是**几何上真的**由阴影图算出来的，不是屏幕空间的假象。
+        ///
+        /// 代价：雾开启时每片元多 **8 次阴影图采样**（单抽，不做 PCF）。
+        /// </summary>
+        /// 默认值 **0.7 是量出来的**（可复算：`heightlab/skyline-v0104-sun-shafts.py`）：
+        ///   * **0.35**：朝太阳增益 **+0.526 亮度**、背对 **+0.023**（方向比 23×），但只有 **0.13%** 像素过 8/255 ⇒ 偏弱；
+        ///   * **0.7**：朝太阳 **+1.049 亮度 / 39,955 px（2.8%）**、背对 **+0.054 / 2,235 px**（方向比 19×）⇒ 看得见且仍只朝太阳方向；
+        ///   * **代价**：配对交替测（0/0.7 各两轮、每轮 15 s、关垂直同步）**−0.60%**（在跑步动噪声内）。
+        /// 归一化口径（第一版踩到并修）：不是 `散射积分 × 光深`（∝ 密度²，默认密度 0.06 下增量 &lt;8/255 完全看不见），
+        /// 而是 **「雾里被照到的比例」× 雾的不透明度 × 前向相位** ⇒ 与雾的浓淡解耦。
+        /// **如实记**：本机测试场地是 y≈310 的高台、视野里没有"挡住太阳的几何"，
+        /// 所以现在这副效果表现为**朝太阳时雾里的前向散射辉光**；
+        /// 经典的"光柱"（缝隙里漏下来的柱状光）需要雾 + 遮挡物同框的场景，**下一轮补**。
+        public static float VolumetricSunShaftStrength { get; set; } = 0.7f;
+
+        /// <summary>[v0.1.104] 神光的入射色（默认偏暖，和太阳直射一致）。</summary>
+        public static Vector3 VolumetricSunShaftColor { get; set; } = new(1f, 0.93f, 0.80f);
+
+        /// <summary>[v0.1.104] 前向散射相位指数（越大"朝太阳看才亮"越明显）。默认 8。</summary>
+        public static float VolumetricSunShaftPhasePower { get; set; } = 8f;
+
         static string m_volFogLastError = "";
         static long m_volFogBound;
 
@@ -89,10 +116,16 @@ namespace Game {
                 ["maxDistance"] = (double)FogMaxDistance,
                 ["shear"] = (double)FogHeightShear,
                 ["steps"] = FogSteps,
+                ["sunShaft"] = (double)VolumetricSunShaftStrength,
+                ["sunShaftColor"] = new JsonArray(VolumetricSunShaftColor.X, VolumetricSunShaftColor.Y,
+                                                 VolumetricSunShaftColor.Z),
+                ["sunShaftPhasePower"] = (double)VolumetricSunShaftPhasePower,
                 ["boundFrames"] = m_volFogBound,
                 ["lastError"] = m_volFogLastError
             };
             o["note"] = "在不透明片元里沿视线步进（替换被 FogDisabled 置 0 的原版雾）；与阴影采样共用同一个不透明变体";
+            o["sunShaftNote"] = "体积神光 = 沿同一条雾积分射线每步做一次太阳遮挡判定（单抽）"
+                + "× 前向散射相位；0 即逐位回 v0.1.103。Dawnlight 用屏幕空间光轴，我们没有场景深度纹理，走的是适配路线";
             return o.ToJsonString();
         }
     }

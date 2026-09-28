@@ -513,6 +513,11 @@ namespace Game {
                     shader.GetParameter("u_vfSkyMix", true).SetValue(Math.Clamp(FogSkyMix, 0f, 1f));
                     shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
                     shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
+                    // [v0.1.104] 体积神光（Dawnlight ShaftLighting 的适配路线，见 SkylineVolumetricFog）
+                    shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
+                    shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
+                    shader.GetParameter("u_vfPhasePower", true)
+                        .SetValue(Math.Clamp(VolumetricSunShaftPhasePower, 1f, 64f));
                     m_volFogBound++;
                     m_volFogLastError = "";
                 }
@@ -695,6 +700,9 @@ float3 u_vfColor;
 float u_vfSkyMix;
 float u_vfMaxDistance;
 float u_vfShear;
+float u_vfSunShaft;
+float3 u_vfSunColor;
+float u_vfPhasePower;
 float3 u_viewPosition;
 // [v0.1.69] 体积雾：确定性值噪声 + 沿视线 8 步积分（与云同一套噪声口径）
 float vfHash12(float2 p)
@@ -853,6 +861,37 @@ float2 shadowUv(float4 clip, float flipY)
 	return uv;
 }
 
+// [v0.1.104] 体积神光用：**世界空间某一点有没有被太阳照到**（单抽，不做 PCF —— 每帧要多 8 次采样）。
+// 与主阴影同一套投影/级联/bias 口径；超出阴影图范围或没开阴影采样都按「照到」处理。
+float sunShaftVisibility(float3 p)
+{
+	if (u_shadowEnable < 0.5)
+	{
+		return 1.0;
+	}
+	float3 relFar = float3(p.x - u_sunOrigin.x, p.y, p.z - u_sunOrigin.y);
+	float2 uvFarS = shadowUv(mul(float4(relFar, 1.0), u_sunViewProjection), u_shadowFlipY);
+	float3 relNear = float3(p.x - u_sunOriginNear.x, p.y, p.z - u_sunOriginNear.y);
+	float2 uvNearS = shadowUv(mul(float4(relNear, 1.0), u_sunViewProjectionNear), u_shadowFlipY);
+	bool inFarS = uvFarS.x >= 0.0 && uvFarS.x <= 1.0 && uvFarS.y >= 0.0 && uvFarS.y <= 1.0;
+	bool inNearS = u_nearCascade > 0.5 && uvNearS.x >= 0.0 && uvNearS.x <= 1.0
+		&& uvNearS.y >= 0.0 && uvNearS.y <= 1.0;
+	if (!inFarS && !inNearS)
+	{
+		return 1.0;
+	}
+	float shaftDepthMax = inNearS ? u_depthMaxNear : u_depthMax;
+	float3 shaftEye = inNearS ? u_eyeNear : u_eye;
+	float shaftDepth = saturate(dot(shaftEye - p, u_sunDir) / max(shaftDepthMax, 0.0001));
+	float shaftMap = inNearS
+		? decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNearS))
+		: decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFarS));
+	float shaftRelief = inNearS ? u_shadowReliefNear : u_shadowReliefFar;
+	float shaftBias = u_shadowBias
+		+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale * shaftRelief;
+	return shaftDepth <= shaftMap + shaftBias ? 1.0 : 0.0;
+}
+
 void main(
 	in float4 v_color : COLOR,
 	in float2 v_texcoord: TEXCOORD,
@@ -994,19 +1033,31 @@ void main(
 				float vfDt = (vfT1 - vfT0) * 0.125;
 				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
 				float vfOd = 0.0;
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 0.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 1.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 2.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 3.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 4.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 5.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 6.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
-				vfOd *= vfDt * u_vfDensity;
+				float vfScat = 0.0;
+				// [v0.1.104] 每个雾步同时问一次「这一段烟有没有被太阳照到」（体积神光，见 sunShaftVisibility）
+				for (int vfI = 0; vfI < 8; vfI++)
+				{
+					float3 vfP = u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * (float(vfI) + 0.5));
+					float vfD = vfDensityAt(vfP);
+					vfOd += vfD;
+					vfScat += vfD * sunShaftVisibility(vfP);
+				}
+				float vfOdScale = vfDt * u_vfDensity;
+				float vfOdRaw = max(vfOd, 1e-5);
+				vfOd *= vfOdScale;
 				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
 				// [v0.1.70] 雾色与游戏按天空/天气算的 u_fogColor 混合：下雨/黄昏时雾会跟着变色
 				float3 vfCol = lerp(u_vfColor, max(u_fogColor, float3(0.02, 0.02, 0.02)), u_vfSkyMix);
 				result.rgb = lerp(result.rgb, vfCol, vfAlpha);
+				if (u_vfSunShaft > 0.0)
+				{
+					float vfPhase = 0.25 + 0.75 * pow(saturate(dot(vfRd, u_sunDir)), u_vfPhasePower);
+					// 归一化口径（v0.1.104 实测修正）：**「雾里有多大比例被太阳照到」 × 雾的不透明度 × 相位**。
+					// 第一版写成 `vfScat × vfOdScale`（∝ 密度²）⇒ 默认密度 0.06 下增量 <8/255 完全看不见
+					// （实测：0.06 时 0.0% 像素、0.30 时 7.85% 像素）。现在与密度解耦。
+					float vfLit = saturate(vfScat / vfOdRaw);
+					result.rgb += u_vfSunColor * (vfLit * vfAlpha * vfPhase * u_vfSunShaft);
+				}
 			}
 		}
 	}
@@ -1066,6 +1117,9 @@ uniform vec3 u_vfColor;
 uniform float u_vfSkyMix;
 uniform float u_vfMaxDistance;
 uniform float u_vfShear;
+uniform float u_vfSunShaft;
+uniform vec3 u_vfSunColor;
+uniform float u_vfPhasePower;
 uniform vec3 u_viewPosition;
 
 // [v0.1.69] 体积雾（与 HLSL 段同一算法）
@@ -1223,6 +1277,36 @@ vec2 shadowUv(vec4 clip, float flipY)
 	return uv;
 }
 
+// [v0.1.104] 体积神光用（与 HLSL 段同一算法）
+float sunShaftVisibility(vec3 p)
+{
+	if (u_shadowEnable < 0.5)
+	{
+		return 1.0;
+	}
+	vec3 relFar = vec3(p.x - u_sunOrigin.x, p.y, p.z - u_sunOrigin.y);
+	vec2 uvFarS = shadowUv(u_sunViewProjection * vec4(relFar, 1.0), u_shadowFlipY);
+	vec3 relNear = vec3(p.x - u_sunOriginNear.x, p.y, p.z - u_sunOriginNear.y);
+	vec2 uvNearS = shadowUv(u_sunViewProjectionNear * vec4(relNear, 1.0), u_shadowFlipY);
+	bool inFarS = uvFarS.x >= 0.0 && uvFarS.x <= 1.0 && uvFarS.y >= 0.0 && uvFarS.y <= 1.0;
+	bool inNearS = u_nearCascade > 0.5 && uvNearS.x >= 0.0 && uvNearS.x <= 1.0
+		&& uvNearS.y >= 0.0 && uvNearS.y <= 1.0;
+	if (!inFarS && !inNearS)
+	{
+		return 1.0;
+	}
+	float shaftDepthMax = inNearS ? u_depthMaxNear : u_depthMax;
+	vec3 shaftEye = inNearS ? u_eyeNear : u_eye;
+	float shaftDepth = clamp(dot(shaftEye - p, u_sunDir) / max(shaftDepthMax, 0.0001), 0.0, 1.0);
+	float shaftMap = inNearS
+		? decodeShadowDepth(texture2D(u_shadowMapNear, uvNearS))
+		: decodeShadowDepth(texture2D(u_shadowMap, uvFarS));
+	float shaftRelief = inNearS ? u_shadowReliefNear : u_shadowReliefFar;
+	float shaftBias = u_shadowBias
+		+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale * shaftRelief;
+	return shaftDepth <= shaftMap + shaftBias ? 1.0 : 0.0;
+}
+
 void main()
 {
 	vec4 result = v_color;
@@ -1351,19 +1435,28 @@ void main()
 				float vfDt = (vfT1 - vfT0) * 0.125;
 				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
 				float vfOd = 0.0;
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 0.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 1.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 2.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 3.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 4.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 5.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 6.5));
-				vfOd += vfDensityAt(u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * 7.5));
-				vfOd *= vfDt * u_vfDensity;
+				float vfScat = 0.0;
+				// [v0.1.104] 体积神光（与 HLSL 段同一算法）
+				for (int vfI = 0; vfI < 8; vfI++)
+				{
+					vec3 vfP = u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * (float(vfI) + 0.5));
+					float vfD = vfDensityAt(vfP);
+					vfOd += vfD;
+					vfScat += vfD * sunShaftVisibility(vfP);
+				}
+				float vfOdScale = vfDt * u_vfDensity;
+				float vfOdRaw = max(vfOd, 1e-5);
+				vfOd *= vfOdScale;
 				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
 				// [v0.1.70] 雾色与 u_fogColor 混合（与 HLSL 段同一算法）
 				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
 				result.rgb = mix(result.rgb, vfCol, vfAlpha);
+				if (u_vfSunShaft > 0.0)
+				{
+					float vfPhase = 0.25 + 0.75 * pow(clamp(dot(vfRd, u_sunDir), 0.0, 1.0), u_vfPhasePower);
+					float vfLit = clamp(vfScat / vfOdRaw, 0.0, 1.0);
+					result.rgb += u_vfSunColor * (vfLit * vfAlpha * vfPhase * u_vfSunShaft);
+				}
 			}
 		}
 	}
