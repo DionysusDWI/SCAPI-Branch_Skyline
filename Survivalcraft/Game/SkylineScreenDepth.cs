@@ -66,6 +66,9 @@ namespace Game {
         /// <summary>片元侧重建世界坐标用：`ndc → 世界（未减 origin）`。</summary>
         public static Matrix ScreenDepthInvViewProjection => m_sdInvViewProjection;
 
+        /// <summary>[v0.1.114] 预通道用的**正向** viewProjection（AO 侧用它把世界坐标投回 uv）。</summary>
+        public static Matrix ScreenDepthViewProjection => m_sdViewProjection;
+
         /// <summary>片元侧重建世界坐标用：重建结果是"浮动原点"坐标，加回这个 XZ 才是世界坐标。</summary>
         public static Vector2 ScreenDepthOrigin => m_sdOrigin;
 
@@ -87,6 +90,7 @@ namespace Game {
         static Shader m_sdDebugShader;
         static SamplerState m_sdSampler;
         static Matrix m_sdInvViewProjection = Matrix.Identity;
+        static Matrix m_sdViewProjection = Matrix.Identity;
         static Vector2 m_sdOrigin;
         static int m_sdChunksDrawn;
         static long m_sdFrames;
@@ -97,7 +101,7 @@ namespace Game {
         static int m_sdChunksWithCornerInside;
         static string m_sdStages = "";
 
-        /// <summary>[诊断] 从 RT 中心读一小块，数"非背景（R<0.999）"的像素。</summary>
+        /// <summary>[诊断] 从 RT 中心读一小块，数「非背景」的像素（R 等于清屏值 255 即背景）。</summary>
         static string ProbeStages(RenderTarget2D rt) {
             try {
                 int w = Math.Min(64, rt.Width), h = Math.Min(64, rt.Height);
@@ -184,6 +188,7 @@ namespace Game {
                             * camera.ProjectionMatrix;
                     }
                     m_sdInvViewProjection = Matrix.Invert(viewProjection);
+                    m_sdViewProjection = viewProjection;
 
                     Shader shader = EnsureScreenDepthShader();
                     shader.GetParameter("u_origin", true).SetValue(m_sdOrigin);

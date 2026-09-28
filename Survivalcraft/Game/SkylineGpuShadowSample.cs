@@ -538,6 +538,11 @@ namespace Game {
                     .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.4f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
                 shader.GetParameter("u_shadowFadeEnd", true)
                     .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.9f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
+                // [v0.1.114] 屏幕空间 AO（默认关；关掉时 u_aoEnable=0 ⇒ 画面逐位不变）
+                string aoErr = BindScreenAo(shader);
+                if (aoErr.Length > 0) {
+                    m_gpuShadowSampleLastReason = "BindScreenAo: " + aoErr;
+                }
                 return "";
             }
             catch (System.Exception e) {
@@ -722,7 +727,10 @@ namespace Game {
             catch (System.Exception e) {
                 m_gpuShadowSampleError = e.Message;
                 GpuShadowSampleEnabled = false;
-                Log.Warning($"SkylineGpuShadowSample: 采样 shader 构造/绑定失败，已自动关闭：{e.Message}");
+                Log.Warning($"SkylineGpuShadowSample: 采样 shader 构造/绑定失败，已自动关闭：{e.Message}"
+                            + $" | pshLen={GpuShadowOpaquePsh.Length}"
+                            + $" pshHasMeta={GpuShadowOpaquePsh.Contains("<Sampler Name='u_aoSampler'")}"
+                            + $" pshHasDecl={GpuShadowOpaquePsh.Contains("uniform sampler2D u_aoDepth;")}");
                 return fallback;
             }
         }
@@ -782,6 +790,127 @@ void main(
 uniform vec2 u_origin;
 uniform mat4 u_viewProjectionMatrix;
 uniform vec3 u_viewPosition;
+
+// [v0.1.114] ⚠️ 下面这段 AO 代码**本该在片元着色器里**（顶点着色器用不到采样器/导数）。
+//   第一版误插到了 `GpuShadowOpaqueVsh` 的 GLSL 段 ⇒ **顶点着色器编译失败** ⇒ 整个阴影变体被
+//   `ResolveOpaqueShader` 的 catch 自动关掉（日志：Error compiling vertex shader），
+//   而表现却是「AO 打开后画面只动 81 px」（其实是变体没生效）。这里用永不定义的宏把它关掉，
+//   真正的副本在 `GpuShadowOpaquePsh` 的 GLSL 段。
+#ifdef SKYLINE_AO_UNUSED_IN_VSH
+// ===== [v0.1.114] 屏幕空间 AO（SSAO）：消费相机空间深度预通道（`SkylineScreenDepth`）=====
+uniform float u_aoEnable;
+uniform mat4 u_aoInvViewProj;
+uniform mat4 u_aoViewProj;
+uniform vec2 u_aoOrigin;
+uniform float u_aoScale;
+uniform float u_aoUvScale;
+uniform float u_aoRadius;
+uniform float u_aoIntensity;
+uniform float u_aoBias;
+uniform float u_aoDebug;
+uniform vec2 u_aoTexel;
+uniform float u_aoMaxUv;
+uniform float u_aoFlipV;
+uniform sampler2D u_aoDepth;
+
+float aoDepthAt(vec2 uv)
+{
+	vec4 s = texture2D(u_aoDepth, uv);
+	return (floor(s.r * 255.0 + 0.5) * 256.0 + floor(s.g * 255.0 + 0.5)) / 65535.0;
+}
+
+vec3 aoWorldAt(vec2 uv, float linearDist)
+{
+	vec2 ndc = uv * 2.0 - 1.0;
+	vec4 p0 = u_aoInvViewProj * vec4(ndc, 0.0, 1.0);
+	vec4 p1 = u_aoInvViewProj * vec4(ndc, 1.0, 1.0);
+	p0 /= p0.w;
+	p1 /= p1.w;
+	vec3 nearP = p0.xyz + vec3(u_aoOrigin.x, 0.0, u_aoOrigin.y);
+	vec3 dir = normalize(p1.xyz - p0.xyz);
+	return nearP + dir * linearDist;
+}
+
+// 8 抽样双环 + 逐像素旋转（与阴影核同一套「可复现」口径：旋转来自世界坐标哈希，不用时间）
+float screenAo(vec3 worldPos)
+{
+	if (u_aoEnable < 0.5)
+	{
+		return 1.0;
+	}
+	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）⇒ 与分辨率、y 翻转都无关
+	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
+	if (clip.w <= 0.001)
+	{
+		return 1.0;
+	}
+	vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+	// **y 翻转**：深度预通道是渲染到 RT 的，引擎在 RT 路径上会 `gl_Position.y *= -1`
+	//   （`u_glymul = RenderTarget != null ? -1 : 1`），而后台缓冲不翻 ⇒ 深度图的 v 与这里的 uv 差一次翻转。
+	uv.y = mix(uv.y, 1.0 - uv.y, u_aoFlipV);
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	{
+		return 1.0;
+	}
+	// **法线从深度图重建**（不能用 dFdx/dFdy：GLSL ES 1.0 里它们要么要 `#extension GL_OES_standard_derivatives`、
+	//   要么要 `#version 300`，本引擎走的是前者未开启的路径，实测直接编译失败）。
+	//   取「右/上」邻居重建世界坐标做叉积；边缘/退化时退回「朝向相机」。
+	vec3 n = normalize(u_viewPosition - worldPos);
+	{
+		float dR = aoDepthAt(uv + vec2(u_aoTexel.x, 0.0));
+		float dU = aoDepthAt(uv + vec2(0.0, u_aoTexel.y));
+		if (dR < 0.999 && dU < 0.999)
+		{
+			vec3 pR = aoWorldAt(uv + vec2(u_aoTexel.x, 0.0), dR * u_aoScale);
+			vec3 pU = aoWorldAt(uv + vec2(0.0, u_aoTexel.y), dU * u_aoScale);
+			vec3 e1 = pR - worldPos;
+			vec3 e2 = pU - worldPos;
+			if (length(e1) > 1e-4 && length(e2) > 1e-4)
+			{
+				n = normalize(cross(e1, e2));
+			}
+		}
+	}
+	// 叉积方向取决于 uv 取向 ⇒ **按「朝向相机」自纠一次**（不然 dot(n,v) 恒为负，邻居全被拒）
+	if (dot(n, worldPos - u_viewPosition) > 0.0)
+	{
+		n = -n;
+	}
+	float dist = max(length(worldPos - u_viewPosition), 0.05);
+	float ang0 = fract(sin(dot(worldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	float occ = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float a = ang0 + float(i) * 0.7853981634;
+		float r = u_aoRadius * (mod(float(i), 2.0) == 0.0 ? 0.55 : 1.0);
+		// **屏幕空间半径上限**（SSAO 标准做法）：不夹的话，近处 0.8 m 的半径会占到屏幕 20%+，
+		//   8 个抽样全落到远处几何上 ⇒ 近距离（接触阴影最该出现的地方）反而量不到。
+		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
+		vec2 uvT = uv + vec2(cos(a), sin(a)) * uvR;
+		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		{
+			continue;
+		}
+		float dT = aoDepthAt(uvT);
+		if (dT >= 0.999)
+		{
+			continue;
+		}
+		vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+		float len = length(v);
+		if (len > u_aoRadius)
+		{
+			continue;
+		}
+		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		{
+			continue;
+		}
+		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+	}
+	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+}
+#endif
 uniform float u_fogYMultiplier;
 uniform vec3 u_fogBottomTopDensity;
 uniform vec2 u_hazeStartDensity;
@@ -886,6 +1015,113 @@ float3 u_vfSunColor;
 float u_vfPhasePower;
 float3 u_viewPosition;
 // [v0.1.69] 体积雾：确定性值噪声 + 沿视线 8 步积分（与云同一套噪声口径）
+// ===== [v0.1.114] 屏幕空间 AO（SSAO）：消费相机空间深度预通道（`SkylineScreenDepth`）=====
+float u_aoEnable;
+float4x4 u_aoInvViewProj;
+float4x4 u_aoViewProj;
+float2 u_aoOrigin;
+float u_aoScale;
+float u_aoUvScale;
+float u_aoRadius;
+float u_aoIntensity;
+float u_aoBias;
+float u_aoDebug;
+float2 u_aoTexel;
+float u_aoMaxUv;
+float u_aoFlipV;
+Texture2D u_aoDepth;
+SamplerState u_aoSampler;
+
+float aoDepthAt(float2 uv)
+{
+	float4 s = u_aoDepth.Sample(u_aoSampler, uv);
+	return (floor(s.r * 255.0 + 0.5) * 256.0 + floor(s.g * 255.0 + 0.5)) / 65535.0;
+}
+
+float3 aoWorldAt(float2 uv, float linearDist)
+{
+	float2 ndc = uv * 2.0 - 1.0;
+	float4 p0 = mul(u_aoInvViewProj, float4(ndc, 0.0, 1.0));
+	float4 p1 = mul(u_aoInvViewProj, float4(ndc, 1.0, 1.0));
+	p0 /= p0.w;
+	p1 /= p1.w;
+	float3 near = p0.xyz + float3(u_aoOrigin.x, 0.0, u_aoOrigin.y);
+	float3 dir = normalize(p1.xyz - p0.xyz);
+	return near + dir * linearDist;
+}
+
+// 8 抽样双环 + 逐像素旋转（与阴影核同一套「可复现」口径：旋转来自世界坐标哈希，不用时间）
+float screenAo(float3 worldPos)
+{
+	if (u_aoEnable < 0.5)
+	{
+		return 1.0;
+	}
+	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）⇒ 与分辨率、y 翻转都无关
+	float4 clip = mul(u_aoViewProj, float4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0));
+	if (clip.w <= 0.001)
+	{
+		return 1.0;
+	}
+	float2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	{
+		return 1.0;
+	}
+	// **法线从深度图重建**（与 GLSL 段同一算法；那边不能用 dFdx 的扩展，这里保持一致）
+	float3 n = normalize(u_viewPosition - worldPos);
+	{
+		float dR = aoDepthAt(uv + float2(u_aoTexel.x, 0.0));
+		float dU = aoDepthAt(uv + float2(0.0, u_aoTexel.y));
+		if (dR < 0.999 && dU < 0.999)
+		{
+			float3 pR = aoWorldAt(uv + float2(u_aoTexel.x, 0.0), dR * u_aoScale);
+			float3 pU = aoWorldAt(uv + float2(0.0, u_aoTexel.y), dU * u_aoScale);
+			float3 e1 = pR - worldPos;
+			float3 e2 = pU - worldPos;
+			if (length(e1) > 1e-4 && length(e2) > 1e-4)
+			{
+				n = normalize(cross(e1, e2));
+			}
+		}
+	}
+	if (dot(n, worldPos - u_viewPosition) > 0.0)
+	{
+		n = -n;
+	}
+	float dist = max(length(worldPos - u_viewPosition), 0.05);
+	float ang0 = frac(sin(dot(worldPos.xz, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	float occ = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float a = ang0 + float(i) * 0.7853981634;
+		float r = u_aoRadius * (((i % 2) == 0) ? 0.55 : 1.0);
+		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
+		float2 uvT = uv + float2(cos(a), sin(a)) * uvR;
+		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		{
+			continue;
+		}
+		float dT = aoDepthAt(uvT);
+		if (dT >= 0.999)
+		{
+			continue;
+		}
+		float3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+		float len = length(v);
+		if (len > u_aoRadius)
+		{
+			continue;
+		}
+		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		{
+			continue;
+		}
+		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+	}
+	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+}
+
 float vfHash12(float2 p)
 {
 	float3 p3 = frac(float3(p.x, p.y, p.x) * 0.1031);
@@ -1206,6 +1442,18 @@ void main(
 		result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
 		}
 	}
+	// [v0.1.114] **屏幕空间 AO**：消费相机深度预通道（默认关；`u_aoEnable=0` 时本函数直接返回 1）
+	{
+		float ao = screenAo(v_world);
+		if (u_aoDebug > 0.5)
+		{
+			result.rgb = float3(ao, ao, ao);      // 调试：直接把 AO 因子画出来（看它到底有没有变化）
+		}
+		else
+		{
+			result.rgb *= ao;
+		}
+	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 `DistanceAttenuationHL` 曲线（逐字同式）。
 	// 地形片元没有法线 ⇒ 只有距离衰减与颜色，没有 N·L 那一项（notes/201 如实记）。
 	// [v0.1.107] **包在 `#ifdef POINT_LIGHTS` 里**：关闭时**整套代码根本不编译**（实测代价全在循环体，
@@ -1340,6 +1588,7 @@ precision highp float;   // [v0.1.35] 16 bit 深度解码需要 fp32（mediump �
 // <Sampler Name='u_samplerState' Texture='u_texture' />
 // <Sampler Name='u_shadowSampler' Texture='u_shadowMap' />
 // <Sampler Name='u_shadowSamplerNear' Texture='u_shadowMapNear' />
+// <Sampler Name='u_aoSampler' Texture='u_aoDepth' />
 
 uniform sampler2D u_texture;
 uniform sampler2D u_shadowMap;
@@ -1399,6 +1648,118 @@ uniform float u_vfSunShaft;
 uniform vec3 u_vfSunColor;
 uniform float u_vfPhasePower;
 uniform vec3 u_viewPosition;
+
+// ===== [v0.1.114] 屏幕空间 AO（SSAO）：消费相机空间深度预通道（`SkylineScreenDepth`）=====
+uniform float u_aoEnable;
+uniform mat4 u_aoInvViewProj;
+uniform mat4 u_aoViewProj;
+uniform vec2 u_aoOrigin;
+uniform float u_aoScale;
+uniform float u_aoUvScale;
+uniform float u_aoRadius;
+uniform float u_aoIntensity;
+uniform float u_aoBias;
+uniform float u_aoDebug;
+uniform vec2 u_aoTexel;
+uniform float u_aoMaxUv;
+uniform float u_aoFlipV;
+uniform sampler2D u_aoDepth;
+
+float aoDepthAt(vec2 uv)
+{
+	vec4 s = texture2D(u_aoDepth, uv);
+	return (floor(s.r * 255.0 + 0.5) * 256.0 + floor(s.g * 255.0 + 0.5)) / 65535.0;
+}
+
+vec3 aoWorldAt(vec2 uv, float linearDist)
+{
+	vec2 ndc = uv * 2.0 - 1.0;
+	vec4 p0 = u_aoInvViewProj * vec4(ndc, 0.0, 1.0);
+	vec4 p1 = u_aoInvViewProj * vec4(ndc, 1.0, 1.0);
+	p0 /= p0.w;
+	p1 /= p1.w;
+	vec3 nearP = p0.xyz + vec3(u_aoOrigin.x, 0.0, u_aoOrigin.y);
+	vec3 dir = normalize(p1.xyz - p0.xyz);
+	return nearP + dir * linearDist;
+}
+
+// 8 抽样双环 + 逐像素旋转（与阴影核同一套「可复现」口径：旋转来自世界坐标哈希，不用时间）
+float screenAo(vec3 worldPos)
+{
+	if (u_aoEnable < 0.5)
+	{
+		return 1.0;
+	}
+	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）⇒ 与分辨率、y 翻转都无关
+	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
+	if (clip.w <= 0.001)
+	{
+		return 1.0;
+	}
+	vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+	// **y 翻转**：预通道渲染到 RT，引擎在 RT 路径上 `gl_Position.y *= -1`（u_glymul）
+	uv.y = mix(uv.y, 1.0 - uv.y, u_aoFlipV);
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	{
+		return 1.0;
+	}
+	// **法线从深度图重建**（不能用 dFdx/dFdy：GLSL ES 1.0 里要么要 `#extension GL_OES_standard_derivatives`、
+	//   要么要 `#version 300` ⇒ 实测直接编译失败）。取「右/上」邻居重建世界坐标做叉积；退化时退回「朝向相机」。
+	vec3 n = normalize(u_viewPosition - worldPos);
+	{
+		float dR = aoDepthAt(uv + vec2(u_aoTexel.x, 0.0));
+		float dU = aoDepthAt(uv + vec2(0.0, u_aoTexel.y));
+		if (dR < 0.999 && dU < 0.999)
+		{
+			vec3 pR = aoWorldAt(uv + vec2(u_aoTexel.x, 0.0), dR * u_aoScale);
+			vec3 pU = aoWorldAt(uv + vec2(0.0, u_aoTexel.y), dU * u_aoScale);
+			vec3 e1 = pR - worldPos;
+			vec3 e2 = pU - worldPos;
+			if (length(e1) > 1e-4 && length(e2) > 1e-4)
+			{
+				n = normalize(cross(e1, e2));
+			}
+		}
+	}
+	// 叉积方向取决于 uv 取向 ⇒ **按「朝向相机」自纠一次**（不然 dot(n,v) 恒为负，邻居全被拒）
+	if (dot(n, worldPos - u_viewPosition) > 0.0)
+	{
+		n = -n;
+	}
+	float dist = max(length(worldPos - u_viewPosition), 0.05);
+	float ang0 = fract(sin(dot(worldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	float occ = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float a = ang0 + float(i) * 0.7853981634;
+		float r = u_aoRadius * (mod(float(i), 2.0) == 0.0 ? 0.55 : 1.0);
+		// **屏幕空间半径上限**（SSAO 标准做法）：不夹的话，近处 0.8 m 的半径会占到屏幕 20%+，
+		//   8 个抽样全落到远处几何上 ⇒ 近距离（接触阴影最该出现的地方）反而量不到。
+		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
+		vec2 uvT = uv + vec2(cos(a), sin(a)) * uvR;
+		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		{
+			continue;
+		}
+		float dT = aoDepthAt(uvT);
+		if (dT >= 0.999)
+		{
+			continue;
+		}
+		vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+		float len = length(v);
+		if (len > u_aoRadius)
+		{
+			continue;
+		}
+		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		{
+			continue;
+		}
+		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+	}
+	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+}
 
 // [v0.1.69] 体积雾（与 HLSL 段同一算法）
 float vfHash12(vec2 p)
@@ -1700,6 +2061,18 @@ void main()
 		}
 		// [v0.1.112] 乘上**昼光因子**：夜里（0）太阳阴影消失、晨昏之间平滑减弱（见 `ShadowDayFactor`）
 		result.rgb *= (1.0 - u_shadowStrength * u_shadowDayFactor * shadowFade * (1.0 - lit));
+		}
+	}
+	// [v0.1.114] **屏幕空间 AO**（与 HLSL 段同一函数；`u_aoEnable=0` 时直接返回 1）
+	{
+		float ao = screenAo(v_world);
+		if (u_aoDebug > 0.5)
+		{
+			result.rgb = vec3(ao, ao, ao);        // 调试：直接把 AO 因子画出来
+		}
+		else
+		{
+			result.rgb *= ao;
 		}
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）
