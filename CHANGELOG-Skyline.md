@@ -7,8 +7,37 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
-> 进行中：`SkylineLod.OverdrawPrevention`（DH 的 `overdrawPrevention` 同规格：LOD 从原版视距的
-> 40% 就开始画、再用抖动淡出补边界）。**代码已就位、默认 0 = 逐位保持现状**，尚未实测与发版。
+## [v0.1.111] - 2026-09-28
+
+第一百一十八个版本：**按 DH 源码规格补上 `overdrawPrevention`**（LOD 从原版视距的 40% 就开始画，
+再用抖动淡出补边界）。相对 v0.1.110 的变更：
+
+### 1. 实装（默认 **0 = 保持现状**，作为可选项发布）
+
+* `SkylineLod.OverdrawPrevention`（0..1）：`>0` 时 LOD 的内边界 = `视距 × 该值`（DH 默认 **0.4**），
+  并新增只读的 `SkylineLod.LastSkipRadius`（最近一次重建用的实际内边界）；
+* **抖动淡出的起点跟着内边界走**：`SkylineLodVolume` 里 `u_lodFadeStart` 的默认值从
+  `SettingsManager.VisibilityRange` 改为 `SkylineLod.LastSkipRadius` —— 否则重叠带（0.4R..R）
+  会露出一条硬边（显式设 `SkylineLodLook.DitherFadeStartMetres` 时仍听显式值）。
+
+### 2. 为什么默认仍是 0（本轮实测的三件事）
+
+`heightlab/skyline-v0111-overdraw.py`（关雾、冻风、钉时刻、等 16 s 收敛 + 重建）：
+
+| | 内边界 | LOD 单元 | 网格索引 | 壳画出 | fps（配对交替 3 轮） |
+|---|---|---|---|---|---|
+| `OverdrawPrevention=0` | 196 m | 229 | 5,322 | 857 | **30.12**（29.45~30.65） |
+| `OverdrawPrevention=0.4` | **76.8 m** | **321（+40%）** | **7,362（+38%）** | 857 | **29.88**（29.85~29.88） |
+
+* **代价可忽略**：−0.83%，落在 0 臂自身的轮间抖动（4%）之内；
+* **画面确实变了**：稳定掩膜 99.67%、噪声底 258 px 下 **6,553 px**（maxΔ 202），
+  差异集中在 100~200 m 的地形/村庄一带；
+* **但变的原因是"粗档盖住真地形"**：我们的近档仍是 **32³ 粗档**（`UniformBeyondLoaded` 默认开），
+  它的高度是"4 个子单元的中位"，在起伏地形上会**盖掉真实细节**（截图对照见
+  `data/sessions/skyline-v0111-overdraw/overdraw0-1.png` vs `overdraw04-1.png`：左中景的岸线/村舍在 0.4 下变粗）。
+  DH 能用 0.4 是因为它有**1 格精度的近档**；在我们把近档做到那个精度之前，
+  打开它等于"用粗档换重叠带不漏洞"，**净效果是画面变差** ⇒ 默认保持 0，开关留给需要
+  "原版区块缺失也不露洞"的场合。
 
 ## [v0.1.110] - 2026-09-28
 

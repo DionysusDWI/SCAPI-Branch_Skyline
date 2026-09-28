@@ -823,9 +823,12 @@ void main()
                 // [v0.1.109] DH 规格的两项"观感"：抖动淡出 + 噪声补细节
                 {
                     bool look = SkylineLodLook.Enabled;
+                    // [v0.1.111] DH 的 `overdrawPrevention` 把 LOD 的内边界从"视距"推到"视距 × 0.4"，
+                    // 抖动淡出必须跟着**新的内边界**起算（默认取 `SkylineLod.LastSkipRadius`），否则
+                    // 重叠带（0.4R..R）会露出一条硬边；显式设了 `DitherFadeStartMetres` 就听它的。
                     float fadeStart = SkylineLodLook.DitherFadeStartMetres > 0.5f
                         ? SkylineLodLook.DitherFadeStartMetres
-                        : SettingsManager.VisibilityRange;
+                        : MathF.Max(SkylineLod.LastSkipRadius, 1f);
                     shader.GetParameter("u_lodDitherFade", true)
                         .SetValue(look && SkylineLodLook.DitherFade ? 1f : 0f);
                     shader.GetParameter("u_lodFadeStart", true).SetValue(fadeStart);

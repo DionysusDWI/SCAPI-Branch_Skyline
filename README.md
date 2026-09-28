@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.110**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.111**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -33,6 +33,9 @@
   与**噪声补细节**（量化世界坐标加噪，随距离淡出；参数照 DH 默认 `steps=4 / intensity=5 / dropoff=1024`）；
 * 分级边界按**屏幕像素**核算（`CubeShellTierPixelTable`，`px = step/d · H/(2·tan(fovY/2))`），
   开关 `CubeShellPixelTiers`（默认关，代价与放大视觉证据见笔记）。
+* DH 的 `overdrawPrevention` 同规格开关 `SkylineLod.OverdrawPrevention`（LOD 内边界 = 视距 × 该值，
+  默认 **0 = 保持现状**）：实测代价 −0.83%（轮间抖动内），但我们的近档仍是 32³ 粗档、
+  在重叠带会**盖掉真地形细节** ⇒ 默认关着，留给"原版区块缺失也不露洞"的场合。
 
 **光影（里程碑 4；主要参考 Iris 光影包，Dawnlight 作接口参考）**
 
@@ -167,4 +170,3 @@ powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
   * Kitão Gameplay's (Discord：ekitonmjjefgs)
 
 > 如果你是 AI Agent，请阅读当前目录的 [AGENTS.md](https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/AGENTS.md)
-
