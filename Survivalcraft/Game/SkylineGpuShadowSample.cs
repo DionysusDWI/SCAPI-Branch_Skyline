@@ -927,15 +927,20 @@ float screenAo(vec3 worldPos)
 		n = -n;
 	}
 	float dist = max(length(worldPos - u_viewPosition), 0.05);
-	float ang0 = fract(sin(dot(worldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	// **[v0.1.116] 旋转改按「屏幕像素」做 interleaved gradient noise**：旧版用世界坐标 xz 的**连续**哈希，
+	//   相邻像素拿到几乎同一个角度 ⇒ 曲面上留下 8 方向的同心环/星形条纹（半径 2 m 的石面肉眼可辨）。
+	//   IGN 与 DH 抖动同款：按像素去相关，画面静止时逐帧仍然稳定。
+	vec2 aoPix = uv / max(u_aoTexel, vec2(1e-5, 1e-5));
+	float ang0 = fract(52.9829189 * fract(dot(aoPix, vec2(0.06711056, 0.00583715)))) * 6.2831853;
 	float occ = 0.0;
+	// **[v0.1.116] 方向数按实测定档（`notes/212`）**：16 方向 × 3 步 = 48 抽样实测代价 **−6.64%**
+	//   （超 5% 预算），而环的根因是**旋转的连续性**而不是方向数 ⇒ 回到 8 方向（24 抽样），环交给 IGN 打散。
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
 		vec2 sd = vec2(cos(a), sin(a));
-		// **[v0.1.114] horizon-based**：沿这个方向只看「遮挡物抬到地平线以上多少」（sinA），
-		//   而不是「有几个邻居」。差别就是「整坡压暗」的根因：上坡邻居的 sinA 很小（那本来就是一整片坡，
-		//   不该变暗），而墙角/台阶边的 sinA 很大（该变暗）。每方向沿半径取 3 个由近到远的采样。
+		// **[v0.1.114] horizon-based**：每个方向取「遮挡物抬到地平线以上多少」（sinA）的最大值，
+		//   而不是「有几个邻居」（后者会把一整片坡都压暗）。每方向沿半径取 3 个由近到远的采样。
 		float maxSin = 0.0;
 		for (int s = 1; s <= 3; s++)
 		{
@@ -966,7 +971,10 @@ float screenAo(vec3 worldPos)
 		}
 		occ += maxSin;
 	}
-	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+	// **[v0.1.116] 远处淡出**：半径是世界尺度，超过几十米后 0.5 m 比一个深度纹素还小 ⇒ 只剩噪声
+	//   （判据见 notes/212：24 m 起淡、56 m 归零，落在预通道 96 m 截止之前）。
+	float aoFade = 1.0 - smoothstep(24.0, 56.0, dist);
+	return clamp(1.0 - u_aoIntensity * aoFade * (occ / 8.0), 0.0, 1.0);
 }
 #endif
 uniform float u_fogYMultiplier;
@@ -1148,13 +1156,17 @@ float screenAo(float3 worldPos)
 		n = -n;
 	}
 	float dist = max(length(worldPos - u_viewPosition), 0.05);
-	float ang0 = frac(sin(dot(worldPos.xz, float2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	// **[v0.1.116] 旋转改按「屏幕像素」做 interleaved gradient noise**（与 GLSL 段同一算法）：
+	//   旧版世界坐标 xz 哈希是连续函数 ⇒ 相邻像素角度几乎相同 ⇒ 石面上出现 8 方向同心环。
+	float2 aoPix = uv / max(u_aoTexel, float2(1e-5, 1e-5));
+	float ang0 = frac(52.9829189 * frac(dot(aoPix, float2(0.06711056, 0.00583715)))) * 6.2831853;
 	float occ = 0.0;
+	// **[v0.1.116] 8 方向 × 3 步**（与 GLSL 段同一算法；16 方向的代价实测 −6.64%，见 notes/212）
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
 		float2 sd = float2(cos(a), sin(a));
-		// **[v0.1.114] horizon-based**（与 GLSL 段同一算法）：取每个方向上的最大仰角 sinA，而不是「命中数」
+		// **[v0.1.114] horizon-based**：取每个方向上的最大仰角 sinA，而不是「命中数」
 		float maxSin = 0.0;
 		for (int s = 1; s <= 3; s++)
 		{
@@ -1185,7 +1197,9 @@ float screenAo(float3 worldPos)
 		}
 		occ += maxSin;
 	}
-	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+	// **[v0.1.116] 远处淡出**（与 GLSL 段同一算法）：24 m 起淡、56 m 归零
+	float aoFade = 1.0 - smoothstep(24.0, 56.0, dist);
+	return clamp(1.0 - u_aoIntensity * aoFade * (occ / 8.0), 0.0, 1.0);
 }
 
 float vfHash12(float2 p)
@@ -1804,15 +1818,20 @@ float screenAo(vec3 worldPos)
 		n = -n;
 	}
 	float dist = max(length(worldPos - u_viewPosition), 0.05);
-	float ang0 = fract(sin(dot(worldPos.xz, vec2(12.9898, 78.233))) * 43758.5453) * 6.2831853;
+	// **[v0.1.116] 旋转改按「屏幕像素」做 interleaved gradient noise**：旧版用世界坐标 xz 的**连续**哈希，
+	//   相邻像素拿到几乎同一个角度 ⇒ 曲面上留下 8 方向的同心环/星形条纹（半径 2 m 的石面肉眼可辨）。
+	//   IGN 与 DH 抖动同款：按像素去相关，画面静止时逐帧仍然稳定。
+	vec2 aoPix = uv / max(u_aoTexel, vec2(1e-5, 1e-5));
+	float ang0 = fract(52.9829189 * fract(dot(aoPix, vec2(0.06711056, 0.00583715)))) * 6.2831853;
 	float occ = 0.0;
+	// **[v0.1.116] 方向数按实测定档（`notes/212`）**：16 方向 × 3 步 = 48 抽样实测代价 **−6.64%**
+	//   （超 5% 预算），而环的根因是**旋转的连续性**而不是方向数 ⇒ 回到 8 方向（24 抽样），环交给 IGN 打散。
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
 		vec2 sd = vec2(cos(a), sin(a));
-		// **[v0.1.114] horizon-based**：沿这个方向只取「遮挡物抬到地平线以上多少」（sinA）的最大值，
-		//   而不是「有几个邻居」。差别正是「整坡压暗」的根因：上坡邻居 sinA 很小（那只是一片坡，
-		//   不该变暗），墙角/台阶边的 sinA 很大（该变暗）。每个方向沿半径取 3 个由近到远的采样。
+		// **[v0.1.114] horizon-based**：每个方向取「遮挡物抬到地平线以上多少」（sinA）的最大值，
+		//   而不是「有几个邻居」（后者会把一整片坡都压暗）。每方向沿半径取 3 个由近到远的采样。
 		float maxSin = 0.0;
 		for (int s = 1; s <= 3; s++)
 		{
@@ -1843,7 +1862,10 @@ float screenAo(vec3 worldPos)
 		}
 		occ += maxSin;
 	}
-	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
+	// **[v0.1.116] 远处淡出**：半径是世界尺度，超过几十米后 0.5 m 比一个深度纹素还小 ⇒ 只剩噪声
+	//   （判据见 notes/212：24 m 起淡、56 m 归零，落在预通道 96 m 截止之前）。
+	float aoFade = 1.0 - smoothstep(24.0, 56.0, dist);
+	return clamp(1.0 - u_aoIntensity * aoFade * (occ / 8.0), 0.0, 1.0);
 }
 
 // [v0.1.69] 体积雾（与 HLSL 段同一算法）
