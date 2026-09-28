@@ -41,8 +41,19 @@ namespace Game {
         /// <summary>步进次数（默认 12：近场 8 + 远场 4 的两段分布，与 Iris 同构）。</summary>
         public static int ScreenVolumetricSteps { get; set; } = 12;
 
-        /// <summary>强度（0..2）。</summary>
-        public static float ScreenVolumetricStrength { get; set; } = 0.8f;
+        /// <summary>
+        /// 强度（0..2）。**[v0.1.124] 0.8 → 0.3：按"最坏机位"重新标定**。
+        ///
+        /// 为什么改：`朝太阳时的平均亮度位移 ≤ 10/255` 这条判据**量的是沿视线的雾程积分**，
+        /// 于是同一条 pass、同一个强度在三个机位上量出三个数（实测，全在 tod=0.30、太阳仰角 ~20°）：
+        /// 雾程短的机位 **+2.25**（7.9% 像素）、v0.1.121 的机位 **+6.05**（27.2%）、
+        /// 开阔地/长雾程机位 **+25.67**（67.3%，画面明显发白）。
+        /// 0.8 是按中间那个定的 ⇒ 最坏机位会过火。这一版的默认值按**最坏机位**定：
+        /// 加法亮度随强度近似线性（实测 0.50→+1.41、0.35→+0.97、0.25→+0.68 ⇒ 斜率 ~2.8/单位），
+        /// 0.8 × (10 / 25.67) ≈ **0.31** ⇒ 取 **0.3**，最坏机位预计 **≈ +9.6/255**（判据内）。
+        /// 代价：典型机位只剩 ≈ +0.85/255 —— 这条 pass 本来就**默认关**、是观感选项，宁可淡不可爆。
+        /// </summary>
+        public static float ScreenVolumetricStrength { get; set; } = 0.3f;
 
         /// <summary>射线最远（米）：天空像素也走满这一段（Iris 的 `sky ? maxDistance : min(...)`）。</summary>
         public static float ScreenVolumetricMaxDistance { get; set; } = 256f;
