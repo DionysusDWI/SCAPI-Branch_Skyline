@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.121**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.122**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -41,7 +41,9 @@
 
 * **太阳阴影（默认开）**：软阴影 PCF，核为**双同心环 16 抽样**，支撑形状与方向量化误差可用
   `skyline.GpuShadowKernelSelfCheck()` 量化；太阳追踪 + 远/近两级 GPU 阴影图；
-  强度**跟随昼光**（夜里不再有假阴影），`skyline.GpuShadowSampleEnabled=false` 可整条关掉；
+ 强度**跟随昼光**（夜里不再有假阴影），`skyline.GpuShadowSampleEnabled=false` 可整条关掉；
+  **[v0.1.122] 新增 Iris 的「镜像螺旋核」选项**（`GpuShadowKernel=3`）：直边**严格无偏**（0% vs ring16 的 6.25%）
+  但支撑各向异性更差（1.603 vs 1.082）；有效机位上两者画面差 **0 px**（maxΔ 73）⇒ **默认仍是 ring16**。
 * **远处阴影距离淡出**（按 Iris Complementary 的 `smoothstep(far*0.4, far*0.9, dist)`），
   消掉阴影图边界硬切（`GpuShadowFadeScale=0` 可回退）；
 * **体积云 / 体积雾 / 体积神光**：雾里逐步做太阳遮挡判定 × 前向散射；体积雾与神光**同时覆盖远景 LOD 层**；

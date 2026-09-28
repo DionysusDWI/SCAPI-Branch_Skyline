@@ -122,6 +122,19 @@ namespace Game {
         public const int GpuShadowKernelPoisson12 = 1;
         /// <summary>[v0.1.102] 核代号：双同心环 8+8（16 抽样，本分支按测量设计的核）。</summary>
         public const int GpuShadowKernelRing16 = 2;
+        /// <summary>
+        /// [v0.1.122] **Iris 的「镜像 + 半径递增螺旋」核**（`lib/lighting/shadowSampling.glsl`
+        /// 的 `offsetDist(x,s) = (cos(fract(x*2.427)*π), sin(...)) * 1.4 * x / s`，每次取样**成对** `±offset`）。
+        ///
+        /// 为什么补它：notes/204 把"Iris 阴影采样"逐条对过表，列了三条没迁的，这是其中**唯一能直接量**的一条
+        /// （另外两条：阴影图畸变要大改投影、彩色阴影要有彩色深度图，都记在候选里）。
+        /// 它的形状与我们的 ring16 不同：**半径从 1/8 递增到 1**（近密远疏）+ 金角方向 ⇒
+        /// 用同一套自检（量化误差 / 支撑各向异性 / 无偏）可以直接比出高下。
+        /// 半径按 `SpiralScale` 归一化到与 ring16 **同平均半影宽度**（v0.1.103 的口径）。
+        /// </summary>
+        public const int GpuShadowKernelSpiral16 = 3;
+        /// <summary>[v0.1.122] 螺旋核的半径归一化系数（由自检的 extentMeanT 定，见 notes/220）。</summary>
+        public const float GpuShadowSpiralScale = 0.885f;
         /// <summary>[v0.1.102] Poisson 核实际使用的抽样数（Dawnlight 的 `samples` 默认值）。</summary>
         public const int GpuShadowPoissonSamples = 12;
         /// <summary>[v0.1.102] 双环核实际使用的抽样数。</summary>
@@ -141,6 +154,7 @@ namespace Game {
         public static float GpuShadowKernelSlopeScale(int kernel) => kernel switch {
             GpuShadowKernelPoisson12 => 1.23423f,
             GpuShadowKernelRing16 => 1f,
+            GpuShadowKernelSpiral16 => 1.162f,          // = 1.4 × (7.5/8) × GpuShadowSpiralScale
             _ => 1.41421f
         };
 
@@ -234,6 +248,22 @@ namespace Game {
 
         /// <summary>[v0.1.102] 取某个核的第 i 个偏移（**与 shader 里的表达式逐字对应**）。</summary>
         static void KernelOffset(int kernel, int i, float ca, float sa, out float x, out float y) {
+            if (kernel == GpuShadowKernelSpiral16) {
+                // [v0.1.122] Iris 的螺旋：x = dither(固定 0.5) + i，方向 fract(x·2.427)·π，半径 1.4·x/8；
+                //   后一半样本取镜像（−offset）—— 与 shader 里的循环**逐字对应**。
+                int j = i & 7;
+                float xv = 0.5f + j;
+                float ang = (xv * 2.427f - MathF.Floor(xv * 2.427f)) * MathF.PI;
+                float r = 1.4f * xv / 8f * GpuShadowSpiralScale;
+                float px = MathF.Cos(ang) * r, py = MathF.Sin(ang) * r;
+                if (i >= 8) {
+                    px = -px;
+                    py = -py;
+                }
+                x = px * ca - py * sa;
+                y = px * sa + py * ca;
+                return;
+            }
             if (kernel == GpuShadowKernelPoisson12 || kernel == GpuShadowKernelRing16) {
                 float[] table = kernel == GpuShadowKernelPoisson12 ? s_kernelPoissonXY : s_kernelRingXY;
                 float px = table[i * 2], py = table[i * 2 + 1];
@@ -256,11 +286,13 @@ namespace Game {
         static int KernelSampleCount(int kernel) =>
             kernel == GpuShadowKernelPoisson12 ? GpuShadowPoissonSamples
             : kernel == GpuShadowKernelRing16 ? GpuShadowRingSamples
+            : kernel == GpuShadowKernelSpiral16 ? 16
             : 8;
 
         static string KernelName(int kernel) => kernel switch {
             GpuShadowKernelPoisson12 => "poisson12",
             GpuShadowKernelRing16 => "ring16",
+            GpuShadowKernelSpiral16 => "spiral16",
             _ => "octagon8"
         };
 
@@ -284,7 +316,7 @@ namespace Game {
                 result["rotations"] = rotations;
                 result["analyticLit"] = 0.5;
                 JsonObject kernels = new();
-                for (int kernel = 0; kernel <= 2; kernel++) {
+                for (int kernel = 0; kernel <= 3; kernel++) {
                     int n = KernelSampleCount(kernel);
                     double sum = 0, sumSq = 0, sumExt = 0;
                     double minExt = double.MaxValue, maxExt = 0, maxErr = 0;
@@ -357,7 +389,7 @@ namespace Game {
                 bool unbiased = true, quantOk = true;
                 // [v0.1.103] F：bias 的"抽样半径"系数必须等于该核真的最大采样半径（防止换核后 bias 走偏）
                 bool slopeScaleOk = true;
-                for (int kernel = 0; kernel <= 2; kernel++) {
+                for (int kernel = 0; kernel <= 3; kernel++) {
                     JsonObject k = kernels[KernelName(kernel)].AsObject();
                     if (System.Math.Abs(k["mean"].GetValue<double>() - 0.5) > 0.02) {
                         unbiased = false;
@@ -384,7 +416,8 @@ namespace Game {
                 bool anchors = GpuShadowOpaquePsh.Contains("u_shadowKernel")
                     && GpuShadowOpaquePsh.Contains("rotKernelOffset")
                     && GpuShadowOpaquePsh.Contains("-0.94201624")
-                    && GpuShadowOpaquePsh.Contains("0.92387956");
+                    && GpuShadowOpaquePsh.Contains("0.92387956")
+                    && GpuShadowOpaquePsh.Contains("2.427");       // [v0.1.122] 螺旋核的锚（金角步进）
                 result["checks"] = new JsonObject {
                     ["A_unbiased"] = unbiased,
                     ["B1_regularKernelsQuantizeAsOneOverN"] = quantOk,
@@ -1354,6 +1387,38 @@ float pcfRing16Near(float2 uv, float t, float fragDepth, float sb, float ca, flo
 	return acc * 0.0625;
 }
 
+// [v0.1.122] **Iris 的「镜像 + 半径递增螺旋」核**（`lib/lighting/shadowSampling.glsl` 的 `offsetDist`）：
+//   方向 `fract(x·2.427)·π`（≈金角 137.5°）、半径 `1.4·x/s`（近密远疏），每个 `x` 取 **±offset 一对**。
+//   这里写成**循环**而不是 16 条字面量：本引擎的 GLES 路径不接受 const 数组，而方向/半径都能由公式给。
+//   半径乘 `GpuShadowSpiralScale = 0.885` 归一到与 ring16 **同平均半影宽度**（v0.1.103 的口径）。
+float pcfSpiral16Far(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float x = 0.5 + float(i);
+		float ang = frac(x * 2.427) * 3.14159265;
+		float2 o = rotKernelOffset(float2(cos(ang), sin(ang)) * (1.4 * x * 0.125 * 0.885), ca, sa) * t;
+		acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + o)) + sb);
+		acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv - o)) + sb);
+	}
+	return acc * 0.0625;
+}
+
+float pcfSpiral16Near(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float x = 0.5 + float(i);
+		float ang = frac(x * 2.427) * 3.14159265;
+		float2 o = rotKernelOffset(float2(cos(ang), sin(ang)) * (1.4 * x * 0.125 * 0.885), ca, sa) * t;
+		acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + o)) + sb);
+		acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv - o)) + sb);
+	}
+	return acc * 0.0625;
+}
+
 float2 shadowUv(float4 clip, float flipY)
 {
 	float2 uv = float2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
@@ -1479,7 +1544,15 @@ void main(
 			// [v0.1.102] 核选择：1 = Dawnlight 的 Poisson 盘 12 抽样（`lib/CalculateShadow.glsl`），
 			// 2 = 本分支的双环 8+8（16 抽样），0 = v0.1.64 的八边形 8 抽样（逐位不变）。
 			// 三个核共用同一 t / 同一 bias 补偿，所以 A/B 只换了**核**。
-			if (u_shadowKernel > 1.5)
+			// [v0.1.122] 3 = Iris 的「镜像 + 半径递增螺旋」（`lib/lighting/shadowSampling.glsl`），
+			//   见下方 `pcfSpiral16Far/Near`。
+			if (u_shadowKernel > 2.5)
+			{
+				lit = insideNear
+					? pcfSpiral16Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfSpiral16Far(uvFar, t, fragDepth, sb, ca, sa);
+			}
+			else if (u_shadowKernel > 1.5)
 			{
 				lit = insideNear
 					? pcfRing16Near(uvNear, t, fragDepth, sb, ca, sa)
@@ -2022,6 +2095,37 @@ float pcfRing16Near(vec2 uv, float t, float fragDepth, float sb, float ca, float
 	return acc * 0.0625;
 }
 
+// [v0.1.122] **Iris 的「镜像 + 半径递增螺旋」核**（与 HLSL 段同一算法）：
+//   方向 `fract(x·2.427)·π`（≈金角）、半径 `1.4·x/s`，每个 x 取 ±offset 一对；
+//   写成**循环**而不是 16 条字面量（GLES 不接受 const 数组，而这里方向/半径都能由公式给）。
+float pcfSpiral16Far(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float x = 0.5 + float(i);
+		float ang = fract(x * 2.427) * 3.14159265;
+		vec2 o = rotKernelOffset(vec2(cos(ang), sin(ang)) * (1.4 * x * 0.125 * 0.885), ca, sa) * t;
+		acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + o)) + sb);
+		acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv - o)) + sb);
+	}
+	return acc * 0.0625;
+}
+
+float pcfSpiral16Near(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	for (int i = 0; i < 8; i++)
+	{
+		float x = 0.5 + float(i);
+		float ang = fract(x * 2.427) * 3.14159265;
+		vec2 o = rotKernelOffset(vec2(cos(ang), sin(ang)) * (1.4 * x * 0.125 * 0.885), ca, sa) * t;
+		acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + o)) + sb);
+		acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv - o)) + sb);
+	}
+	return acc * 0.0625;
+}
+
 vec2 shadowUv(vec4 clip, float flipY)
 {
 	vec2 uv = vec2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
@@ -2130,7 +2234,14 @@ void main()
 			float ca = cos(ang);
 			float sa = sin(ang);
 			// [v0.1.102] 核选择（与 HLSL 段同一算法）
-			if (u_shadowKernel > 1.5)
+			// [v0.1.122] 3 = Iris 的镜像螺旋核（与 HLSL 段同一算法）
+			if (u_shadowKernel > 2.5)
+			{
+				lit = insideNear
+					? pcfSpiral16Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfSpiral16Far(uvFar, t, fragDepth, sb, ca, sa);
+			}
+			else if (u_shadowKernel > 1.5)
 			{
 				lit = insideNear
 					? pcfRing16Near(uvNear, t, fragDepth, sb, ca, sa)
