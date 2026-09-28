@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.125**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.126**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -24,9 +24,8 @@
 * 大规模建筑压力测试：单区块 4096 件高复杂度家具；家具**逐级降分辨率 LOD**（`d_box(E)` 占替距）、
   几何预算与方盒占位、高复杂度家具安全阀。
   **[v0.1.125] 标定完成（里程碑 2.2）**：修掉"打开开关当下不生效"的真缺陷（开关两个方向都强制重建
-  烘过家具的区块）；量出**出厂分界站得住** —— 出厂 L1=47.4 m 处开/关在物体掩膜内 **0 px**，
-  而把分界提前到 ≤30 m 立刻可见（12/20/30 m 内部变化 37%/26%/23%），
-  **第二模型 qwen3.8-omni-flash 在三个距离上独立判出"有差异"、在出厂分界处判"像素级完全重合"**（两轮盲测一致）。
+  烘过家具的区块）；量出**出厂分界站得住**（L1=47.4 m 处开/关物体掩膜内 **0 px**；提前到 ≤30 m
+  立刻可见，内部变化 37%/26%/23%），**第二模型 qwen3.8-omni-flash 独立复核一致**。
 * **[v0.1.123] 外部高度场驱动地形（里程碑 5 的"清管线风险"实验）**：测试类
   `TerrainContentsGeneratorHeightmap`（**默认不生效**，只能经 `skyline.TerrainDiffusionInstall` 临时装上）
   证明 SC 地形管线**能按外部高度图长地形** —— 3 个新生地区域 27/27 采样点 `|顶面−高度图| ≤ 1`
@@ -107,7 +106,9 @@ powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
 ```
 
 * 控制与观测走 **AgentBridge**（裸 TCP 行 JSON）：`python tools\scbridge.py state | act ... | shot`；
-* 回归门禁：`python heightlab\regression-skyline.py`；全量巡检：`python heightlab\acceptance-sweep.py`。
+* 回归门禁：`python heightlab\regression-skyline.py`；全量巡检：`python heightlab\acceptance-sweep.py`
+  （**[v0.1.126] 代价按毫秒/帧判**：百分比会被基线帧率放大，七次实测 −7.91%~+3.12%；
+  预算 **1.0 ms = 60 fps 的 6%**。收口 **PASS 25 / FAIL 0 / SKIP 4**）。
 
 ### 文档与证据
 
