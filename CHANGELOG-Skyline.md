@@ -7,6 +7,48 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.108] - 2026-09-28
+
+第一百一十五个版本：**按新口径把阴影侧换成 Iris 的实现** —— 远处阴影**距离淡出**。
+相对 v0.1.107 的变更：
+
+### 1. 出处与要解决的问题
+
+用户更新的里程碑 4 要求"**对迁移 Iris 能替代 Dawnlight 的部分也应当尽可能替代**"。
+本轮读的是工作区里**已装**的 Iris 光影包 **Complementary Reimagined r5.9.3** 的
+`lib/lighting/shadowSampling.glsl`；其中 `GetShadow()` 对 `DISTANT_HORIZONS/VOXY` 几何做了一条
+**距离淡出**：`fade = smoothstep(far*0.4, far*0.9, dist)`，再按 fade 衰减阴影色彩强度。
+
+我们的太阳深度图**只有 512 m 半径**：超过就完全没有阴影 ⇒ 那条边界是**硬切**（远处一圈突然变亮）。
+按同一口径迁移后，阴影在 `0.4R` 处开始减弱、到 `0.9R` 完全淡出 ⇒ 与"图外无阴影"**平滑接上**。
+
+### 2. 实现（两条硬口径）
+
+* 片元里把阴影分支从 `if (inside && u_shadowEnable)` 改成 `if (u_shadowEnable)`：
+  **图外**的片元按"照到"处理，但强度乘 `shadowFade` ⇒ 边界不再硬切；
+* 新 uniform `u_shadowFadeStart/End` = `GpuShadowFadeScale × (0.4R, 0.9R)`；
+  **`GpuShadowFadeScale = 0` ⇒ start=end=0 ⇒ 片元直接跳过淡出**（A/B 用，逐位回 v0.1.107）。
+
+### 3. 验收
+
+| 判据 | 实测（远视机位、关雾、冻风、钉时刻、关 LOD 云影） |
+|---|---|
+| 淡出开/关（`GpuShadowFadeScale` 1 ↔ 0） | **1,788 px**、`maxChannelDelta 88` |
+| 噪声底（同设置重拍） | **0 px** |
+| 回归门禁 / 构建 | **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；**0 警告 0 错误** |
+
+### 4. 如实记
+
+* 这条改动**只影响 205~512 m 那一带的阴影强度**（更近的片元 fade≈1、行为不变）；本机远视机位下
+  一帧约 **1,788 px**（0.12%）—— 它不是"更漂亮"，而是**消掉一条人造的硬边界**；
+* Iris 那份 `shadowSampling.glsl` 里还有一项**没迁**（下一轮候选）：`SampleTAAFilteredShadow` 的
+  **镜像 + 半径随索引增长的螺旋核**（方向用金角 2.427 rad、半径 `1.4·(n+i)/samples`、成对镜像取样），
+  它比我们现在的"等半径环/八边形"更贴合**可变宽度半影**；
+* 另外两大项仍缺**场景深度纹理**：`lib/volumetricLight/volumetricLight.glsl`（16.8 KB 屏幕空间体积光）、
+  SSAO/TAA —— 这是本分支与 Iris 管线之间**最大的结构性差距**。
+
+证据：`data/sessions/skyline-v0108/`（`shadowfade/`、`regression.json`）；笔记 `notes/204`。
+
 ## [v0.1.107] - 2026-09-28
 
 第一百一十四个版本：**把点光源做成 shader 变体** —— 关闭时**零代价**。相对 v0.1.106 的变更：

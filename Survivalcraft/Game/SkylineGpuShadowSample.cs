@@ -71,6 +71,11 @@ namespace Game {
         /// <summary>[v0.1.64] 太阳仰角下限（sinθ）。低于它按它算，避免日出日落时 bias 发散。</summary>
         public static float GpuShadowSoftSunYFloor { get; set; } = 0.15f;
 
+        /// <summary>[v0.1.108] **远处阴影淡出的比例**（默认 1 = 用 Iris 光影包那套
+        /// `smoothstep(far*0.4, far*0.9, dist)`；0 = 关，逐位回 v0.1.107 的"硬边界"）。
+        /// 存在的意义：既能 A/B 取证，也能在"影子淡出太早"的场景里把它调小。</summary>
+        public static float GpuShadowFadeScale { get; set; } = 1f;
+
         /// <summary>[v0.1.102 引入 / v0.1.103 改默认] **PCF 采样核选择**（里程碑 4：按 Dawnlight 的实现换核）。
         /// `0` = 八边形 8 抽样（v0.1.64 的原核）；`1` = Dawnlight 的 Poisson 盘 12 抽样；
         /// `2` = 双同心环 8+8（16 抽样）—— **v0.1.103 起默认**。
@@ -166,6 +171,8 @@ namespace Game {
                     _ => 8
                 },
                 ["kernelSlopeScale"] = System.Math.Round((double)GpuShadowKernelSlopeScale(GpuShadowKernel), 5)
+                ,
+                ["fadeScale"] = (double)GpuShadowFadeScale
             };
             return o.ToJsonString();
         }
@@ -465,6 +472,12 @@ namespace Game {
                 shader.GetParameter("u_shadowSoftReliefTexels", true).SetValue(GpuShadowSoftReliefTexels);
                 shader.GetParameter("u_shadowKernel", true).SetValue((float)GpuShadowKernel);
                 shader.GetParameter("u_shadowKernelSlopeScale", true).SetValue(GpuShadowKernelSlopeScale(GpuShadowKernel));
+                // [v0.1.108] 远处阴影淡出：口径 = Iris 光影包的 `smoothstep(far*0.4, far*0.9, dist)`
+                // `GpuShadowFadeScale=0` ⇒ start=end=0 ⇒ 片元里直接跳过淡出（A/B 用；逐位回 v0.1.107）
+                shader.GetParameter("u_shadowFadeStart", true)
+                    .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.4f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
+                shader.GetParameter("u_shadowFadeEnd", true)
+                    .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.9f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
                 return "";
             }
             catch (System.Exception e) {
@@ -781,6 +794,9 @@ float u_shadowSoftSlopeBias;
 float u_shadowSoftReliefTexels;
 float u_shadowKernel;
 float u_shadowKernelSlopeScale;
+// [v0.1.108] 远处阴影淡出（口径来自 Iris 光影包 Complementary 的 shadowSampling.glsl）
+float u_shadowFadeStart;
+float u_shadowFadeEnd;
 // [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色），由 `SkylinePointLights.Bind` 写好
 float u_plStrength;
 float u_plCount;
@@ -1034,14 +1050,31 @@ void main(
 			result.rgb = float3(mapDepth, mapDepth, mapDepth);
 		}
 	}
-	else if (inside && u_shadowEnable > 0.5)
+	else if (u_shadowEnable > 0.5)
 	{
+		// [v0.1.108] **远处阴影淡出**（Iris 光影包 Complementary 的 `lib/lighting/shadowSampling.glsl`
+		//   `GetShadow()` 里给 DISTANT_HORIZONS/VOXY 几何用的那一条：`smoothstep(far*0.4, far*0.9, dist)`）。
+		//   我们的太阳深度图只有 512 m 半径，超过就是「完全没有阴影」 ⇒ 边界上会**硬切**（一圈突然变亮）。
+		//   这里按同一口径做距离淡出：`inside=false` 的片元当成「照到」，但强度乘 fade ⇒ 交界变平滑。
+		float shadowFade = 1.0;
+		if (u_shadowFadeEnd > u_shadowFadeStart)
+		{
+			float shadowDist = length(v_world - u_viewPosition);
+			shadowFade = 1.0 - smoothstep(u_shadowFadeStart, u_shadowFadeEnd, shadowDist);
+		}
+		float lit = 1.0;
+		if (!inside)
+		{
+			lit = 1.0;
+			result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		}
+		else
+		{
 		// 近图的深度是按「近图自己的 eye + depthMax」归一化的（两张图的太阳距离不同），
 		// 所以比较时必须换成对应的 eye/depthMax —— 用错会整片判成阴影（实测踩到）。
 		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
 		float3 eye = insideNear ? u_eyeNear : u_eye;
 		float fragDepth = saturate(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001));
-		float lit;
 		if (u_shadowSoft > 0.5)
 		{
 			// [v0.1.64] 软阴影 = 8 抽样八边形核 PCF。要点：**平均的是「遮挡判定」而不是深度**
@@ -1105,7 +1138,8 @@ void main(
 			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
 			lit = step(fragDepth, mapDepth + u_shadowBias);
 		}
-		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
+		result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		}
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 `DistanceAttenuationHL` 曲线（逐字同式）。
 	// 地形片元没有法线 ⇒ 只有距离衰减与颜色，没有 N·L 那一项（notes/201 如实记）。
@@ -1271,6 +1305,9 @@ uniform float u_shadowSoftSlopeBias;
 uniform float u_shadowSoftReliefTexels;
 uniform float u_shadowKernel;
 uniform float u_shadowKernelSlopeScale;
+// [v0.1.108] 远处阴影淡出
+uniform float u_shadowFadeStart;
+uniform float u_shadowFadeEnd;
 // [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色）
 uniform float u_plStrength;
 uniform float u_plCount;
@@ -1516,13 +1553,27 @@ void main()
 			result.rgb = vec3(mapDepth, mapDepth, mapDepth);
 		}
 	}
-	else if (inside && u_shadowEnable > 0.5)
+	else if (u_shadowEnable > 0.5)
 	{
+		// [v0.1.108] 远处阴影淡出（与 HLSL 段同一算法；口径来自 Iris 光影包 Complementary
+		//   `lib/lighting/shadowSampling.glsl` 的 `smoothstep(far*0.4, far*0.9, dist)`）
+		float shadowFade = 1.0;
+		if (u_shadowFadeEnd > u_shadowFadeStart)
+		{
+			float shadowDist = length(v_world - u_viewPosition);
+			shadowFade = 1.0 - smoothstep(u_shadowFadeStart, u_shadowFadeEnd, shadowDist);
+		}
+		float lit = 1.0;
+		if (!inside)
+		{
+			result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		}
+		else
+		{
 		// 近图深度按「近图自己的 eye + depthMax」归一化（两张图太阳距离不同）→ 比较时必须一起换。
 		float depthMax = insideNear ? u_depthMaxNear : u_depthMax;
 		vec3 eye = insideNear ? u_eyeNear : u_eye;
 		float fragDepth = clamp(dot(eye - v_world, u_sunDir) / max(depthMax, 0.0001), 0.0, 1.0);
-		float lit;
 		if (u_shadowSoft > 0.5)
 		{
 			// [v0.1.64] 软阴影 = 8 抽样八边形核 PCF（与 HLSL 段同一算法：比较「遮挡判定」、逐像素旋转）
@@ -1580,7 +1631,8 @@ void main()
 			// 关掉软阴影：用已取到的 mapDepth 判（与 v0.1.63 逐位一致）
 			lit = step(fragDepth, mapDepth + u_shadowBias);
 		}
-		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
+		result.rgb *= (1.0 - u_shadowStrength * shadowFade * (1.0 - lit));
+		}
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）
 #ifdef POINT_LIGHTS
