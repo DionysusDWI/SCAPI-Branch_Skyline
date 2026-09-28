@@ -592,7 +592,25 @@ void main()
                 }
                 // [v0.1.33] 近景自检：玩家周围几列的**真实地表顶面点**（v0.1.32 时它们会落在背景上，
                 // 本版由"真实区块几何"覆盖，应命中）。
-                (int x, int z)[] localPairs = [(4290, 9095), (4316, 9099), (4280, 9080), (4300, 9100)];
+                // [v0.1.105] **原来这里是写死的旧场地坐标** `(4290,9095)(4316,9099)(4280,9080)(4300,9100)` ——
+                //   在别的世界里它们全落在视锥外，被 `outside` 跳过 ⇒ **这一组探针等于不存在**
+                //   （2026-09-28 实测：`AgentLab` 里 6 个样本全是 LOD 探针，没有一条 `kind='chunk'`）。
+                //   现在改成**从相机附近的已加载列里现场取点**：以相机为中心，取 4 个象限里
+                //   距相机 12~40 m、列高有效（`> MinHeight`）的点，取不到就少测几个（不抛异常）。
+                List<(int x, int z)> localPairs = [];
+                {
+                    int bx = (int)MathF.Floor(center.X), bz = (int)MathF.Floor(center.Z);
+                    foreach ((int ox, int oz) in new[] { (16, 16), (-16, 16), (16, -16), (-16, -16),
+                                                         (32, 0), (-32, 0), (0, 32), (0, -32) }) {
+                        int lx = bx + ox, lz = bz + oz;
+                        if (terrain.GetTopHeight(lx, lz) > TerrainChunk.MinHeight) {
+                            localPairs.Add((lx, lz));
+                            if (localPairs.Count >= 4) {
+                                break;
+                            }
+                        }
+                    }
+                }
                 foreach ((int lx, int lz) in localPairs) {
                     int top = terrain.GetTopHeight(lx, lz);
                     if (top <= TerrainChunk.MinHeight) {
