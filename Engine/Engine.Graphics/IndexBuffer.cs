@@ -165,8 +165,18 @@ namespace Engine.Graphics {
                 || sourceStartIndex + sourceCount > source.Length) {
                 throw new ArgumentException("Range is out of source bounds.");
             }
-            if (targetStartIndex < 0
-                || targetStartIndex * size + sourceCount * num > IndicesCount * size) {
+            // [v0.1.97 修] 这里原来按**字节区间**判：`targetStartIndex*size + sourceCount*num > IndicesCount*size`。
+            // 对 `num == size`（同宽）它是等价写法，但对**收窄写入**（`int[]` 写进 16 位索引缓冲，
+            // 下面那个分支本来就支持、并且有自己正确的元素个数校验）它在数学上**恒为真**
+            // （`4·c > 2·I` 对 c == I 也成立）⇒ 合法调用一律抛 `ArgumentException: Range is out of target bounds`。
+            // 实测后果：`InstancedModelsManager` 每帧抛一次，而**刚 new 出来的 VB/IB 因为
+            // `GraphicsResource` 的静态注册表永久泄漏**（约 0.25 MiB/s，见 notes/173）。
+            // 改成按**元素个数**判（唯一例外是"字节流写 32 位缓冲"那条老路径，仍按字节）。
+            bool byteStreamInto32 = num == 1 && size == 4;
+            bool outOfTarget = byteStreamInto32
+                ? (long)targetStartIndex * size + sourceCount > (long)IndicesCount * size
+                : (long)targetStartIndex + sourceCount > IndicesCount;
+            if (targetStartIndex < 0 || outOfTarget) {
                 throw new ArgumentException("Range is out of target bounds.");
             }
         }

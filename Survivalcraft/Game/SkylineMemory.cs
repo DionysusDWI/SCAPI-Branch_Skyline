@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Text.Json.Nodes;
 
 namespace Game {
@@ -19,6 +20,94 @@ namespace Game {
     /// 口径：**这个探针只读**；`ClearCaches` 是显式动作（默认不调用）。
     /// </summary>
     public static partial class SkylineRuntime {
+        /// <summary>
+        /// [v0.1.97] **GPU 资源账本**：`Engine.Graphics.GraphicsResource` 把每个资源都登记进一个
+        /// **静态** `HashSet m_resources`，而它的终结器只有在**不可达**时才会跑 ——
+        /// 可这个 HashSet 本身就让"没 Dispose 的资源"永远可达 ⇒ **没 Dispose 的 VB/IB 是永久泄漏**
+        /// （托管对象 + GPU 缓冲都留在那）。
+        ///
+        /// 所以这个计数就是"活着的 GPU 资源数"，按类型分组就能直接指出**谁在漏缓冲**。
+        /// 为什么需要它：长巡检后堆指纹显示 `VertexBuffer/IndexBuffer` 各 **~49k** 个存活对象，
+        /// 而壳仓只有 ~3k 个网格 —— 差一个数量级，必须点名到类型。
+        ///
+        /// 只读；`Limit` 限制列出的类型数（按数量降序）。
+        /// </summary>
+        public static string GpuResourceLedger(int limit = 16) {
+            JsonObject o = new();
+            try {
+                HashSet<Engine.Graphics.GraphicsResource> set = Engine.Graphics.GraphicsResource.m_resources;
+                Dictionary<string, int> byType = [];
+                Dictionary<string, long> bytesByType = [];
+                long totalBytes = 0;
+                int disposed = 0;
+                foreach (Engine.Graphics.GraphicsResource r in set) {
+                    if (r == null) {
+                        continue;
+                    }
+                    string key = r.GetType().FullName ?? r.GetType().Name;
+                    byType[key] = byType.TryGetValue(key, out int c) ? c + 1 : 1;
+                    long b = 0;
+                    try {
+                        if (!r.m_isDisposed) {
+                            b = r.GetGpuMemoryUsage();
+                        }
+                    }
+                    catch {
+                        // 忽略：统计口径不该因为一个资源抛异常就失败
+                    }
+                    if (r.m_isDisposed) {
+                        disposed++;
+                    }
+                    bytesByType[key] = bytesByType.TryGetValue(key, out long pb) ? pb + b : b;
+                    totalBytes += b;
+                }
+                List<KeyValuePair<string, int>> list = [.. byType];
+                list.Sort((a, b) => b.Value.CompareTo(a.Value));
+                JsonArray top = [];
+                for (int i = 0; i < list.Count && i < Math.Max(1, limit); i++) {
+                    top.Add(new JsonObject {
+                        ["type"] = list[i].Key,
+                        ["count"] = list[i].Value,
+                        ["gpuMiB"] = Math.Round(bytesByType[list[i].Key] / 1048576.0, 3)
+                    });
+                }
+                o["ok"] = true;
+                o["liveResources"] = set.Count;
+                o["disposedButStillRegistered"] = disposed;
+                o["gpuTotalMiB"] = Math.Round(totalBytes / 1048576.0, 3);
+                o["types"] = byType.Count;
+                o["top"] = top;
+                o["note"] = "静态 HashSet 持有 ⇒ 没 Dispose 的资源**永久**可达（终结器也轮不到）";
+            }
+            catch (Exception e) {
+                o["ok"] = false;
+                o["err"] = e.Message;
+            }
+            return o.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.97 · 诊断] **武装"抓下一个被创建的 GPU 资源"**：下一个 `GraphicsResource`
+        /// 的构造会把创建栈记下来（默认不记录，避免每帧抓栈的开销）。
+        /// 用法：`GpuResourceArmCapture()` → 等一拍 → `GpuResourceLastCapture()`。
+        /// </summary>
+        public static string GpuResourceArmCapture() {
+            Engine.Graphics.GraphicsResource.m_captureStackTrace = null;
+            Engine.Graphics.GraphicsResource.m_captureTypeName = null;
+            Engine.Graphics.GraphicsResource.m_captureNext = true;
+            return "{\"ok\":true,\"armed\":true}";
+        }
+
+        /// <summary>[v0.1.97 · 诊断] 读回上一次 `GpuResourceArmCapture()` 抓到的创建栈。</summary>
+        public static string GpuResourceLastCapture() {
+            return new JsonObject {
+                ["ok"] = true,
+                ["type"] = Engine.Graphics.GraphicsResource.m_captureTypeName,
+                ["armed"] = Engine.Graphics.GraphicsResource.m_captureNext,
+                ["stack"] = Engine.Graphics.GraphicsResource.m_captureStackTrace
+            }.ToJsonString();
+        }
+
         public static string MemoryProbe() {
             JsonObject o = new();
             long cachedCells = -1, usedCells = -1;

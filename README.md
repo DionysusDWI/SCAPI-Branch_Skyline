@@ -8,11 +8,22 @@
 
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力（面向 AI / agent 建造与创造模式工具）。
 
-**当前状态：v0.1.96** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
+**当前状态：v0.1.97** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
 补上**大规模 / 高空建造链路**的能力，落地三层渲染路线的第一轮（多层家具 LOD + 超视距 LOD），
 并开始**里程碑 3：Dawnlight + Iris 光影实装接入**（已完成：软阴影 PCF、太阳追踪、显存预算表、体积云、体积雾），
 同时修掉四处缺陷（负高度不能手动放置、命令辅助棒"选中自己"、区块存储布局不一致、高空手持方块全黑）：
 
+- **修掉一条每帧漏一对 VB/IB 的 GPU 资源泄漏（v0.1.97）** —— 长会话堆指纹里
+  `VertexBuffer/IndexBuffer` 各有 **49,159** 个**存活**对象。机制：`GraphicsResource` 把每个资源登记进
+  **静态** `HashSet`，它让"没 Dispose 的资源"**永远可达**（终结器轮不到）⇒ 忘了 Dispose 就是**永久泄漏**。
+  新探针 `skyline.GpuResourceLedger`（按类型+GPU 字节）与 `GpuResourceArmCapture/LastCapture`
+  （**抓下一个被创建资源的调用栈**）把泄漏点钉在 `InstancedModelsManager.CreateInstancedModelDataForParts`：
+  它按**顶点数**选 16 位索引格式、却永远传 `int[]`，而 `IndexBuffer.VerifyParametersSetData` 用**字节区间**
+  判边界（对 `int[] → 16 位` 这条合法收窄路径**恒为真**）⇒ 每帧每模型抛
+  `ArgumentException: Range is out of target bounds`，刚 `new` 的两个缓冲永久泄漏（≈0.25 MiB/s）。
+  修成按**元素个数**判之后：`Hits` **0 → 3154/3154**、`Misses` **0**、新增 live GPU 资源 **0/s**、
+  `gpuMiB` Δ**0.00**。同版把验收脚手架的"量到噪声"也修了（稳定像素掩膜 / 没有样本报 SKIP）。
+  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/173`。
 - **体素壳额度的滑动窗口（v0.1.96）—— 里程碑 1.3 的"体积感"其实一个像素都没画** ——
   普查发现 `voxelShellCubes=512`（顶格）、`voxelSkippedByCap=12,338`、而
   **`voxelMeshResident=0` / `drawnVoxelLastFrame=0`**，且 `CubeShellSurfaceVoxel` 开/关画面差

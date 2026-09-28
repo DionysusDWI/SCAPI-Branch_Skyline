@@ -123,16 +123,67 @@ namespace Game {
         /// </summary>
         static Dictionary<CacheKey, int> m_visibilitySignatures = new();
 
+        /// <summary>
+        /// [v0.1.97 · 诊断] 缓存规模：**键数**（Model × meshDrawOrders 哈希）与**缓冲组数**。
+        /// 为什么要暴露它：实测站着不动也**每帧漏 1 个 VB + 1 个 IB**（约 0.25 MiB/s），
+        /// 抓栈抓到泄漏点就在这条缓存路径上 —— 需要区分"命中后重建（有 Dispose，净零）"
+        /// 与"**键一直变新（无上限、无淘汰 ⇒ 永久泄漏）**"这两种完全不同的情形。
+        /// </summary>
+        public static int CacheEntries => m_cache.Count;
+
+        /// <summary>[v0.1.97 · 诊断] 缓存函数被调用 / 命中 / 重建 / 未命中 的累计次数。
+        /// 用来验证一个**反直觉**的现象：抓栈抓到泄漏点就在这条链上（每帧都在建 VB/IB），
+        /// 而 `CacheEntries` 读出来**恒为 0**。若这里的计数也恒为 0，说明桥读到的是
+        /// **另一份静态状态**（同一个类型被加载了两次），结论方向就完全不同。
+        /// </summary>
+        public static long Calls;
+        public static long Hits;
+        public static long Rebuilds;
+        public static long Misses;
+
+        /// <summary>[v0.1.97 · 诊断] `Display.DeviceReset` 触发的次数、其中处理掉的缓存条目数、
+        /// 以及清表次数。**为什么这三个数能定案**：`m_cache` 只在这一个地方被清；
+        /// 实测"每次调用都 miss、`CacheEntries` 恒 0、每帧漏一对 VB/IB"这三件事同时成立，
+        /// 唯一能与代码读通的解释就是"**缓存每帧被清一次**"—— 要么是设备重置风暴，
+        /// 要么是清除路径没走到 dispose。三个计数直接分开这两种情形。
+        /// </summary>
+        public static long DeviceResets;
+        public static long DisposedInReset;
+        public static long Clears;
+
+        /// <summary>[v0.1.97 · 诊断] 未命中路径里**抛异常的累计次数**与第一次的异常文本。
+        /// 实测"调用 35/s、命中恒 0、未命中=调用、`CacheEntries` 恒 0、且每帧漏一对 VB/IB"，
+        /// 而清表计数为 0 ⇒ 唯一读得通的解释是"**miss 路径在创建后、写表前中断**"：
+        /// 缓冲已经 `new` 出来（进了静态注册表 ⇒ 永久泄漏），但没进缓存，于是每帧都重来一次。
+        /// 这两个数就是那条断言的判据。
+        /// </summary>
+        public static long CreateErrors;
+        public static string LastCreateError;
+
+        /// <summary>[v0.1.97 · 诊断] 缓存里持有的 `InstancedModelData` 组数（每组 = 1 VB + 1 IB）。</summary>
+        public static int CacheBufferGroups {
+            get {
+                int n = 0;
+                foreach (Dictionary<int, InstancedModelData> d in m_cache.Values) {
+                    n += d.Count;
+                }
+                return n;
+            }
+        }
+
         static InstancedModelsManager() {
             Display.DeviceReset += delegate {
+                DeviceResets++;
                 foreach (Dictionary<int, InstancedModelData> dict in m_cache.Values) {
                     foreach (InstancedModelData value in dict.Values) {
                         value.VertexBuffer?.Dispose();
                         value.IndexBuffer?.Dispose();
+                        DisposedInReset++;
                     }
                 }
                 m_cache.Clear();
                 m_visibilitySignatures.Clear();
+                Clears++;
             };
         }
 
@@ -164,10 +215,13 @@ namespace Game {
         public static Dictionary<int, InstancedModelData> GetInstancedModelDataByMaterial(Model model, int[] meshDrawOrders) {
             CacheKey key = new CacheKey(model, meshDrawOrders);
             int signature = ComputeVisibilitySignature(model, meshDrawOrders);
+            Calls++;
             if (m_cache.TryGetValue(key, out Dictionary<int, InstancedModelData> dataByMaterial)) {
+                Hits++;
                 // 可见性变化（KHR_node_visibility 动画等）→ 丢弃旧缓冲，按当前可见性重建
                 if (!m_visibilitySignatures.TryGetValue(key, out int builtSignature)
                     || builtSignature != signature) {
+                    Rebuilds++;
                     DisposeDataByMaterial(dataByMaterial);
                     dataByMaterial = CreateInstancedModelDataByMaterial(model, meshDrawOrders);
                     m_cache[key] = dataByMaterial;
@@ -175,9 +229,19 @@ namespace Game {
                 }
             }
             else {
-                dataByMaterial = CreateInstancedModelDataByMaterial(model, meshDrawOrders);
-                m_cache[key] = dataByMaterial;
-                m_visibilitySignatures[key] = signature;
+                Misses++;
+                try {
+                    dataByMaterial = CreateInstancedModelDataByMaterial(model, meshDrawOrders);
+                    m_cache[key] = dataByMaterial;
+                    m_visibilitySignatures[key] = signature;
+                }
+                catch (Exception e) {
+                    // [v0.1.97 · 诊断] 创建中途抛异常 = **刚 new 出来的 VB/IB 永久泄漏**
+                    // （`GraphicsResource` 的静态注册表让它们永远可达）。计数 + 留第一份文本。
+                    CreateErrors++;
+                    LastCreateError ??= e.GetType().Name + ": " + e.Message + "\n" + e.StackTrace;
+                    throw;
+                }
             }
             return dataByMaterial;
         }

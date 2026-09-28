@@ -7,6 +7,91 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.97] - 2026-09-28
+
+第一百零四个版本：**修掉一条每帧漏一对 VB/IB 的 GPU 资源泄漏**（≈0.25 MiB/s，整夜会话累计到 4.9 万个存活缓冲），
+外加把这套"抓到创建栈"的诊断工具固化进桥。
+
+### 症状与机制
+
+长巡检后的堆指纹里 `Engine.Graphics.VertexBuffer / IndexBuffer` 各有 **49,159** 个**存活**对象，
+而壳仓只有 ~3,200 个网格。机制在 `Engine.Graphics.GraphicsResource`：
+
+```csharp
+public static HashSet<GraphicsResource> m_resources = [];   // 构造时登记，Dispose 时移除
+~GraphicsResource() { Dispatcher.Dispatch(delegate { Dispose(); }); }
+```
+
+`m_resources` 让"没 Dispose 的资源"**永远可达** ⇒ 终结器**永远轮不到** ⇒
+**任何"创建了但没 Dispose"的 VB/IB 都是永久泄漏**（托管对象 + GPU 缓冲都留着）。
+
+### 定位（新诊断：`skyline.GpuResourceLedger` + `GpuResourceArmCapture/LastCapture`）
+
+* **站着不动也在漏**：空闲 12 s 资源 **+720**（+60/s）、GPU **+2.78 MiB**；
+  把雾 / 体积云 / LOD / 壳 / 阴影 / G-buffer **逐个关掉都照漏** ⇒ 引擎侧路径，约 **1 VB + 1 IB / 帧**；
+* **抓到创建栈**（连抓 10 次全部同一处）：
+
+```
+Game.InstancedModelsManager.CreateInstancedModelDataForParts(Model, List<parts>)
+  ← CreateInstancedModelDataByMaterial ← GetInstancedModelDataByMaterial   ← 本该是缓存
+  ← SubsystemModelsRenderer.DrawInstancedModels(...)                       ← 每帧
+```
+
+* **破案的矛盾**：给缓存函数加计数后实测 `Calls` 每秒涨、**`Hits` 恒 0**、`Misses == Calls`、
+  **`CacheEntries` 恒 0**、`DeviceResets/Clears` 0 —— 而 miss 分支**一定会写表**。
+  ⇒ 唯一解释是"**创建之后、写表之前中断**"。给 miss 路径包 try/catch 后直接拿到：
+
+```
+ArgumentException: Range is out of target bounds.
+   at Engine.Graphics.IndexBuffer.VerifyParametersSetData[...] / SetData[...]
+   at Game.InstancedModelsManager.CreateInstancedModelDataForParts(...)
+```
+
+### 根因（引擎侧真 bug）
+
+`IndexBuffer.VerifyParametersSetData` 用**字节区间**判边界：
+`targetStartIndex * size + sourceCount * num > IndicesCount * size`。
+对 `num == size`（同宽）它等价，但对**收窄写入**（`int[]` → 16 位索引缓冲；下面那个分支本来就支持、
+且自带正确的元素个数校验）它在数学上**恒为真**（`4·c > 2·I` 即使 `c == I` 也成立）
+⇒ **合法调用一律抛异常**。`InstancedModelsManager` 正是"按顶点数选 16 位 + 永远传 `int[]`"，
+于是**每帧每模型抛一次**，刚 `new` 的 VB/IB 永久泄漏。
+
+### 修复 + 实测
+
+* `IndexBuffer.VerifyParametersSetData` 改成**按元素个数**判（`targetStartIndex + sourceCount > IndicesCount`），
+  只有"字节流写 32 位缓冲"那条老路径仍按字节；
+* `VertexBuffer.VerifyParametersSetData` 有同样的字节式写法，但**没有实测复现，故意不动**（没有证据不改）。
+
+| 空闲 15 s | 修前 | 修后 |
+|---|---|---|
+| `Calls` | +368 | **+3,154**（缓存终于被用起来） |
+| `Hits` | **0** | **+3,154** |
+| `Misses` | +368 | **0** |
+| `CreateErrors` | 每帧 | **0** |
+| 新增 live GPU 资源 | **+736** | **0** |
+| gpuMiB | **+2.78** | **+0.00** |
+
+⇒ **泄漏归零**（约 0.25 MiB/s ≈ 每小时 900 MiB 的 GPU 缓冲不再漏）。
+
+### 同版把验收脚手架的两处"量到噪声"也修了
+
+巡检连着跑时 `v0181` 报"候选为 0"、`v0194` 报"剔除丢东西（3322 px）"——两者都是**没有样本/在量场景动画**：
+
+* `v0194` 的"无损失"判据改用**稳定像素掩膜**（每个状态内部连拍取交集，先把在动的像素排掉再比）；
+* `v0181` 先 `aim_to_far_view()`，候选为 0 时明确报 **SKIP**（没有样本 ≠ 回归）；
+* 稳定掩膜实现提到 `bridge_util.stable_signal`，两个脚本共用一份。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；
+* 功能验收巡检 14 条：**12 PASS + 2 条"样本不足"**（`v0177` 自检只比了 18 px、`v0193` 镜头里没有远景）
+  —— 两条都按"**没有样本 ≠ 回归**"改成 SKIP / 加前置条件（实际画到的壳 < 150 m 就 SKIP），
+  **单独复验均通过**（`v0193` 三时刻雾差 34~46%、太阳移动 34.8%）；
+* 证据 `data/sessions/skyline-v0197/`（含 `sweep-final/`、`sweep-final2/` 的逐脚本日志）；
+* 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0197/`（`gpu-resource-leak.json`、`gpu-resource-captures.json`）、`notes/173`。
+
 ## [v0.1.96] - 2026-09-28
 
 第一百零三个版本：**体素壳额度的滑动窗口**（里程碑 1.3 的"体积感"从 **0** 恢复）+ **验收脚手架的观测前提**。
