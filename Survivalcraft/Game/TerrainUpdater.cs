@@ -1253,6 +1253,8 @@ namespace Game {
         }
 
         public virtual void GenerateChunkLightSources(TerrainChunk chunk) {
+            // [v0.1.106] 先清空这个区块上一次的点光源记录（同一区块会被反复重扫，只追加会重复累积）
+            SkylinePointLights.BeginChunk(chunk);
             ModsManager.HookAction(
                 "GenerateChunkLightSources",
                 loader => {
@@ -1269,6 +1271,11 @@ namespace Game {
                     int num2 = j + chunk.Origin.Y;
                     int k = bottomHeightFast;
                     int num3 = TerrainChunk.CalculateCellIndex(i, bottomHeightFast, j);
+                    // [v0.1.106] 里程碑 4"固定光源"：**复用这一遍扫描**（不额外遍历），
+                    // 把"会发光的方块"按区块记进 `SkylinePointLights` 的注册表，供片元做点光源衰减。
+                    // 只取下面这个 while 循环里新增的条目 —— 它后面的邻居块写入的是**传播队列**，
+                    // 记进去会让注册表里塞满成千上万个普通格（见 notes/201）。
+                    int plEmitFrom = m_lightSources.Count;
                     while (k <= topHeightFast) {
                         int cellValueFast = chunk.GetCellValueFast(num3);
                         Block block = blocks[Terrain.ExtractContents(cellValueFast)];
@@ -1283,6 +1290,10 @@ namespace Game {
                         }
                         k++;
                         num3++;
+                    }
+                    if (m_lightSources.Count > plEmitFrom) {
+                        SkylinePointLights.NoteChunkSources(chunk, m_lightSources.Array, plEmitFrom,
+                                                            m_lightSources.Count);
                     }
                     TerrainChunk chunkAtCell = m_terrain.GetChunkAtCell(num - 1, num2);
                     TerrainChunk chunkAtCell2 = m_terrain.GetChunkAtCell(num + 1, num2);

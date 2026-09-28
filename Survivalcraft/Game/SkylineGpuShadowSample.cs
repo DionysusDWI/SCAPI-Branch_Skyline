@@ -622,6 +622,8 @@ namespace Game {
                 shader.GetParameter("u_shadowKernel", true).SetValue((float)GpuShadowKernel);
                 // [v0.1.103] bias 的"抽样半径"系数必须按**这个核的真实最大半径**给（八边形 √2 / 双环 1.0）
                 shader.GetParameter("u_shadowKernelSlopeScale", true).SetValue(GpuShadowKernelSlopeScale(GpuShadowKernel));
+                // [v0.1.106] 固定光源（点光源）：K 近邻列表（只有地形的不透明变体有这几个 uniform）
+                SkylinePointLights.Bind(shader);
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
@@ -764,6 +766,11 @@ float u_shadowSoftSlopeBias;
 float u_shadowSoftReliefTexels;
 float u_shadowKernel;
 float u_shadowKernelSlopeScale;
+// [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色），由 `SkylinePointLights.Bind` 写好
+float u_plStrength;
+float u_plCount;
+float4 u_plPosRadius[8];
+float3 u_plColor[8];
 float u_shadowEnable;
 float u_vfEnable;
 float u_vfBottomY;
@@ -1083,6 +1090,28 @@ void main(
 		}
 		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
+	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 `DistanceAttenuationHL` 曲线（逐字同式）。
+	// 地形片元没有法线 ⇒ 只有距离衰减与颜色，没有 N·L 那一项（notes/201 如实记）。
+	if (u_plStrength > 0.0 && u_plCount > 0.5)
+	{
+		float3 plAcc = float3(0.0, 0.0, 0.0);
+		for (int pli = 0; pli < 8; pli++)
+		{
+			if (float(pli) >= u_plCount)
+			{
+				break;
+			}
+			float4 plPr = u_plPosRadius[pli];
+			float plDist = length(plPr.xyz - v_world);
+			if (plDist >= plPr.w)
+			{
+				continue;
+			}
+			float plAtt = (exp(-plDist / max(plPr.w * 1.5, 0.1)) - 0.513417) / (1.0 - 0.513417);
+			plAcc += u_plColor[pli] * max(plAtt, 0.0);
+		}
+		result.rgb += plAcc * u_plStrength;
+	}
 	result.rgb = lerp(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（替换被 FogDisabled 置 0 的原版雾）：沿视线 8 步积分
 	if (u_vfEnable > 0.5)
@@ -1181,6 +1210,11 @@ uniform float u_shadowSoftSlopeBias;
 uniform float u_shadowSoftReliefTexels;
 uniform float u_shadowKernel;
 uniform float u_shadowKernelSlopeScale;
+// [v0.1.106] 固定光源（点光源）：K 近邻（位置 + 半径 / 颜色）
+uniform float u_plStrength;
+uniform float u_plCount;
+uniform vec4 u_plPosRadius[8];
+uniform vec3 u_plColor[8];
 uniform float u_shadowEnable;
 uniform float u_vfEnable;
 uniform float u_vfBottomY;
@@ -1484,6 +1518,27 @@ void main()
 			lit = step(fragDepth, mapDepth + u_shadowBias);
 		}
 		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
+	}
+	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）
+	if (u_plStrength > 0.0 && u_plCount > 0.5)
+	{
+		vec3 plAcc = vec3(0.0, 0.0, 0.0);
+		for (int pli = 0; pli < 8; pli++)
+		{
+			if (float(pli) >= u_plCount)
+			{
+				break;
+			}
+			vec4 plPr = u_plPosRadius[pli];
+			float plDist = length(plPr.xyz - v_world);
+			if (plDist >= plPr.w)
+			{
+				continue;
+			}
+			float plAtt = (exp(-plDist / max(plPr.w * 1.5, 0.1)) - 0.513417) / (1.0 - 0.513417);
+			plAcc += u_plColor[pli] * max(plAtt, 0.0);
+		}
+		result.rgb += plAcc * u_plStrength;
 	}
 	result.rgb = mix(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（与 HLSL 段同一算法）

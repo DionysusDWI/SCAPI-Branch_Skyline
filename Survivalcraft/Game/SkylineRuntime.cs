@@ -575,6 +575,17 @@ namespace Game {
             TerrainShadowTick();
             // [v0.1.34] GPU 阴影采样：启用但还没有深度图时自动补一次捕获（见 SkylineGpuShadowSample.cs）
             GpuShadowTick();
+            // [v0.1.106] 固定光源（点光源）：每帧收集相机附近最近的 K 个发光方块，绑给不透明变体
+            {
+                SubsystemTerrain st = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
+                SubsystemPlayers players = GameManager.Project?.FindSubsystem<SubsystemPlayers>(true);
+                ComponentPlayer cp = players != null && players.ComponentPlayers.Count > 0
+                    ? players.ComponentPlayers[0] : null;
+                Camera cam = cp?.GameWidget?.ActiveCamera;
+                if (st?.Terrain != null && cam != null) {
+                    SkylinePointLights.Tick(st.Terrain, cam.ViewPosition);
+                }
+            }
             if (Regions.Count == 0) {
                 return;
             }
