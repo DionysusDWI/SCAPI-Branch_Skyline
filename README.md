@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.113**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.114**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -50,6 +50,9 @@
 * **相机空间深度预通道**（`SkylineScreenDepth`，里程碑 4 的"场景深度纹理"）：半分辨率、
   16 bit 线性视距、只画 112 m 内的真地形；Iris 的屏幕空间体积光 / SSAO / TAA 都以它为前置，
   片元侧用 `ScreenDepthInvViewProjection + ScreenDepthScaleMetres` 重建世界坐标（默认关，等消费者）；
+* **屏幕空间 AO**（`SkylineScreenAo`，深度预通道的第一个消费者）：horizon-based（每方向取最大仰角）、
+  法线从深度重建、8 方向 × 3 步；实测只影响 **0.355%** 的帧面积（接触阴影而不是整屏压暗）、噪声底 0；
+  一条调用打开：`skyline.ScreenAoEnabled=true`（会自动带上深度预通道；默认关）。
 * LOD 参与云层阴影（烘进顶点色）与固定光源亮斑（顶面取**上方空气格**的光）。
 * **关雾（为了看清光影本身）**：`FogDisabled`（默认开）覆盖**全部**吃雾参数的 pass
   —— 地形三 pass / LOD 两层 / 体素壳 / 静态与蒙皮模型 / 粒子 / 移动方块 / 挖掘裂纹 / 方块选中框

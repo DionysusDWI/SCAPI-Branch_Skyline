@@ -915,39 +915,39 @@ float screenAo(vec3 worldPos)
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
-		float r = u_aoRadius * (mod(float(i), 2.0) == 0.0 ? 0.55 : 1.0);
-		// **屏幕空间半径上限**（SSAO 标准做法）：不夹的话，近处 0.8 m 的半径会占到屏幕 20%+，
-		//   8 个抽样全落到远处几何上 ⇒ 近距离（接触阴影最该出现的地方）反而量不到。
-		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
-		vec2 uvT = uv + vec2(cos(a), sin(a)) * uvR;
-		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		vec2 sd = vec2(cos(a), sin(a));
+		// **[v0.1.114] horizon-based**：沿这个方向只看「遮挡物抬到地平线以上多少」（sinA），
+		//   而不是「有几个邻居」。差别就是「整坡压暗」的根因：上坡邻居的 sinA 很小（那本来就是一整片坡，
+		//   不该变暗），而墙角/台阶边的 sinA 很大（该变暗）。每方向沿半径取 3 个由近到远的采样。
+		float maxSin = 0.0;
+		for (int s = 1; s <= 3; s++)
 		{
-			continue;
+			float stepT = float(s) * 0.3333333;
+			float uvR = min((u_aoRadius * stepT / dist) * u_aoUvScale, u_aoMaxUv);
+			vec2 uvT = uv + sd * uvR;
+			if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+			{
+				continue;
+			}
+			float dT = aoDepthAt(uvT);
+			if (dT >= 0.999)
+			{
+				continue;
+			}
+			vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+			float len = length(v);
+			if (len < 1e-4 || len > u_aoRadius)
+			{
+				continue;
+			}
+			float h = dot(n, v);
+			if (h <= u_aoBias * len)
+			{
+				continue;
+			}
+			maxSin = max(maxSin, h / len);
 		}
-		float dT = aoDepthAt(uvT);
-		if (dT >= 0.999)
-		{
-			continue;
-		}
-		vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
-		float len = length(v);
-		if (len > u_aoRadius)
-		{
-			continue;
-		}
-		// **高度带判据**：只把「贴着当前表面（高度 < rad/2）」的邻居当遮挡物。
-		//   只用角度判据（dot(n,v)/len > bias）的话，**上坡地形自己**会被算成遮挡 ⇒ 整面坡被压暗
-		//   （实测：40% 像素变暗 + 墙面出现条纹，不是接触阴影）。
-		float h = dot(n, v);
-		if (h <= u_aoBias * max(len, 1e-4))
-		{
-			continue;
-		}
-		if (h > u_aoRadius * 0.5)
-		{
-			continue;
-		}
-		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+		occ += maxSin;
 	}
 	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
 }
@@ -1136,37 +1136,37 @@ float screenAo(float3 worldPos)
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
-		float r = u_aoRadius * (((i % 2) == 0) ? 0.55 : 1.0);
-		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
-		float2 uvT = uv + float2(cos(a), sin(a)) * uvR;
-		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		float2 sd = float2(cos(a), sin(a));
+		// **[v0.1.114] horizon-based**（与 GLSL 段同一算法）：取每个方向上的最大仰角 sinA，而不是「命中数」
+		float maxSin = 0.0;
+		for (int s = 1; s <= 3; s++)
 		{
-			continue;
+			float stepT = float(s) * 0.3333333;
+			float uvR = min((u_aoRadius * stepT / dist) * u_aoUvScale, u_aoMaxUv);
+			float2 uvT = uv + sd * uvR;
+			if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+			{
+				continue;
+			}
+			float dT = aoDepthAt(uvT);
+			if (dT >= 0.999)
+			{
+				continue;
+			}
+			float3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+			float len = length(v);
+			if (len < 1e-4 || len > u_aoRadius)
+			{
+				continue;
+			}
+			float h = dot(n, v);
+			if (h <= u_aoBias * len)
+			{
+				continue;
+			}
+			maxSin = max(maxSin, h / len);
 		}
-		float dT = aoDepthAt(uvT);
-		if (dT >= 0.999)
-		{
-			continue;
-		}
-		float3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
-		float len = length(v);
-		if (len > u_aoRadius)
-		{
-			continue;
-		}
-		// **高度带判据**：只把「贴着当前表面（高度 < rad/2）」的邻居当遮挡物。
-		//   只用角度判据（dot(n,v)/len > bias）的话，**上坡地形自己**会被算成遮挡 ⇒ 整面坡被压暗
-		//   （实测：40% 像素变暗 + 墙面出现条纹，不是接触阴影）。
-		float h = dot(n, v);
-		if (h <= u_aoBias * max(len, 1e-4))
-		{
-			continue;
-		}
-		if (h > u_aoRadius * 0.5)
-		{
-			continue;
-		}
-		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+		occ += maxSin;
 	}
 	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
 }
@@ -1792,37 +1792,39 @@ float screenAo(vec3 worldPos)
 	for (int i = 0; i < 8; i++)
 	{
 		float a = ang0 + float(i) * 0.7853981634;
-		float r = u_aoRadius * (mod(float(i), 2.0) == 0.0 ? 0.55 : 1.0);
-		// **屏幕空间半径上限**（SSAO 标准做法）：不夹的话，近处 0.8 m 的半径会占到屏幕 20%+，
-		//   8 个抽样全落到远处几何上 ⇒ 近距离（接触阴影最该出现的地方）反而量不到。
-		float uvR = min((r / dist) * u_aoUvScale, u_aoMaxUv);
-		vec2 uvT = uv + vec2(cos(a), sin(a)) * uvR;
-		if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+		vec2 sd = vec2(cos(a), sin(a));
+		// **[v0.1.114] horizon-based**：沿这个方向只取「遮挡物抬到地平线以上多少」（sinA）的最大值，
+		//   而不是「有几个邻居」。差别正是「整坡压暗」的根因：上坡邻居 sinA 很小（那只是一片坡，
+		//   不该变暗），墙角/台阶边的 sinA 很大（该变暗）。每个方向沿半径取 3 个由近到远的采样。
+		float maxSin = 0.0;
+		for (int s = 1; s <= 3; s++)
 		{
-			continue;
+			float stepT = float(s) * 0.3333333;
+			float uvR = min((u_aoRadius * stepT / dist) * u_aoUvScale, u_aoMaxUv);
+			vec2 uvT = uv + sd * uvR;
+			if (uvT.x < 0.0 || uvT.x > 1.0 || uvT.y < 0.0 || uvT.y > 1.0)
+			{
+				continue;
+			}
+			float dT = aoDepthAt(uvT);
+			if (dT >= 0.999)
+			{
+				continue;
+			}
+			vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
+			float len = length(v);
+			if (len < 1e-4 || len > u_aoRadius)
+			{
+				continue;
+			}
+			float h = dot(n, v);
+			if (h <= u_aoBias * len)
+			{
+				continue;
+			}
+			maxSin = max(maxSin, h / len);
 		}
-		float dT = aoDepthAt(uvT);
-		if (dT >= 0.999)
-		{
-			continue;
-		}
-		vec3 v = aoWorldAt(uvT, dT * u_aoScale) - worldPos;
-		float len = length(v);
-		if (len > u_aoRadius)
-		{
-			continue;
-		}
-		// **高度带判据**（与 GLSL 段同一算法）：只把贴着当前表面的邻居当遮挡物
-		float h = dot(n, v);
-		if (h <= u_aoBias * max(len, 1e-4))
-		{
-			continue;
-		}
-		if (h > u_aoRadius * 0.5)
-		{
-			continue;
-		}
-		occ += 1.0 - len / max(u_aoRadius, 1e-4);
+		occ += maxSin;
 	}
 	return clamp(1.0 - u_aoIntensity * (occ / 8.0), 0.0, 1.0);
 }

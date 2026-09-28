@@ -19,8 +19,22 @@ namespace Game {
     ///   3. 逐像素旋转来自**世界坐标哈希**（与阴影核同一套）⇒ 跨帧稳定、可复现。
     /// </summary>
     public static partial class SkylineRuntime {
-        /// <summary>总开关（默认关）。</summary>
-        public static bool ScreenAoEnabled { get; set; }
+        /// <summary>
+        /// 总开关（默认关）。**打开时会自动把相机深度预通道也打开**（否则 `ScreenDepthReady=false`，
+        /// AO 拿不到深度图 ⇒ "开了没反应"这种坑不必再让人踩一次）。关掉 AO **不会**顺手关掉预通道
+        /// —— 预通道可能是别的消费者（TAA/屏幕空间体积光）在用的。
+        /// </summary>
+        public static bool ScreenAoEnabled {
+            get => m_aoEnabled;
+            set {
+                m_aoEnabled = value;
+                if (value) {
+                    ScreenDepthEnabled = true;
+                }
+            }
+        }
+
+        static bool m_aoEnabled;
 
         /// <summary>采样半径（米，默认 **0.5**）：接触阴影的世界尺度。
         /// 实测（`notes/210`）：半径 2.5~3.5 m 量到的是"整坡压暗"（36 万像素、maxΔ 65~72，观感错），
