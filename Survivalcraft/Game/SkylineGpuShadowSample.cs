@@ -137,6 +137,8 @@ namespace Game {
 
         static string m_gpuShadowSampleError = "";
         static Shader m_gpuShadowOpaqueShader;
+        /// <summary>[v0.1.107] 带 `POINT_LIGHTS` 宏的第二套变体（只在 `SkylinePointLights.Enabled` 时编译）。</summary>
+        static Shader m_gpuShadowOpaqueShaderPl;
         static SamplerState m_gpuShadowSampler;
         // [v0.1.69] 只用体积雾时的 1×1 占位深度图（纹素参数必须绑真纹理；u_shadowEnable=0 时不采样）
         static RenderTarget2D m_gpuShadowDummyRt;
@@ -534,8 +536,18 @@ namespace Game {
                 return fallback;
             }
             try {
-                if (m_gpuShadowOpaqueShader == null) {
-                    m_gpuShadowOpaqueShader = new Shader(GpuShadowOpaqueVsh, GpuShadowOpaquePsh);
+                // [v0.1.107] **两套变体**：`POINT_LIGHTS` 开/关是两个 program。
+                // 为什么必须这样做：点光源那段代码的代价**全在循环体**（实测 `MaxLights=0` 时与关闭完全相同），
+                // 而它在"站在灯旁边"时是 −8.8% ⇒ 关掉时必须**根本不编译这段代码**，而不是靠 uniform 早退。
+                Shader shader;
+                if (SkylinePointLights.Enabled) {
+                    m_gpuShadowOpaqueShaderPl ??= new Shader(GpuShadowOpaqueVsh, GpuShadowOpaquePsh,
+                                                             new ShaderMacro("POINT_LIGHTS"));
+                    shader = m_gpuShadowOpaqueShaderPl;
+                }
+                else {
+                    m_gpuShadowOpaqueShader ??= new Shader(GpuShadowOpaqueVsh, GpuShadowOpaquePsh);
+                    shader = m_gpuShadowOpaqueShader;
                 }
                 if (!shadows && m_gpuShadowDummyRt == null) {
                     // 只用体积雾时的占位深度图（1×1）：纹素参数必须绑一个真的 Texture2D，
@@ -550,7 +562,6 @@ namespace Game {
                         MaxLod = 0f
                     };
                 }
-                Shader shader = m_gpuShadowOpaqueShader;
                 shader.GetParameter("u_shadowEnable", true).SetValue(shadows ? 1f : 0f);
                 shader.GetParameter("u_shadowMap", true).SetValue(shadows ? m_gpuShadowRt : m_gpuShadowDummyRt);
                 shader.GetParameter("u_shadowSampler", true).SetValue(m_gpuShadowSampler);
@@ -623,7 +634,11 @@ namespace Game {
                 // [v0.1.103] bias 的"抽样半径"系数必须按**这个核的真实最大半径**给（八边形 √2 / 双环 1.0）
                 shader.GetParameter("u_shadowKernelSlopeScale", true).SetValue(GpuShadowKernelSlopeScale(GpuShadowKernel));
                 // [v0.1.106] 固定光源（点光源）：K 近邻列表（只有地形的不透明变体有这几个 uniform）
-                SkylinePointLights.Bind(shader);
+                // [v0.1.107] **只在用了 `POINT_LIGHTS` 变体时才绑**：基础变体里没有这几个 uniform，
+                // 绑它会抛（`GetParameter(name, true)` 找不到就抛）。
+                if (SkylinePointLights.Enabled) {
+                    SkylinePointLights.Bind(shader);
+                }
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
@@ -1094,6 +1109,9 @@ void main(
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 `DistanceAttenuationHL` 曲线（逐字同式）。
 	// 地形片元没有法线 ⇒ 只有距离衰减与颜色，没有 N·L 那一项（notes/201 如实记）。
+	// [v0.1.107] **包在 `#ifdef POINT_LIGHTS` 里**：关闭时**整套代码根本不编译**（实测代价全在循环体，
+	//   不加变体的话「关着也要 −8.8%」，见 notes/202 §4）。
+#ifdef POINT_LIGHTS
 	if (u_plStrength > 0.0 && u_plCount > 0.5)
 	{
 		// 先做一次包围球判定：**不在任何灯的影响范围内就整段跳过**（不加这一步的全屏循环实测 −8.8%）
@@ -1119,6 +1137,7 @@ void main(
 		result.rgb += plAcc * u_plStrength;
 		}
 	}
+#endif
 	result.rgb = lerp(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（替换被 FogDisabled 置 0 的原版雾）：沿视线 8 步积分
 	if (u_vfEnable > 0.5)
@@ -1164,6 +1183,7 @@ void main(
 				// [v0.1.106] **彩色光源雾**（Iris 光影包 Complementary 的 `coloredLightFog.glsl` 适配）：
 				// 用它那套「沿视线在彩色光照体里积分」的思路，但我们没有体素化设施，
 				// 改用**同一份 K 近邻灯列表**给雾上色；先做包围球判定，不在灯附近就整段跳过。
+#ifdef POINT_LIGHTS
 				if (u_plTint > 0.0 && u_plCount > 0.5)
 				{
 					float3 plb = v_world - u_plBounds.xyz;
@@ -1194,6 +1214,7 @@ void main(
 						}
 					}
 				}
+#endif
 				result.rgb = lerp(result.rgb, vfCol, vfAlpha);
 				if (u_vfSunShaft > 0.0)
 				{
@@ -1562,6 +1583,7 @@ void main()
 		result.rgb *= (1.0 - u_shadowStrength * (1.0 - lit));
 	}
 	// [v0.1.106] 固定光源（点光源）：K 近邻 + Dawnlight 的 DistanceAttenuationHL（与 HLSL 段同式）
+#ifdef POINT_LIGHTS
 	if (u_plStrength > 0.0 && u_plCount > 0.5)
 	{
 		// 包围球提前退出（与 HLSL 段同一算法）
@@ -1587,6 +1609,7 @@ void main()
 		result.rgb += plAcc * u_plStrength;
 		}
 	}
+#endif
 	result.rgb = mix(result.rgb, u_fogColor * v_color.a, v_fog);
 	// [v0.1.69] 自研体积雾（与 HLSL 段同一算法）
 	if (u_vfEnable > 0.5)
@@ -1630,6 +1653,7 @@ void main()
 				// [v0.1.70] 雾色与 u_fogColor 混合（与 HLSL 段同一算法）
 				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
 				// [v0.1.106] 彩色光源雾（与 HLSL 段同一算法）
+#ifdef POINT_LIGHTS
 				if (u_plTint > 0.0 && u_plCount > 0.5)
 				{
 					vec3 plb = v_world - u_plBounds.xyz;
@@ -1660,6 +1684,7 @@ void main()
 						}
 					}
 				}
+#endif
 				result.rgb = mix(result.rgb, vfCol, vfAlpha);
 				if (u_vfSunShaft > 0.0)
 				{

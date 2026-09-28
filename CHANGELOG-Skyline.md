@@ -7,6 +7,44 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.107] - 2026-09-28
+
+第一百一十四个版本：**把点光源做成 shader 变体** —— 关闭时**零代价**。相对 v0.1.106 的变更：
+
+### 1. 问题（v0.1.106 留下的）
+
+v0.1.106 的点光源代码是**无条件编译**的：判别实验显示 `MaxLights=0`（循环必不执行）时帧率与"关闭"
+**完全相同**（111.92 vs 111.30）⇒ 代价**全在循环体**，但只要这段代码在 program 里，**站在灯旁边**就要付
+**−8.8%**；而"关掉开关"并不能把这笔钱省掉。
+
+### 2. 修法：**两套 program**（`POINT_LIGHTS` 宏）
+
+* 片元里点光源与彩色光源雾两段都包进 `#ifdef POINT_LIGHTS … #endif`（HLSL/GLSL 各一份）；
+* `ResolveOpaqueShader` 按 `SkylinePointLights.Enabled` **选 program**：
+  关 → `new Shader(vsh, psh)`；开 → `new Shader(vsh, psh, new ShaderMacro("POINT_LIGHTS"))`（各自缓存）；
+* 顺带修正：`SkylinePointLights.Bind()` **只在用带宏的变体时调用** —— 基础变体里没有那几个 uniform，
+  `GetParameter(name, true)` 找不到会抛（第一版会直接把阴影/雾变体打回 fallback）。
+
+### 3. 实测（配对交替 3 轮、关垂直同步、站灯旁边）
+
+| 配置 | 帧率均值 |
+|---|---|
+| **关闭（基础变体）** | **111.84** —— 与"没有这段代码"的基线（111.30 / 111.92）**一致** ⇒ **零代价** |
+| 开启（`POINT_LIGHTS` 变体，8 盏灯、最近 6.4 m） | 102.11 ⇒ −8.70%（这笔钱只在**片元落在灯的影响范围内**时发生） |
+
+画面 A/B（开/关）：**1,673 px**、`maxChannelDelta 106`、噪声底 **0 px**（与 v0.1.106 的 1,628 px 一致 ⇒ 变体没有改变效果）。
+
+门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
+
+### 4. 默认仍关（但理由变了）
+
+现在"关掉"是**真正免费**的（零代价），所以默认值不再是风险问题；仍保持 false 的唯一理由是
+**开启后在灯旁要付 −8.7%**，会压到 goal 的"平均帧 ≥ 最大帧 90%"这条线以下。
+打开：`skyline.PointLights(true)`。
+
+证据：`data/sessions/skyline-v0106/`（`perf-pointlights-variant.json`、`pointlights-variant/`、
+`regression-v0107.json`）；笔记 `notes/203`。
+
 ## [v0.1.106] - 2026-09-28
 
 第一百一十三个版本：**固定光源（点光源）列表 + 彩色光源雾**（里程碑 4 里"固定光源照射导致的亮度改变斑块"
