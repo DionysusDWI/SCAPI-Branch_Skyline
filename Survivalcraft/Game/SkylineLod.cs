@@ -131,6 +131,38 @@ namespace Game {
         static readonly Dictionary<long, Cell> m_cells = [];
         static readonly Dictionary<long, Cell> m_cellsFine = [];        // 8 m 精细层
         static readonly Dictionary<long, Cell> m_cellsNear = [];        // 4 m 近环细层（交接带专用）
+
+        // ===== [v0.1.98] 里程碑 2.2：**加载距离之外统一到 32³ 一档** =====
+        /// <summary>
+        /// 用户口径（本轮 goal 2.2）："目前 LOD 分辨率分级在视觉上过于明显 … **先将所有区块加载距离之外的
+        /// 区块 LOD 都固定为 32³**，后续再根据性能问题和双模型核对放大视觉分辨来确定不同 LOD 分级的转换边界"。
+        ///
+        /// 为什么要有这一档：现在视距外是**三档拼接**（近环 4 m / 精细 8 m / 粗 16 m），
+        /// 三档的交界就是"分级过于明显"的来源。本开关打开时，**只画一档**（32 m 单元），
+        /// 于是"加载距离之外"在视觉上只有一个分辨率，才谈得上用放大截图去**定边界**。
+        ///
+        /// 32 m 单元 = **4 个 16 m 粗单元**（一个区块 = 一个 16 m 单元 ⇒ 2×2 区块），
+        /// 高度/材质**按 4 个子单元取中位**（与单格口径一致，见 `MedianInto`），
+        /// 第二层表面这一档不参与（它默认就是关的，且 32 m 格上"下层必被上层盖住"，见 `SecondSurfaceEnabled` 的实测）。
+        /// 关掉 = 逐位回到 v0.1.97 的三档行为（A/B 用）。
+        /// </summary>
+        public static bool UniformBeyondLoaded { get; set; } = true;
+        /// <summary>[v0.1.98] 统一档的单元边长 = CellShift + 本值（默认 4+1 = 5 ⇒ **32 m**）。</summary>
+        public static int UniformExtraShift { get; set; } = 1;
+
+        /// <summary>
+        /// [v0.1.98] 里程碑 2.3 的**可断言证据**："按最小体素步进阴影"与"按整块单元步进阴影"
+        /// 到底有没有差别 —— 有差别的格子数与差值总和。为什么需要它：这条要求
+        /// （"分辨率是该 LOD 的最小体素，而不是整个 LOD 区块作为一个整体参与"）如果只是改了代码，
+        /// 在画面上可能看不出来；量化之后才有判据（差值恒 0 = 改了等于没改）。
+        /// </summary>
+        public static long MinVoxelShadowDiffCells { get; private set; }
+        public static long MinVoxelShadowDiffSum255 { get; private set; }
+        public static long MinVoxelShadowCompared { get; private set; }
+
+        static readonly Dictionary<long, Cell> m_cells32 = [];          // 32 m 统一档
+        // 分组用的临时表（值元组，**不分配数组**；每次重建前 Clear）
+        static readonly Dictionary<long, (int n, long p0, long p1, long p2, long p3)> m_groupScratch = [];
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
@@ -759,9 +791,17 @@ namespace Game {
         /// 返回 1（无遮挡）或 1-strength（在阴影中）。字典里没有的单元按"无数据"跳过（不算遮挡）。
         /// </summary>
         static float SelfShadowFactor(Dictionary<long, Cell> dict, int cx, int cz, int height, int cellSize,
-                                      Vector3 sun) {
+                                      Vector3 sun,
+                                      Dictionary<long, Cell> shadowDict = null, int shadowCellSize = 0) {
+            // [v0.1.98] 里程碑 2.3：**阴影的最小分辨必须是 LOD 的最小体素，而不是"整块 LOD 单元"**。
+            //   用户口径原文："注意分辨率是该 LOD 的最小体素，而不是整个 LOD 区块作为一个整体参与"。
+            //   32 m 统一档的**网格**是 32 m 一格，但**阴影**应当用手里最细的那份采样（16 m 的粗单元层）来步进 ——
+            //   否则同一块 32 m 假平地上，站在格子中心还是格子边缘得到的明暗完全一样，边界会是"整块跳变"。
+            //   `shadowDict == null` 时行为与 v0.1.97 逐位一致（A/B 用）。
+            Dictionary<long, Cell> marchDict = shadowDict ?? dict;
+            int marchSize = shadowCellSize > 0 ? shadowCellSize : cellSize;
             sun = sun.LengthSquared() > 1e-8f ? Vector3.Normalize(sun) : Vector3.UnitY;
-            float step = cellSize * 0.5f;
+            float step = marchSize * 0.5f;
             float x = cx * cellSize + cellSize * 0.5f;
             float y = height + 1f;
             float z = cz * cellSize + cellSize * 0.5f;
@@ -772,9 +812,9 @@ namespace Game {
                 if (y > TerrainChunk.HeightMinusOne) {
                     break;
                 }
-                int nx = (int)MathF.Floor(x / cellSize);
-                int nz = (int)MathF.Floor(z / cellSize);
-                if (!dict.TryGetValue(Key(nx, nz), out Cell cell)) {
+                int nx = (int)MathF.Floor(x / marchSize);
+                int nz = (int)MathF.Floor(z / marchSize);
+                if (!marchDict.TryGetValue(Key(nx, nz), out Cell cell)) {
                     continue;                                  // 未采集 → 不判遮挡（避免假阴影）
                 }
                 if (cell.Height + 1f > y + SelfShadowBias) {
@@ -1126,8 +1166,30 @@ namespace Game {
                 Utilities.Dispose(ref m_vbNear);
                 Utilities.Dispose(ref m_ibNear);
             }
-            RebuildMeshCore(m_cellsFine, FineShift, MathF.Max(skipRadius, nearRange), fineRange, 1);
-            RebuildMeshCore(m_cells, CellShift, fineRange, RadiusMetres, 0);
+            if (UniformBeyondLoaded) {
+                // [v0.1.98] 里程碑 2.2：**加载距离之外只画一档 32 m**（消除三档交界那种"分级过于明显"）。
+                //   近环/精细两档**不建网格**（并清空），统一档覆盖 `[skipRadius, RadiusMetres]`。
+                BuildUniformCells();
+                if (m_indexCountFine > 0 || m_cellsFine.Count > 0) {
+                    m_cellsFine.Clear();
+                    m_indexCountFine = 0;
+                    m_cellsInMeshFine = 0;
+                    Utilities.Dispose(ref m_vbFine);
+                    Utilities.Dispose(ref m_ibFine);
+                }
+                if (m_cellsNear.Count > 0) {
+                    m_cellsNear.Clear();
+                }
+                PruneFarCells(m_cells32, CellShift + UniformExtraShift, CellSize << UniformExtraShift,
+                    RadiusMetres * LodCellReleaseFactor, out _);
+                // 里程碑 2.3：32 m 的**网格**配 16 m 的**阴影最小体素**（`m_cells` 就是手里最细的采样）
+                RebuildMeshCore(m_cells32, CellShift + UniformExtraShift, skipRadius, RadiusMetres, 0,
+                    m_cells, CellSize);
+            }
+            else {
+                RebuildMeshCore(m_cellsFine, FineShift, MathF.Max(skipRadius, nearRange), fineRange, 1);
+                RebuildMeshCore(m_cells, CellShift, fineRange, RadiusMetres, 0);
+            }
             m_rebuilds++;
             m_dirty = false;
             // v0.1.0 修复保留：相机未就位（建出空网格）时保持 dirty，等相机就位后重建。
@@ -1220,8 +1282,66 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.98] 里程碑 2.2：把 16 m 粗单元按 `UniformExtraShift`（默认 2×2 ⇒ **32 m**）合成**统一档**。
+        ///
+        /// 口径与单格**完全同一套**（`MedianInto`：高度取中位、材质取众数）——
+        /// 所以"32 m 一档"和原来的"16 m 一档"不是两套观感，只是格子更大；
+        /// 这样"加载距离之外"在画面上只有**一个**分辨率，才谈得上用放大截图去定分级边界。
+        /// </summary>
+        static void BuildUniformCells() {
+            m_cells32.Clear();
+            m_groupScratch.Clear();
+            MinVoxelShadowCompared = 0;      // [v0.1.98] 每次重建重新统计
+            MinVoxelShadowDiffCells = 0;
+            MinVoxelShadowDiffSum255 = 0;
+            int extra = Math.Clamp(UniformExtraShift, 1, 3);
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                int cx = (int)(kv.Key >> 32);
+                int cz = (int)(uint)kv.Key;
+                long gkey = Key(cx >> extra, cz >> extra);
+                m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3) g);
+                long packed = ((long)kv.Value.Height << 32) | kv.Value.Value;
+                switch (g.n) {
+                    case 0: g.p0 = packed; break;
+                    case 1: g.p1 = packed; break;
+                    case 2: g.p2 = packed; break;
+                    default: g.p3 = packed; break;      // 组满 4 个后多余的忽略（中位对少数样本稳健）
+                }
+                if (g.n < 4) {
+                    g.n++;
+                }
+                m_groupScratch[gkey] = g;
+            }
+            Span<long> samples = stackalloc long[4];
+            Span<int> top = stackalloc int[1];
+            Span<int> val = stackalloc int[1];
+            Span<byte> light = stackalloc byte[1];
+            foreach (KeyValuePair<long, (int n, long p0, long p1, long p2, long p3)> kv in m_groupScratch) {
+                (int n, long p0, long p1, long p2, long p3) g = kv.Value;
+                if (g.n <= 0) {
+                    continue;
+                }
+                samples[0] = g.p0;
+                samples[1] = g.p1;
+                samples[2] = g.p2;
+                samples[3] = g.p3;
+                top[0] = int.MaxValue;
+                val[0] = 0;
+                light[0] = 15;
+                MedianInto(samples, g.n, top, val, light, 0);
+                if (top[0] == int.MaxValue) {
+                    continue;
+                }
+                m_cells32[kv.Key] = new Cell {
+                    Height = (short)top[0], Value = (ushort)val[0], Light = light[0]
+                };
+            }
+        }
+
         static void RebuildMeshCore(Dictionary<long, Cell> dict, int cellShift,
-                                    float minDist, float maxDist, int layer) {
+                                    float minDist, float maxDist, int layer,
+                                    Dictionary<long, Cell> shadowDict = null, int shadowCellSize = 0) {
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
                 return;
@@ -1423,7 +1543,19 @@ namespace Game {
                         // v0.1.19：LOD 自阴影（CPU 射线步进，见 notes/88 §5 的第 1 条路线）。
                         // [v0.1.77] 这是**可见性**计算（要在高度场里步进），CPU/GPU 两条路径**都**按当前口径
                         // 烘焙进顶点色 —— 着色器负责的是"按法线算明暗"，不是"算可见性"。
-                        float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize, lodSun);
+                    // [v0.1.98] 阴影按"最小体素"步进（32 m 统一档传 16 m 的 `m_cells`；其余档 shadowDict=null）
+                    float shadow = SelfShadowFactor(dict, cx, cz, topHeight, cellSize, lodSun,
+                        shadowDict, shadowCellSize);
+                    if (shadowDict != null && shadowCellSize > 0 && shadowCellSize < cellSize) {
+                        // 诊断：同一格再按"整块单元"步进一次，量化两者的差别（只有 32 m 档会走这里）
+                        float shadowCellLevel = SelfShadowFactor(dict, cx, cz, topHeight, cellSize, lodSun);
+                        MinVoxelShadowCompared++;
+                        int delta = (int)MathF.Round(MathF.Abs(shadow - shadowCellLevel) * 255f);
+                        if (delta > 0) {
+                            MinVoxelShadowDiffCells++;
+                            MinVoxelShadowDiffSum255 += delta;
+                        }
+                    }
                         // 昼夜调制：夜里把"坡向/阴影"偏差按日照量收回 1（= 不再有斜阳感）
                         gain *= MathUtils.Lerp(1f, shadow, m_sunAmount);
                         if (layer == 0) {
@@ -1843,6 +1975,20 @@ namespace Game {
                 ["fineRangeMetres"] = Math.Round(fineRangeNow, 1),
                 ["cellSizeBlocks"] = CellSize,
                 ["fineCellSizeBlocks"] = FineSize,
+                // [v0.1.98] 里程碑 2.2：加载距离之外**统一一档**（默认 32 m）
+                ["uniformBeyondLoaded"] = UniformBeyondLoaded,
+                ["uniformExtraShift"] = UniformExtraShift,
+                ["uniformCellSizeBlocks"] = CellSize << Math.Clamp(UniformExtraShift, 0, 3),
+                ["uniformCells"] = m_cells32.Count,
+                ["uniformCellsInMesh"] = UniformBeyondLoaded ? m_cellsInMesh : 0,
+                ["uniformMeshIndices"] = UniformBeyondLoaded ? m_indexCount : 0,
+                // [v0.1.98] 里程碑 2.3：阴影是否真的按"最小体素"参与（与"整块步进"的差别量化）
+                ["minVoxelShadowCompared"] = MinVoxelShadowCompared,
+                ["minVoxelShadowDiffCells"] = MinVoxelShadowDiffCells,
+                ["minVoxelShadowDiffSum255"] = MinVoxelShadowDiffSum255,
+                ["minVoxelShadowSizeBlocks"] = UniformBeyondLoaded
+                    ? (CellSize << Math.Clamp(UniformExtraShift, 0, 3)) : CellSize,
+                ["minVoxelShadowMarchBlocks"] = CellSize,
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,

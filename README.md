@@ -1,4 +1,4 @@
-﻿# SurvivalCraft API 生存战争插件版
+# SurvivalCraft API 生存战争插件版
 
 ## 介绍
 
@@ -8,11 +8,23 @@
 
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力（面向 AI / agent 建造与创造模式工具）。
 
-**当前状态：v0.1.97** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
+**当前状态：v0.1.98** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
 补上**大规模 / 高空建造链路**的能力，落地三层渲染路线的第一轮（多层家具 LOD + 超视距 LOD），
 并开始**里程碑 3：Dawnlight + Iris 光影实装接入**（已完成：软阴影 PCF、太阳追踪、显存预算表、体积云、体积雾），
 同时修掉四处缺陷（负高度不能手动放置、命令辅助棒"选中自己"、区块存储布局不一致、高空手持方块全黑）：
 
+- **加载距离之外的 LOD 统一到 32³ + 阴影按最小体素参与（v0.1.98）** —— 原三档（4/8/16 m）改成**只画一档**：
+  新增 `m_cells32`（**4 个 16 m 粗单元取中位**，口径与单格同一套 `MedianInto`），桥开关
+  `skyline.LodUniformBeyond`（默认开）/`LodUniformExtraShift`（默认 1 ⇒ **32 m**）。
+  实测 `uniformCellSizeBlocks=32`、`fine/nearCellsInMesh=0`、`uniformCellsInMesh=189 / 4,422 索引`。
+  同时按用户口径"**分辨率是该 LOD 的最小体素，而不是整块**"给 `SelfShadowFactor` 加了
+  `shadowDict/shadowCellSize`：32 m 网格配 **16 m 阴影步进**，并量化差别 —— **9~14/189 格（5~7%）两种步进明暗不同、
+  差值合计 801~1,246/255**（非零 ⇒ 真的落地）。
+  **如实记一条否定证据**：把**壳带**也统一到单档（16 m）后，第二模型（DashScope `qwen3.8-omni-flash`）
+  在 1600 px 放大截图上判读为"画面正中部一条**纯黑空洞带**、分级/断裂痕迹极强"，而分级状态"更均匀"
+  ⇒ 壳侧统一**不是一个档位数字能解决的**（接缝/裙边与 LOD 让位口径对不上），故 `UniformStep` 默认**关**，
+  留开关与证据给下一轮先修几何。新增 `heightlab/qwen_vision.py`（双模型判读 + 证据落盘）。
+  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/177`。
 - **修掉一条每帧漏一对 VB/IB 的 GPU 资源泄漏（v0.1.97）** —— 长会话堆指纹里
   `VertexBuffer/IndexBuffer` 各有 **49,159** 个**存活**对象。机制：`GraphicsResource` 把每个资源登记进
   **静态** `HashSet`，它让"没 Dispose 的资源"**永远可达**（终结器轮不到）⇒ 忘了 Dispose 就是**永久泄漏**。
@@ -961,3 +973,4 @@ powershell -ExecutionPolicy Bypass -File .\Build-Windows.ps1 -Deploy    # 构建
   * Kitão Gameplay's (Discord：ekitonmjjefgs)
 
 > 如果你是 AI Agent，请阅读当前目录的 [AGENTS.md](https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/AGENTS.md)
+

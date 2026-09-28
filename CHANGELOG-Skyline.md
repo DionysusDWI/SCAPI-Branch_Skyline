@@ -7,6 +7,60 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.98] - 2026-09-28
+
+第一百零五个版本：**加载距离之外的 LOD 统一到 32³** + **阴影按"最小体素"参与**，并附一份**否定证据**。
+
+> 本版对应本轮 goal 的里程碑 **2.2（前半）**与 **2.3（结构性那一半）**；第二模型（DashScope `qwen3.8-omni-flash`）
+> 的接入工具也在本版落地（`heightlab/qwen_vision.py`），用于"放大截图 + 双模型核对"这套新判据。
+
+### 1. LOD 侧统一到 32³（`LodUniformBeyond`，默认开）
+
+原来的三档（近环 4 m / 精细 8 m / 粗 16 m）在"加载距离之外"是**拼接**的，分级本身就是"视觉上过于明显"的来源。
+本版新增 `m_cells32`：由 **4 个 16 m 粗单元取中位**得到（口径与单格**完全同一套** `MedianInto`：高度取中位、材质取众数），
+统一档开启时**只画这一档**，4/8 m 两档不建网格；覆盖 `[视距, 1024 m]`。关掉 = 逐位回到 v0.1.97 的三档（A/B 用）。
+桥开关：`skyline.LodUniformBeyond` / `skyline.LodUniformExtraShift`（0..3，默认 1 ⇒ 32 m）。
+
+**实测**（`skyline-v0198-lod-uniform.py`，`ok=True`）：`uniformCellSizeBlocks=32`、
+`fineCellsInMesh=nearCellsInMesh=0`、`uniformCellsInMesh=189 / uniformMeshIndices=4,422`；
+关掉后 `uniformCellsInMesh=0`、16 m 粗档 `cellsInMesh=88 / meshIndices=1,572`。
+
+### 2. 阴影按"最小体素"参与（里程碑 2.3 的结构性要求）
+
+用户口径："**注意分辨率是该 LOD 的最小体素，而不是整个 LOD 区块作为一个整体参与**"。
+`SelfShadowFactor` 增加 `shadowDict / shadowCellSize`：32 m 的**网格**配 16 m 的**阴影步进**（`m_cells` 是手里最细的采样），
+并在每次重建时**量化**"按最小体素 vs 按整块"的差别（`minVoxelShadow*` 三个字段）。
+实测：**9~14 / 189 格（约 5~7%）两种步进得到不同明暗**、差值合计 **801~1,246 /255** ⇒ 非零，**这条要求真的落地了**。
+
+### 3. 否定证据（如实记）：壳带**不能**照这样统一
+
+第二模型对"只统一 LOD"的两张 **1600 px** 截图的原话：第一张"…边界右侧的方块边长约为左面的 **3–4 倍**"、
+第二张"**没有**突然变粗的硬边界…**更均匀**" ⇒ 只统一 LOD 反而让"壳带（分级）→ LOD（32 m）"那道缝更显眼。
+原因与架构一致：`RestrictLod` 让 LOD 在有壳处**全部让位**，所以"加载距离之外"真正被看到的是**壳带**，
+分级就在壳带的 `TierMetres`（1/2/4/8/16）里。于是本版把壳带也做成单档开关（`skyline.CubeShellUniformStep`）并复核：
+
+| 状态 | `stepHistogram` | `meshVertexBytes` | 第二模型判读 |
+|---|---|---|---|
+| 壳统一 16 m | `step16=1559` | 124,720 | **"画面正中部有一条纯黑横带（虚空/未渲染）…分级/断裂痕迹极强"** |
+| 壳分级（v0.1.97） | `step8=514 step16=1045` | 449,360 | **"方块尺寸随距离连续收小…更均匀"** |
+
+⇒ **壳侧的"统一"不是一个档位数字能解决的**（16 m 一格只剩一张顶面，接缝/裙边与 LOD 让位口径对不上 ⇒ 露空成黑带）。
+所以 `UniformStep` **默认保持 0（关）**，开关与证据留给下一轮：先修单档几何的接缝，再谈统一。
+**并记一个副作用**：壳统一到 16 m 后 `wantVoxel`（要求 `step ≤ 1`）不再成立 ⇒ v0.1.96 修好的"最近档体素体积感"会结构性消失。
+
+### 4. 新增工具：第二模型视觉判读
+
+`heightlab/qwen_vision.py` —— 把图/视频 + 提示词发给 DashScope `qwen3.8-omni-flash`（OpenAI 兼容端点，
+`image_url`/`video_url`），并把**送进去的图 + 提示词 + 回复**一起落盘（可复现）。自检：单图 14 s 返回、`image_tokens=882`。
+另：核实 `BasePerspectiveCamera` 用 `80f * SettingsManager.ViewAngle` ⇒ **ViewAngle=1 = 竖直 80°**（脚本每次先固定它）。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；
+* 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0198/`（`lod-uniform.json`、`shell-uniform.json`、`lod-*-1600.png`、`qwen-*.json`）、`notes/177`。
+
 ## [v0.1.97] - 2026-09-28
 
 第一百零四个版本：**修掉一条每帧漏一对 VB/IB 的 GPU 资源泄漏**（≈0.25 MiB/s，整夜会话累计到 4.9 万个存活缓冲），
@@ -4328,3 +4382,4 @@ Windows，世界 `AgentLab`（创造模式，SCAPI 1.9.3.1 源码树本地构建
 - 命令方块 `place`（`SetCellValueFast`）不刷新 shaft/几何/光照 → 高处建造需用 `ChangeCell` 或 recalc。
 - 上限 1023（`HeightBits=10`）；负 y（地下）未实现；旧存档 y>255 为空。
 - 本源码树的 `Content` 比部分随包发布版新，部署时 `Content.zip` 必须与 dll 同源。
+

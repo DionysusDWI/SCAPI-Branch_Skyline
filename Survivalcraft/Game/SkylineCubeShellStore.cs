@@ -105,6 +105,24 @@ namespace Game {
         /// 关掉 = 逐位回到 v0.1.93 的行为（A/B 用）。
         /// </summary>
         public static bool FrustumCull { get; set; } = true;
+
+        /// <summary>
+        /// [v0.1.98] 里程碑 2.2：**加载距离之外的壳只用一个网格档**（默认 **0 = 关**，见下面的实测结论）。
+        ///
+        /// 为什么：用户口径是"LOD 分辨率分级在视觉上**过于明显**"，而"加载距离之外"真正被看到的东西
+        /// 是**壳带**（v0.1.84 实测：壳可画到视距+768 m，而 LOD 的 4/8 m 层在有壳处**全部让位**），
+        /// 所以那 1/2/4/8/16 档（`TierMetres`）才是"看得见的分级"。
+        /// 这一版把壳带统一到**单档**（16 m，即整个 16 m 立方体一格），先消灭分级，再用放大截图 + 双模型定边界。
+        ///
+        /// **[v0.1.98 实测：默认保持 0（关）—— 直接统一到单档会让画面更差，证据在 `notes/176`]**
+        /// 把 `UniformStep = 16` 后实测（1600 px 放大截图 + 第二模型 `qwen3.8-omni-flash`）：
+        /// 壳带里出现一条**纯黑"空洞"横带**（画面高度 40%~62%），远景还被横向拉宽/纵向压扁
+        /// ⇒ 判读结论是"第 1 张（统一）比第 2 张（分级）**分级/断裂痕迹明显得多**"。
+        /// 也就是说：**壳侧的"统一"不能靠改一个档位数字做到**（16 m 一格里只剩一张顶面，
+        /// 立方体之间的接缝/裙边与 LOD 让位口径对不上 ⇒ 露空），需要先修几何再统一。
+        /// 所以本版**只把 LOD 侧统一到 32³**（用户口径的第一步），壳侧留开关 + 证据给下一轮。
+        /// </summary>
+        public static int UniformStep { get; set; }
         /// <summary>[v0.1.94] 本帧因视锥剔除丢掉的立方体数（累计见 <see cref="FrustumCulledTotal"/>）。</summary>
         public static int FrustumCulledLastFrame { get; private set; }
         public static long FrustumCulledTotal { get; private set; }
@@ -1023,6 +1041,11 @@ namespace Game {
 
         /// <summary>[v0.1.52] 距离（米）→ 本档的**最小体素边长**（1/2/4/8/16/32 m）。</summary>
         public static int StepForDistance(float distance, float viewRange) {
+            // [v0.1.98] 里程碑 2.2：统一档（`UniformStep > 0`）时**所有距离都用同一档**，
+            //   分级消失 —— 这是"先用放大截图 + 双模型定边界"的前提。`0` = 旧的分级行为。
+            if (UniformStep > 0) {
+                return Math.Clamp(UniformStep, 1, CubeSize);
+            }
             float[] tiers = TierMetres;
             float rel = distance - viewRange;
             int step = 1;
@@ -2330,6 +2353,8 @@ namespace Game {
                 ["drawOrder"] = "距离升序（近的先画）；预算顶满时丢掉的是**最远**的那批",
                 // [v0.1.94] 视锥剔除：候选集从"整圈环带"收成"画面里那一片"，绘制预算才用在看得见的地方
                 ["frustumCull"] = FrustumCull,
+                // [v0.1.98] 里程碑 2.2：壳带统一单档（消灭"看得见的分级"）
+                ["uniformStep"] = UniformStep,
                 ["frustumCulledLastFrame"] = FrustumCulledLastFrame,
                 ["frustumCulledTotal"] = FrustumCulledTotal,
                 // [v0.1.84] 洞覆盖（milestone 2.1 的兼容性那一半）

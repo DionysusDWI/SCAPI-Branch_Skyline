@@ -129,6 +129,48 @@ namespace Game {
             set => SkylineLod.RadiusMetres = value;
         }
 
+        /// <summary>
+        /// [v0.1.98] 里程碑 2.2：**加载距离之外的 LOD 统一一档**（默认开，单元 32 m）。
+        /// 开 = 只画这一档（近环 4 m / 精细 8 m 两档不建网格），画面上只有一个分辨率，
+        /// 才能用放大截图 + 双模型去**定分级边界**；关 = 逐位回到 v0.1.97 的三档（A/B 用）。
+        /// </summary>
+        public static bool LodUniformBeyond {
+            get => SkylineLod.UniformBeyondLoaded;
+            set {
+                if (SkylineLod.UniformBeyondLoaded != value) {
+                    SkylineLod.UniformBeyondLoaded = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>
+        /// [v0.1.98] 里程碑 2.2：**壳带统一单档**（默认 16 = 一个 16 m 立方体一格；`0` = 关，回到 1/2/4/8/16 分级）。
+        /// 用户口径"LOD 分辨率分级在视觉上过于明显"指的正是壳带里那一串档位 —— 先统一，再用放大截图 + 双模型定边界。
+        /// </summary>
+        public static int CubeShellUniformStep {
+            get => SkylineCubeShellStore.UniformStep;
+            set {
+                int v = Math.Clamp(value, 0, SkylineCubeShellStore.CubeSize);
+                if (SkylineCubeShellStore.UniformStep != v) {
+                    SkylineCubeShellStore.UniformStep = v;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.98] 统一档的额外位移（默认 1 ⇒ 单元 32 m）。改动会立刻重建 LOD。</summary>
+        public static int LodUniformExtraShift {
+            get => SkylineLod.UniformExtraShift;
+            set {
+                int v = Math.Clamp(value, 0, 3);
+                if (SkylineLod.UniformExtraShift != v) {
+                    SkylineLod.UniformExtraShift = v;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
         /// <summary>v0.1.1：LOD 开启时把视图雾的跨度拉远到 LOD 半径的 90%，
         /// 让"视距边缘的真实地形"与 LOD 层共用同一条雾曲线（消除交接跳变）。</summary>
         public static bool LodFogExtend {
