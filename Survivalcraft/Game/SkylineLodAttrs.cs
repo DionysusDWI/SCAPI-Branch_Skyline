@@ -139,6 +139,44 @@ namespace Game {
             //   而**这条自检比的就是"两次抓帧必须逐位一致"**（属性开/关只是顶点布局不同）。
             //   所以自检期间把它关掉：它检查的是顶点属性/着色器管道，不是云影。
             bool savedCloudShadow = SkylineLodCloudShadow.Enabled;
+            // [v0.1.105] **固定太阳**：坡向明暗与自阴影都用"跟踪到的真太阳"，而世界时间一直在走
+            //   ⇒ CPU 烘焙那一次与 GPU 渲染那一次之间太阳会动一点点，极端情况下个别单元的
+            //   自阴影可见性会翻转 ⇒ 这条自检**偶发 ok=false**（实测：单独跑 3/3 过；放进巡检/门禁
+            //   的顺序里偶发 FAIL，`v0177-lod-gpu-shading` 就是被它带崩的）。
+            //   这里在**每次抓帧前把时刻钉回同一个值**（只在世界时间是 Changing 时才动，
+            //   固定时刻的世界本来就不需要，也不会被改）。
+            double pinnedTod = 0.0;
+            bool pinned = false;
+            try {
+                SubsystemTimeOfDay tod = GameManager.Project?.FindSubsystem<SubsystemTimeOfDay>(true);
+                SubsystemGameInfo gi = GameManager.Project?.FindSubsystem<SubsystemGameInfo>(true);
+                if (tod != null && gi != null && gi.WorldSettings.TimeOfDayMode == TimeOfDayMode.Changing) {
+                    pinnedTod = tod.TimeOfDay;
+                    pinned = true;
+                }
+            }
+            catch (Exception) {
+                pinned = false;
+            }
+            void PinSun() {
+                if (!pinned) {
+                    return;
+                }
+                try {
+                    // 与 `SkylineRuntime.SunSetTimeOfDay` 同一套数学（只拨偏移，不动 TimeOfDayMode）
+                    SubsystemTimeOfDay tod = GameManager.Project?.FindSubsystem<SubsystemTimeOfDay>(true);
+                    SubsystemGameInfo gi = GameManager.Project?.FindSubsystem<SubsystemGameInfo>(true);
+                    if (tod == null || gi == null) {
+                        return;
+                    }
+                    double duration = Math.Max(tod.DayDuration, 1f);
+                    double u = gi.TotalElapsedGameTime / duration;
+                    u -= Math.Floor(u);
+                    tod.TimeOfDayOffset = pinnedTod - tod.DayStart - u;
+                }
+                catch (Exception) {
+                }
+            }
             try {
                 Camera camera = ActiveCamera;
                 if (camera == null) {
@@ -153,10 +191,12 @@ namespace Game {
                 SkylineLod.SelfShadowStrength = 0f;
                 SkylineRuntime.LodAttrShaderOn = false;
                 SkylineRuntime.LodVertexAttributes = true;
+                PinSun();
                 RebuildNow();
                 Image attrImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
                 int attrIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
                 SkylineRuntime.LodVertexAttributes = false;
+                PinSun();
                 RebuildNow();
                 Image bakedImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
                 int bakedIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
@@ -165,6 +205,7 @@ namespace Game {
                 // → 侧壁被暗化两遍 → 看起来像"法线没到片元"（实测 mean 37.975/255 ≈ 被多乘的那一层）。
                 SkylineRuntime.LodVertexAttributes = true;
                 SkylineRuntime.LodAttrShaderOn = true;
+                PinSun();
                 RebuildNow();
                 Image gpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), true, 0, size, 0f);
                 // ④⑤ [v0.1.77] 恢复**真实强度**再各画一遍：这一对比才是"坡向明暗 + 自阴影这一层
@@ -173,9 +214,11 @@ namespace Game {
                 SkylineLod.SlopeShadingStrength = savedSlope;
                 SkylineLod.SelfShadowStrength = savedShadow;
                 SkylineRuntime.LodAttrShaderOn = false;
+                PinSun();
                 RebuildNow();
                 Image shadedCpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
                 SkylineRuntime.LodAttrShaderOn = true;
+                PinSun();
                 RebuildNow();
                 Image shadedGpuImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), true, 0, size, 0f);
                 JsonObject slopeGap = shadedCpuImage == null || shadedGpuImage == null
