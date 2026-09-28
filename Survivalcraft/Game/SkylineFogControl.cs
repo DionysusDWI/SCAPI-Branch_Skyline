@@ -106,11 +106,13 @@ namespace Game {
                 ["volumetricFog"] = VolumetricFogEnabled,
             ["volumetricGodRays"] = VolumetricFogEnabled && VolumetricSunShaftStrength > 0f,
             ["volumetricHaze"] = VolumetricFogEnabled && VolumetricHazeEnabled,
-            // [v0.1.118] 基础密度（决定"雾是不是一直存在"）；脚本收尾要能读它把运行时改回去
-            ["fogBaseDensity"] = (double)FogBaseDensity,
             ["lodFog"] = VolumetricFogEnabled,
-                ["coloredLightFog"] = VolumetricFogEnabled && SkylinePointLights.Enabled
-            };
+            ["coloredLightFog"] = VolumetricFogEnabled && SkylinePointLights.Enabled
+        };
+        // ⚠️ **`fogBaseDensity` 不能放进 `layers`**：那一层是"布尔层账本"，验收脚本会按
+        //   `[k for k, v in layers.items() if v]` 判"还有哪层开着" —— 一个**数值** 0.10 会被
+        //   当成"开着"，于是 v0111/v0116 两条验收同时报假红（实测踩到）。放在根上。
+        root["fogBaseDensity"] = (double)FogBaseDensity;
             root["layers"] = layers;
             JsonObject passes = new();
             long callsTotal = 0, zeroedTotal = 0;

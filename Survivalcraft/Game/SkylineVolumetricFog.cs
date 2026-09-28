@@ -128,6 +128,16 @@ namespace Game {
         /// <summary>[v0.1.104] 前向散射相位指数（越大"朝太阳看才亮"越明显）。默认 8。</summary>
         public static float VolumetricSunShaftPhasePower { get; set; } = 8f;
 
+        /// <summary>[v0.1.119] **神光的有效强度 = 设定强度 × 昼光因子**。
+        /// 为什么必须有它（实测踩到）：v0.1.112 已经把"太阳阴影"乘上昼光因子 ⇒ 夜里没有假阴影；
+        /// 但**神光是另一条路径**（体积雾里的单次散射），它只看太阳方向与阴影图，
+        /// 不看"太阳还在地平线上吗" ⇒ 夜间仍会往画面里加光轴。基密度定标（v0.1.118）让雾/神光
+        /// 真的可见之后，`skyline-v0112-shadow-dayfactor.py` 立刻在夜里量到 **3,420 px** 的"开/关差"
+        /// （阈值 200 px）。这里用**同一个** `ShadowDayFactor`（`SubsystemSky.SkyLightIntensity`）
+        /// 收口：**没有太阳就没有神光**。</summary>
+        public static float VolumetricSunShaftEffective =>
+            Math.Max(VolumetricSunShaftStrength, 0f) * Math.Clamp(ShadowDayFactor, 0f, 1f);
+
         static string m_volFogLastError = "";
         static long m_volFogBound;
 
@@ -147,6 +157,9 @@ namespace Game {
                 ["shear"] = (double)FogHeightShear,
                 ["steps"] = FogSteps,
                 ["sunShaft"] = (double)VolumetricSunShaftStrength,
+                ["baseDensity"] = (double)FogBaseDensity,
+                ["sunShaftEffective"] = (double)VolumetricSunShaftEffective,
+                ["sunShaftDayFactor"] = (double)ShadowDayFactor,
                 ["sunShaftColor"] = new JsonArray(VolumetricSunShaftColor.X, VolumetricSunShaftColor.Y,
                                                  VolumetricSunShaftColor.Z),
                 ["sunShaftPhasePower"] = (double)VolumetricSunShaftPhasePower,

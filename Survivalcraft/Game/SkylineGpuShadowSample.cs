@@ -527,7 +527,7 @@ namespace Game {
                 shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
                 shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
                 shader.GetParameter("u_vfHaze", true).SetValue(VolumetricHazeEnabled ? 1f : 0f);
-                shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
+                shader.GetParameter("u_vfSunShaft", true).SetValue(VolumetricSunShaftEffective);
                 shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
                 shader.GetParameter("u_vfPhasePower", true)
                     .SetValue(Math.Clamp(VolumetricSunShaftPhasePower, 1f, 64f));
@@ -703,7 +703,7 @@ namespace Game {
                     shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
                     shader.GetParameter("u_vfHaze", true).SetValue(VolumetricHazeEnabled ? 1f : 0f);
                     // [v0.1.104] 体积神光（Dawnlight ShaftLighting 的适配路线，见 SkylineVolumetricFog）
-                    shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
+                    shader.GetParameter("u_vfSunShaft", true).SetValue(VolumetricSunShaftEffective);
                     shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
                     shader.GetParameter("u_vfPhasePower", true)
                         .SetValue(Math.Clamp(VolumetricSunShaftPhasePower, 1f, 64f));
