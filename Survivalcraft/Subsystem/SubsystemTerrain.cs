@@ -532,11 +532,6 @@ namespace Game {
                     TerrainRenderer.DrawAlphaTested(camera);
                     // [v0.1.58] 光影接入面：不透明 pass 全部结束（外部包在此做合成）
                     SkylineShaderHook.Run("composite", camera);
-                    // [v0.1.120] **屏幕空间体积光**（Iris `volumetricLight.glsl` 的迁移）：
-                    //   全屏加法 pass，用相机深度图重建世界位置 + 每步查太阳阴影图；
-                    //   天空片元也走满 `ScreenVolumetricMaxDistance`（旧的地形内 8 步路线做不到这件事）。
-                    //   默认关；关掉时这一帧不画任何东西。
-                    SkylineRuntime.ScreenVolumetricLightPass(camera);
                     // [v0.1.58] G-buffer 调试直显（默认关）
                     SkylineGBuffer.DebugDrawIfEnabled(camera);
                     // [v0.1.113] 相机深度预通道的调试直显（默认关；左上角 1/4 画中画）
@@ -544,6 +539,14 @@ namespace Game {
                 }
                 else if (drawOrder == m_drawOrders[1]) {
                     TerrainRenderer.DrawTransparent(camera);
+                    // [v0.1.120] **屏幕空间体积光**（Iris `volumetricLight.glsl` 的迁移）：
+                    //   全屏加法 pass，用相机深度图重建世界位置 + 每步查太阳阴影图。
+                    //   ⚠️ **必须在 draw order 100 这里调，而不是 composite（order 0）**：
+                    //   天空穹顶与**云层是在 draw order 5 画的**，挂在地形 order 0 的合成阶段
+                    //   会被云盖住（实测抬头看天时天空区信号 = 0，平视朝太阳 13,068 px）。
+                    //   放在云（5）与地形透明（100）之后 ⇒ 天空、云、水面都吃得到体积光。
+                    //   默认关；关掉时这一帧不画任何东西。
+                    SkylineRuntime.ScreenVolumetricLightPass(camera);
                     // [v0.1.58] 光影接入面：帧末（透明也画完了；后处理类效果在这里）
                     SkylineShaderHook.Run("final", camera);
                 }

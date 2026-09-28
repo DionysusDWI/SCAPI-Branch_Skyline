@@ -117,10 +117,16 @@ namespace Game {
                     Display.BlendState = BlendState.Additive;
                     Display.DepthStencilState = DepthStencilState.None;
                     Display.RasterizerState = RasterizerState.CullNoneScissor;
-                    if (target != null) {
-                        Display.Viewport = new Viewport(0, 0, target.Width, target.Height);
-                        Display.ScissorRectangle = new Rectangle(0, 0, target.Width, target.Height);
-                    }
+                    // **视口/裁剪框必须显式设成全屏**：不设的话会沿用调用方此刻的状态，
+                    // 而这一 pass 现在挂在 draw order 100（云与透明都画完之后），
+                    // 上一步留下的**裁剪框可能只覆盖一部分屏幕** ⇒ 全屏四边形被裁掉一半
+                    // （实测：上半屏一个字都没画到、信号 0 px）。
+                    // 后台缓冲尺寸用 `Display.BackbufferSize`（`Display.RenderTarget == null` 时拿不到 RT 尺寸）。
+                    Point2 targetSize = target != null
+                        ? new Point2(target.Width, target.Height)
+                        : Display.BackbufferSize;
+                    Display.Viewport = new Viewport(0, 0, targetSize.X, targetSize.Y);
+                    Display.ScissorRectangle = new Rectangle(0, 0, targetSize.X, targetSize.Y);
                     Shader shader = EnsureScreenVolumetricShader();
                     BindScreenVolumetric(shader, camera);
                     EnsureQuad();
@@ -425,7 +431,7 @@ void main(
 	float3 color = u_svdSunColor * (lit * alpha * phase * u_svdStrength);
 	if (u_svdDebug > 0.5)
 	{
-		svTarget = float4(color.rgb, 1.0);
+		svTarget = float4(min(od * 0.05, 1.0), lit, min(rayEnd / 256.0, 1.0), 1.0);
 		return;
 	}
 	svTarget = float4(color.rgb, alpha);
@@ -597,7 +603,7 @@ void main()
 	vec3 color = u_svdSunColor * (lit * alpha * phase * u_svdStrength);
 	if (u_svdDebug > 0.5)
 	{
-		gl_FragColor = vec4(color, 1.0);
+		gl_FragColor = vec4(min(od * 0.05, 1.0), lit, min(rayEnd / 256.0, 1.0), 1.0);
 		return;
 	}
 	gl_FragColor = vec4(color, alpha);
