@@ -145,19 +145,29 @@ namespace Game {
             return null;
         }
 
-        /// <summary>像素/弧度（用当前窗口宽度与视角估算；拿不到就退回 1280 宽 / 60° 的常用值）。</summary>
+        /// <summary>
+        /// 像素/弧度 —— **必须与 `BasePerspectiveCamera` 同式**。
+        ///
+        /// [v0.1.99 修正] 旧实现写死 `fovY = 1.0472 rad`（**60°**）+ 写死 `16/9` 长宽比，
+        /// 而那台相机用的是 `80f * SettingsManager.ViewAngle`（竖直 80°）。
+        /// 在 2048×1113 的窗口上旧式给出 `pixelsPerRadian ≈ 997.7`，
+        /// 正解是 `556.5 / tan(40°) ≈ 663.2` —— **高估 50%**，
+        /// 后果是"家具该降级却不降级"（`LevelDistance = pxPerRad/res`：L1 71.3 m vs 47.4 m、
+        /// L2 142.5 m vs 94.7 m），白花几何。用户口径要求视场角**固定 100%（80°）**，
+        /// 所以这里直接按**竖直视场**算，不再经过长宽比（针孔相机两个轴的焦距像素数相同：
+        /// `(W/2)/tan(fovX/2) ≡ (H/2)/tan(fovY/2)`，用竖直更不容易写错）。
+        /// </summary>
         static float PixelsPerRadian() {
-            float width = 1280f;
+            float height = 720f;
             try {
-                width = Math.Max(Window.Size.X, 320f);
+                height = Math.Max(Window.Size.Y, 200f);
             }
             catch {
                 // ignored（无窗口环境）
             }
-            const float fovY = 1.0472f;                      // 60°
-            float aspect = 16f / 9f;
-            float fovX = 2f * MathF.Atan(MathF.Tan(fovY * 0.5f) * aspect);
-            return width * 0.5f / MathF.Tan(fovX * 0.5f);
+            float viewAngle = Math.Clamp(SettingsManager.ViewAngle, 0.25f, 2f);
+            float fovY = MathUtils.DegToRad(80f * viewAngle);
+            return height * 0.5f / MathF.Tan(fovY * 0.5f);
         }
 
         static LevelSet GetSet(FurnitureDesign design, SubsystemTerrain subsystemTerrain) {
