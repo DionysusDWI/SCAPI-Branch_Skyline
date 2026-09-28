@@ -719,7 +719,15 @@ namespace Game {
                 if (SkylinePointLights.Enabled) {
                     SkylinePointLights.Bind(shader);
                 }
+                // [v0.1.114] **屏幕空间 AO 必须在这条路（地形不透明变体）上绑** ——
+                //   第一版只把它加在共享的 `BindShadowFogParams`（那条只服务远景 LOD 着色器）
+                //   ⇒ 地形的 `u_aoEnable/u_aoDebug` 恒为 0，AO 与调试直显**从来没生效过**
+                //   （"开 AO 差 8,201 px"其实是流式加载噪声）。
+                string aoBindErr = BindScreenAo(shader);
                 m_gpuShadowSampleError = "";
+                if (aoBindErr.Length > 0) {
+                    m_gpuShadowSampleError = "BindScreenAo: " + aoBindErr;
+                }
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
                 return shader;
@@ -832,14 +840,39 @@ vec3 aoWorldAt(vec2 uv, float linearDist)
 }
 
 // 8 抽样双环 + 逐像素旋转（与阴影核同一套「可复现」口径：旋转来自世界坐标哈希，不用时间）
+// [v0.1.114 诊断] 把「世界坐标 → 预通道 uv」单独拆出来：调用点可以直接把它画出来（调试模式 2），
+//   用于确认「投影 + y 翻转」到底对不对（第一版只看到「AO 只落在远处」，分不清是投影还是核的问题）。
+vec2 screenAoUv(vec3 worldPos)
+{
+	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）
+	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
+	if (clip.w <= 0.001)
+	{
+		return vec2(-1.0, -1.0);
+	}
+	vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+	// **y 翻转**：预通道渲染到 RT，引擎在 RT 路径上 `gl_Position.y *= -1`（u_glymul）
+	uv.y = mix(uv.y, 1.0 - uv.y, u_aoFlipV);
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	{
+		return vec2(-1.0, -1.0);
+	}
+	return uv;
+}
+
 float screenAo(vec3 worldPos)
 {
 	if (u_aoEnable < 0.5)
 	{
 		return 1.0;
 	}
-	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）⇒ 与分辨率、y 翻转都无关
-	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
+	vec2 uv = screenAoUv(worldPos);
+	if (uv.x < 0.0)
+	{
+		return 1.0;
+	}
+	// **法线从深度图重建**（不能用 dFdx/dFdy：GLSL ES 1.0 里要么要 `#extension GL_OES_standard_derivatives`、
+	//   要么要 `#version 300` ⇒ 实测直接编译失败）。取「右/上」邻居重建世界坐标做叉积；退化时退回「朝向相机」。
 	if (clip.w <= 0.001)
 	{
 		return 1.0;
@@ -902,7 +935,15 @@ float screenAo(vec3 worldPos)
 		{
 			continue;
 		}
-		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		// **高度带判据**：只把「贴着当前表面（高度 < rad/2）」的邻居当遮挡物。
+		//   只用角度判据（dot(n,v)/len > bias）的话，**上坡地形自己**会被算成遮挡 ⇒ 整面坡被压暗
+		//   （实测：40% 像素变暗 + 墙面出现条纹，不是接触阴影）。
+		float h = dot(n, v);
+		if (h <= u_aoBias * max(len, 1e-4))
+		{
+			continue;
+		}
+		if (h > u_aoRadius * 0.5)
 		{
 			continue;
 		}
@@ -1113,7 +1154,15 @@ float screenAo(float3 worldPos)
 		{
 			continue;
 		}
-		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		// **高度带判据**：只把「贴着当前表面（高度 < rad/2）」的邻居当遮挡物。
+		//   只用角度判据（dot(n,v)/len > bias）的话，**上坡地形自己**会被算成遮挡 ⇒ 整面坡被压暗
+		//   （实测：40% 像素变暗 + 墙面出现条纹，不是接触阴影）。
+		float h = dot(n, v);
+		if (h <= u_aoBias * max(len, 1e-4))
+		{
+			continue;
+		}
+		if (h > u_aoRadius * 0.5)
 		{
 			continue;
 		}
@@ -1684,22 +1733,33 @@ vec3 aoWorldAt(vec2 uv, float linearDist)
 }
 
 // 8 抽样双环 + 逐像素旋转（与阴影核同一套「可复现」口径：旋转来自世界坐标哈希，不用时间）
+// [v0.1.114 诊断] 把「世界坐标 → 预通道 uv」单独拆出来：调用点可以直接画出来（调试模式 2），
+//   用于确认「投影 + y 翻转」到底对不对（第一版只看到「AO 只落在远处」，分不清是投影还是核的问题）。
+vec2 screenAoUv(vec3 worldPos)
+{
+	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
+	if (clip.w <= 0.001)
+	{
+		return vec2(-1.0, -1.0);
+	}
+	vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+	// **y 翻转**：预通道渲染到 RT，引擎在 RT 路径上 `gl_Position.y *= -1`（u_glymul）
+	uv.y = mix(uv.y, 1.0 - uv.y, u_aoFlipV);
+	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	{
+		return vec2(-1.0, -1.0);
+	}
+	return uv;
+}
+
 float screenAo(vec3 worldPos)
 {
 	if (u_aoEnable < 0.5)
 	{
 		return 1.0;
 	}
-	// uv 用**世界坐标投回预通道的 NDC**（与预通道同一套矩阵/约定）⇒ 与分辨率、y 翻转都无关
-	vec4 clip = u_aoViewProj * vec4(worldPos.x - u_aoOrigin.x, worldPos.y, worldPos.z - u_aoOrigin.y, 1.0);
-	if (clip.w <= 0.001)
-	{
-		return 1.0;
-	}
-	vec2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
-	// **y 翻转**：预通道渲染到 RT，引擎在 RT 路径上 `gl_Position.y *= -1`（u_glymul）
-	uv.y = mix(uv.y, 1.0 - uv.y, u_aoFlipV);
-	if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0)
+	vec2 uv = screenAoUv(worldPos);
+	if (uv.x < 0.0)
 	{
 		return 1.0;
 	}
@@ -1752,7 +1812,13 @@ float screenAo(vec3 worldPos)
 		{
 			continue;
 		}
-		if (dot(n, v) / max(len, 1e-4) <= u_aoBias)
+		// **高度带判据**（与 GLSL 段同一算法）：只把贴着当前表面的邻居当遮挡物
+		float h = dot(n, v);
+		if (h <= u_aoBias * max(len, 1e-4))
+		{
+			continue;
+		}
+		if (h > u_aoRadius * 0.5)
 		{
 			continue;
 		}
@@ -2066,9 +2132,19 @@ void main()
 	// [v0.1.114] **屏幕空间 AO**（与 HLSL 段同一函数；`u_aoEnable=0` 时直接返回 1）
 	{
 		float ao = screenAo(v_world);
-		if (u_aoDebug > 0.5)
+		// 调试模式：1=AO 因子灰阶 / 2=预通道 uv（红=u、绿=v）/ 3=世界坐标 fract / 0=正常
+		if (u_aoDebug > 2.5)
 		{
-			result.rgb = vec3(ao, ao, ao);        // 调试：直接把 AO 因子画出来
+			result.rgb = fract(v_world * 0.25);
+		}
+		else if (u_aoDebug > 1.5)
+		{
+			vec2 dbgUv = screenAoUv(v_world);
+			result.rgb = dbgUv.x < 0.0 ? vec3(0.0, 0.0, 0.0) : vec3(dbgUv.x, dbgUv.y, 0.2);
+		}
+		else if (u_aoDebug > 0.5)
+		{
+			result.rgb = vec3(ao, ao, ao);
 		}
 		else
 		{

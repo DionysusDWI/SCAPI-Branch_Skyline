@@ -417,6 +417,100 @@ namespace Game {
             return o.ToJsonString();
         }
 
+        /// <summary>
+        /// **[v0.1.114] 投影↔反投影自检**：把"片元侧那一套"在 CPU 上原样跑一遍 ——
+        /// 取深度图上若干像素 → 用 `inverse(viewProjection)` 反推世界 → 再用正向矩阵投回去，
+        /// 应当回到**同一个 uv**（误差 0）。SSAO 第一版"AO 只落在远处"时，最大的嫌疑就是这一环，
+        /// 所以先把它变成可证伪的数：误差超阈值就直接判失败，不让它混进 AO 的调参里。
+        /// 返回 JSON：`{ ok, samples, maxUvError, meanUvError, matrixVariant }`。
+        /// </summary>
+        public static string ScreenDepthProjectionSelfCheck() {
+            JsonObject result = new();
+            Camera camera = GetCamera();
+            if (camera == null) {
+                result["ok"] = false;
+                result["err"] = "no camera";
+                return result.ToJsonString();
+            }
+            bool saved = ScreenDepthEnabled;
+            ScreenDepthEnabled = true;
+            try {
+                ScreenDepthPass(camera);
+                if (m_sdRt == null) {
+                    result["ok"] = false;
+                    result["err"] = "no render target";
+                    return result.ToJsonString();
+                }
+                int width = m_sdRt.Width, height = m_sdRt.Height;
+                Image image = m_sdRt.GetData(new Rectangle(0, 0, width, height));
+                Matrix inv = m_sdInvViewProjection;
+                Matrix fwd = m_sdViewProjection;
+                int samples = 0, covered = 0;
+                double maxErr = 0.0, sumErr = 0.0;
+                bool depth16 = ScreenDepthDepth16;
+                for (int y = height / 8; y < height; y += Math.Max(1, height / 24)) {
+                    for (int x = width / 8; x < width; x += Math.Max(1, width / 32)) {
+                        Color pixel = image.GetPixel(x, y);
+                        float d;
+                        if (depth16) {
+                            int raw = pixel.R * 256 + pixel.G;
+                            if (raw >= 65278) {
+                                continue;                                  // 背景
+                            }
+                            d = raw / 65535f;
+                        }
+                        else {
+                            if (pixel.R >= 254) {
+                                continue;
+                            }
+                            d = pixel.R / 255f;
+                        }
+                        covered++;
+                        // 与片元侧同一套：uv → ndc → 反投影到世界（再加回浮动原点），再正向投回去
+                        Vector2 uv = new((x + 0.5f) / width, (y + 0.5f) / height);
+                        Vector2 ndc = new(uv.X * 2f - 1f, uv.Y * 2f - 1f);
+                        Vector4 nearP = Vector4.Transform(new Vector4(ndc.X, ndc.Y, 0f, 1f), inv);
+                        Vector4 farP = Vector4.Transform(new Vector4(ndc.X, ndc.Y, 1f, 1f), inv);
+                        if (MathF.Abs(nearP.W) < 1e-9f || MathF.Abs(farP.W) < 1e-9f) {
+                            continue;
+                        }
+                        Vector3 nearW = new(nearP.X / nearP.W, nearP.Y / nearP.W, nearP.Z / nearP.W);
+                        Vector3 farW = new(farP.X / farP.W, farP.Y / farP.W, farP.Z / farP.W);
+                        Vector3 dir = Vector3.Normalize(farW - nearW);
+                        Vector3 world = nearW + dir * (d * ScreenDepthScaleMetres)
+                                        + new Vector3(m_sdOrigin.X, 0f, m_sdOrigin.Y);
+                        // 正向：先减浮动原点（与预通道 VSH 同一口径）
+                        Vector4 clip = Vector4.Transform(
+                            new Vector4(world.X - m_sdOrigin.X, world.Y, world.Z - m_sdOrigin.Y, 1f), fwd);
+                        if (MathF.Abs(clip.W) < 1e-9f) {
+                            continue;
+                        }
+                        Vector2 uvBack = new(clip.X / clip.W * 0.5f + 0.5f, clip.Y / clip.W * 0.5f + 0.5f);
+                        float err = MathF.Max(MathF.Abs(uvBack.X - uv.X), MathF.Abs(uvBack.Y - uv.Y));
+                        maxErr = Math.Max(maxErr, err);
+                        sumErr += err;
+                        samples++;
+                    }
+                }
+                result["ok"] = samples > 0 && maxErr < 0.01;
+                result["samples"] = samples;
+                result["coveredSamples"] = covered;
+                result["maxUvError"] = Math.Round(maxErr, 6);
+                result["meanUvError"] = samples > 0 ? Math.Round(sumErr / samples, 6) : (double?)null;
+                result["matrixVariant"] = ScreenDepthMatrixVariant;
+                result["note"] = "uv→世界→uv 的往返误差；<0.01（1% 屏幕）即认为投影/反投影自洽";
+            }
+            catch (Exception e) {
+                result["ok"] = false;
+                result["err"] = $"{e.GetType().Name}: {e.Message}";
+                m_sdLastError = (string)result["err"];
+            }
+            finally {
+                ScreenDepthEnabled = saved;
+            }
+            return result.ToJsonString();
+        }
+
         /// <summary>[v0.1.113] 调试直显（左上角 1/4 画中画）：R 通道 = 16 bit 深度的高字节。</summary>
         public static void ScreenDepthDebugDrawIfEnabled(Camera camera) {
             if (!ScreenDepthDebugDraw || m_sdRt == null || camera == null) {

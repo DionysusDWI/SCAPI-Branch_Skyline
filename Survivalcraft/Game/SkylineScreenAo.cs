@@ -31,8 +31,18 @@ namespace Game {
         /// <summary>同侧阈值（法线与邻居方向的余弦下限，默认 0.05）：避免"背面"误判成遮蔽。</summary>
         public static float ScreenAoBias { get; set; } = 0.05f;
 
-        /// <summary>[诊断] `>0.5` 时把 AO 因子**直接画出来**（灰阶），用于确认它到底有没有在变化。</summary>
-        public static bool ScreenAoDebugShow { get; set; }
+        /// <summary>
+        /// **[诊断] 直显模式**：`0` = 正常（乘 AO）；`1` = AO 因子灰阶；`2` = 预通道 uv（红=u、绿=v）
+        /// —— 这一档能一眼看出"投影 + y 翻转"对不对；`3` = 世界坐标 fract（看重建/插值是否正常）。
+        /// 第一版是个 bool（灰阶），但它没显示出灰阶 ⇒ 换成多档，先确认通道真的生效。
+        /// </summary>
+        public static int ScreenAoDebugMode { get; set; }
+
+        /// <summary>兼容旧名的布尔开关（`true` = 模式 1）。</summary>
+        public static bool ScreenAoDebugShow {
+            get => ScreenAoDebugMode == 1;
+            set => ScreenAoDebugMode = value ? 1 : 0;
+        }
 
         /// <summary>**屏幕空间半径上限**（uv 比例，默认 0.05 = 屏幕宽的 5%）。
         /// 为什么需要：0.8 m 的世界半径在 2 m 处会占到屏幕 24%，8 个抽样全落到远处几何 ⇒ 近处反而没有 AO。</summary>
@@ -69,10 +79,15 @@ namespace Game {
         public static string BindScreenAo(Shader shader) {
             try {
                 // ⚠️ 这个函数被**共用**的 `BindShadowFogParams` 调用，而那一条也服务远景 LOD 着色器
-                //   （它没有这些 uniform）。所以一律用 `allowNull: true` 取参数：拿不到就**静默跳过**，
-                //   绝不让"某个着色器没有 AO"变成一条会打断后续绑定的异常。
-                ShaderParameter pEnable = shader.GetParameter("u_aoEnable", true);
-                if (pEnable == null) {
+                //   （它没有这些 uniform）。所以先探测一次：**取不到就静默跳过**，绝不让"某个着色器没有 AO"
+                //   变成一条会打断后续绑定的异常。
+                //   注意 `GetParameter(name, allowNull:true)` **不返回 null**（返回一个 Null 类型的占位参数），
+                //   所以这里用 `allowNull:false`（取不到会抛）来探测。
+                ShaderParameter pEnable;
+                try {
+                    pEnable = shader.GetParameter("u_aoEnable");
+                }
+                catch (Exception) {
                     return "";
                 }
                 bool on = ScreenAoEnabled && ScreenDepthReady && ScreenDepthRt != null;
@@ -99,7 +114,7 @@ namespace Game {
                 shader.GetParameter("u_aoRadius", true).SetValue(Math.Clamp(ScreenAoRadius, 0.05f, 8f));
                 shader.GetParameter("u_aoIntensity", true).SetValue(Math.Clamp(ScreenAoIntensity, 0f, 1f));
                 shader.GetParameter("u_aoBias", true).SetValue(Math.Clamp(ScreenAoBias, -1f, 1f));
-                shader.GetParameter("u_aoDebug", true).SetValue(ScreenAoDebugShow ? 1f : 0f);
+                shader.GetParameter("u_aoDebug", true).SetValue((float)Math.Clamp(ScreenAoDebugMode, 0, 3));
                 RenderTarget2D depthRt = ScreenDepthRt;
                 shader.GetParameter("u_aoTexel", true).SetValue(depthRt == null
                     ? new Vector2(1f, 1f)
