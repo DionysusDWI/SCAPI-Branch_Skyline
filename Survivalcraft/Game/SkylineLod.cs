@@ -126,6 +126,16 @@ namespace Game {
             public ushort Value2;
             public byte Light2;
             public bool HasSecond;
+            /// <summary>
+            /// [v0.1.100] 里程碑 2.3 第三项：**地表上方空气格的光照**（单元内取最大）。
+            ///
+            /// 为什么必须单独采：Survivalcraft 里**实心方块自己的 light 位通常是 0**，光活在
+            /// **相邻的空气格**里（v0.1.82 已经吃过一次这个亏）。所以只采"顶面方块"的 light
+            /// ⇒ LOD 里**永远看不到固定光源（火把/灯）造成的亮斑**。
+            /// 这里在采集时额外读每列 `top+1` 那一格的光，单元内取**最大**（亮斑就该是"最大"而不是中位），
+            /// 于是"火把照亮一片地"在 LOD 上会表现为一块比周围亮的斑块。
+            /// </summary>
+            public byte LightAir;
         }
 
         static readonly Dictionary<long, Cell> m_cells = [];
@@ -151,6 +161,45 @@ namespace Game {
         public static int UniformExtraShift { get; set; } = 1;
 
         /// <summary>
+        /// [v0.1.100] 里程碑 2.3 第三项：**固定光源的亮度斑块**（默认开）。
+        /// 开 = 顶面基色取 `max(实心方块自身 light, **上方空气格 light**)`（单元内取最大）；
+        /// 关 = 逐位回到 v0.1.99（只读实心方块自身 light，于是 LOD 里看不到火光造成的亮斑）。
+        /// 依据：Survivalcraft 里实心方块自身的 light 位通常是 0、光活在相邻空气格（v0.1.82 的教训）。
+        /// </summary>
+        public static bool LodAirLightPatch { get; set; } = true;
+        static int m_airLightBrightenedCells;
+        public static int AirLightBrightenedCells => m_airLightBrightenedCells;
+
+        /// <summary>
+        /// [v0.1.100] **只读探针**：回读某格 LOD 单元的 `Light`（实心方块自身光照）、`LightAir`（上方空气格光照）
+        /// 与"实际用于顶面基色的生效值" —— 用来**零噪声地**证明"固定光源/天空光的亮度斑块"真的接上了
+        /// （比拿画面差分判方向可靠：本轮实测场景自身抖动可达 19 万像素）。
+        /// 统一档（`UniformBeyondLoaded`）时查 32 m 表，否则查 16 m 粗表。参数是世界坐标格。
+        /// </summary>
+        public static string AirLightProbe(int worldX, int worldZ) {
+            int shift = CellShift + (UniformBeyondLoaded ? Math.Clamp(UniformExtraShift, 0, 3) : 0);
+            long key = Key(worldX >> shift, worldZ >> shift);
+            Dictionary<long, Cell> dict = UniformBeyondLoaded ? m_cells32 : m_cells;
+            JsonObject o = new();
+            if (!dict.TryGetValue(key, out Cell c)) {
+                o["ok"] = false;
+                o["err"] = "cell not found";
+                o["cellShift"] = shift;
+                return o.ToJsonString();
+            }
+            int eff = LodAirLightPatch ? Math.Max(c.Light, c.LightAir) : c.Light;
+            o["ok"] = true;
+            o["cellShift"] = shift;
+            o["cell"] = new JsonArray(worldX >> shift, worldZ >> shift);
+            o["light"] = (int)c.Light;
+            o["lightAir"] = (int)c.LightAir;
+            o["effective"] = eff;
+            o["brightened"] = c.LightAir > c.Light;
+            o["patchEnabled"] = LodAirLightPatch;
+            return o.ToJsonString();
+        }
+
+        /// <summary>
         /// [v0.1.98] 里程碑 2.3 的**可断言证据**："按最小体素步进阴影"与"按整块单元步进阴影"
         /// 到底有没有差别 —— 有差别的格子数与差值总和。为什么需要它：这条要求
         /// （"分辨率是该 LOD 的最小体素，而不是整个 LOD 区块作为一个整体参与"）如果只是改了代码，
@@ -162,7 +211,7 @@ namespace Game {
 
         static readonly Dictionary<long, Cell> m_cells32 = [];          // 32 m 统一档
         // 分组用的临时表（值元组，**不分配数组**；每次重建前 Clear）
-        static readonly Dictionary<long, (int n, long p0, long p1, long p2, long p3)> m_groupScratch = [];
+        static readonly Dictionary<long, (int n, long p0, long p1, long p2, long p3, int air)> m_groupScratch = [];
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
@@ -600,6 +649,7 @@ namespace Game {
                 // 各自排序取中位。Span<long>.Sort() 用默认比较（先 height 后 value），无 lambda。
                 int cCount = 0, f0 = 0, f1 = 0, f2 = 0, f3 = 0;
                 int cSecond = 0, s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+                int coarseAirLight = 0;      // [v0.1.100] 单元内"地表上方空气格"的最大光照
                 // [v0.1.45] 近环细层（4 m）只填"视距外的交接带"这一圈：先判断本区块在不在带里
                 bool fillNear = false;
                 if (SkylineRuntime.LodNearLayerEnabled) {
@@ -619,6 +669,14 @@ namespace Game {
                         int top = chunk.GetTopHeightFast(x, z);
                         if (top < TerrainChunk.MinHeight) {
                             continue;                       // 空列
+                        }
+                        // [v0.1.100] 里程碑 2.3 第三项：读**顶面上方那一格（空气）**的光照并取单元内最大
+                        if (top < TerrainChunk.HeightMinusOne) {
+                            int above = chunk.GetCellValueFast(x, top + 1, z);
+                            int airLight = Terrain.ExtractLight(above);
+                            if (airLight > coarseAirLight) {
+                                coarseAirLight = airLight;
+                            }
                         }
                         long packed = ((long)top << 32) | (uint)chunk.GetCellValueFast(x, top, z);
                         coarseSamples[cCount++] = packed;
@@ -709,6 +767,7 @@ namespace Game {
                 if (bestTop != int.MaxValue) {
                     m_cells[key] = new Cell {
                         Height = (short)bestTop, Value = (ushort)bestValue, Light = coarseLight[0],
+                        LightAir = (byte)coarseAirLight,          // [v0.1.100] 空气格光照（单元内最大）
                         Height2 = (short)(coarseHasSecond ? coarseTop2[0] : 0),
                         Value2 = (ushort)(coarseHasSecond ? coarseValue2[0] : 0),
                         Light2 = coarseHasSecond ? coarseLight2[0] : (byte)15,
@@ -1309,8 +1368,9 @@ namespace Game {
                 int cx = (int)(kv.Key >> 32);
                 int cz = (int)(uint)kv.Key;
                 long gkey = Key(cx >> extra, cz >> extra);
-                m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3) g);
+                m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3, int air) g);
                 long packed = ((long)kv.Value.Height << 32) | kv.Value.Value;
+                g.air = Math.Max(g.air, kv.Value.LightAir);      // [v0.1.100] 空气格光照取**组内最大**
                 switch (g.n) {
                     case 0: g.p0 = packed; break;
                     case 1: g.p1 = packed; break;
@@ -1326,8 +1386,8 @@ namespace Game {
             Span<int> top = stackalloc int[1];
             Span<int> val = stackalloc int[1];
             Span<byte> light = stackalloc byte[1];
-            foreach (KeyValuePair<long, (int n, long p0, long p1, long p2, long p3)> kv in m_groupScratch) {
-                (int n, long p0, long p1, long p2, long p3) g = kv.Value;
+            foreach (KeyValuePair<long, (int n, long p0, long p1, long p2, long p3, int air)> kv in m_groupScratch) {
+                (int n, long p0, long p1, long p2, long p3, int air) g = kv.Value;
                 if (g.n <= 0) {
                     continue;
                 }
@@ -1343,7 +1403,8 @@ namespace Game {
                     continue;
                 }
                 m_cells32[kv.Key] = new Cell {
-                    Height = (short)top[0], Value = (ushort)val[0], Light = light[0]
+                    Height = (short)top[0], Value = (ushort)val[0], Light = light[0],
+                    LightAir = (byte)Math.Clamp(g.air, 0, 255)
                 };
             }
         }
@@ -1353,6 +1414,7 @@ namespace Game {
                                     Dictionary<long, Cell> shadowDict = null, int shadowCellSize = 0) {
             if (layer == 0) {
                 SkylineLodCloudShadow.ResetStats();     // [v0.1.99] 云影统计按"最粗那一层"重建一次
+                m_airLightBrightenedCells = 0;          // [v0.1.100] 亮斑统计同样按最粗那层重建一次
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
@@ -1416,7 +1478,18 @@ namespace Game {
             int secondSheets = 0;
             foreach (long key in keys) {
                 Cell c0 = dict[key];
-                tops.Add((key, c0.Height, c0.Value, c0.Light));
+                // [v0.1.100] 里程碑 2.3 第三项：**固定光源的亮度斑块** ——
+                //   顶面基色用"实心方块自身的 light"是错的（几乎恒 0），光活在**上方空气格**里。
+                //   这里改成 `max(自身 light, 上方空气格 light)`（单元内已取最大）⇒ 火把/灯照到的地方出亮斑。
+                byte effLight = c0.Light;
+                if (LodAirLightPatch) {
+                    byte withAir = (byte)Math.Max(c0.Light, c0.LightAir);
+                    if (withAir > effLight) {
+                        effLight = withAir;
+                        m_airLightBrightenedCells++;
+                    }
+                }
+                tops.Add((key, c0.Height, c0.Value, effLight));
                 if (SecondSurfaceEnabled && c0.HasSecond) {
                     tops.Add((key, c0.Height2, c0.Value2, c0.Light2));
                     secondSheets++;
@@ -2018,6 +2091,9 @@ namespace Game {
                 ["cloudShadowAffectedCells"] = SkylineLodCloudShadow.AffectedCells,
                 ["cloudShadowMinFactor"] = Math.Round(SkylineLodCloudShadow.LastMinFactor, 4),
                 ["cloudShadowAvgFactor"] = Math.Round(SkylineLodCloudShadow.LastAvgFactor, 4),
+                // [v0.1.100] 里程碑 2.3 第三项：固定光源的亮度斑块（采"上方空气格光照"）
+                ["airLightPatch"] = LodAirLightPatch,
+                ["airLightBrightenedCells"] = m_airLightBrightenedCells,
                 ["coveredAreaKm2"] = Math.Round(covered / 1_000_000f, 4),
                 ["harvestedCells"] = m_harvestedCells,
                 ["meshRebuilds"] = m_rebuilds,

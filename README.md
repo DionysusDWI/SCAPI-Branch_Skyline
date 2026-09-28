@@ -8,11 +8,22 @@
 
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力（面向 AI / agent 建造与创造模式工具）。
 
-**当前状态：v0.1.99** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
+**当前状态：v0.1.100** —— 在 v0.0.4（竖直范围 **-1024..1023** 全链路对齐 + **显卡自动选择**）之上，
 补上**大规模 / 高空建造链路**的能力，落地三层渲染路线的第一轮（多层家具 LOD + 超视距 LOD），
 并开始**里程碑 3：Dawnlight + Iris 光影实装接入**（已完成：软阴影 PCF、太阳追踪、显存预算表、体积云、体积雾），
 同时修掉四处缺陷（负高度不能手动放置、命令辅助棒"选中自己"、区块存储布局不一致、高空手持方块全黑）：
 
+- **固定光源的亮度斑块（v0.1.100）** —— 里程碑 2.3 第三项，顺带修掉一个**取光口径错误**：
+  游戏给地形顶面取的是"**上方那一格空气**"的光，而 LOD 从 v0.1.44 起取的是**实心方块自身**的 light 位
+  （Survivalcraft 里实心格几乎不含光，光活在相邻空气格 ⇒ 火把/灯的亮斑在 LOD 上根本不出现）。
+  现在采集时多读 `top+1` 的空气格光照、**单元内取最大**（32 m 统一档取组内最大），
+  顶面基色用 `max(自身 light, LightAir)`；开关 `skyline.LodAirLightPatch`（默认开）+
+  只读探针 `skyline.LodAirLightProbe(x,z)`。**实测**：**67/81 格** `LightAir > Light`；
+  1600 px **稳定掩膜**上开/关差 **16,534 px**、平均亮度 **196.18 → 196.90（更亮）**、
+  掩膜内 **开更亮 13,276 vs 开更暗 3,960**。同版落档另一会话的**互相修正**：
+  第二模型对"有没有分级边界"的判读**强依赖取景**（2×2 受控矩阵四格全答"无分界"）⇒
+  **v0.1.98 的"第二模型说更差"不足以单独支撑决策**，稳定的是几何判据
+  （32 m 单元在 1024 m 处仍有 13.0 px）。门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/181`。
 - **LOD 参与云层阴影（v0.1.99）** —— 里程碑 2.3 的第二项。体积云画在穹顶上、自己不给地面投影，
   而"云遮太阳 → 地面变暗"是**低频**项，所以沿**太阳方向**在云带里积一次光学厚度、烘进 LOD 顶点色；
   关键是**与看得见的云同源**：`SkylineLodCloudShadow` 逐式复制 `SkylineVolumetricSky` 的
@@ -24,7 +35,7 @@
   同版修掉自己引入的一个真问题（门禁抓到）：相位含时间会打破"属性开/关逐位一致"判据
   ⇒ 自检期间临时关云影（脚手架口径），并加 `RefreshSeconds=2 s` 的**周期性重建**让影子真的跟着云走。
   桥开关 `skyline.LodCloudShadow` / `LodCloudShadowDepth` / `LodCloudShadowSelfCheck()`。
-  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/178`。
+  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/180`。
 - **加载距离之外的 LOD 统一到 32³ + 阴影按最小体素参与（v0.1.98）** —— 原三档（4/8/16 m）改成**只画一档**：
   新增 `m_cells32`（**4 个 16 m 粗单元取中位**，口径与单格同一套 `MedianInto`），桥开关
   `skyline.LodUniformBeyond`（默认开）/`LodUniformExtraShift`（默认 1 ⇒ **32 m**）。
@@ -36,7 +47,7 @@
   在 1600 px 放大截图上判读为"画面正中部一条**纯黑空洞带**、分级/断裂痕迹极强"，而分级状态"更均匀"
   ⇒ 壳侧统一**不是一个档位数字能解决的**（接缝/裙边与 LOD 让位口径对不上），故 `UniformStep` 默认**关**，
   留开关与证据给下一轮先修几何。新增 `heightlab/qwen_vision.py`（双模型判读 + 证据落盘）。
-  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/177`。
+  门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**。详见 `notes/179`。
 - **修掉一条每帧漏一对 VB/IB 的 GPU 资源泄漏（v0.1.97）** —— 长会话堆指纹里
   `VertexBuffer/IndexBuffer` 各有 **49,159** 个**存活**对象。机制：`GraphicsResource` 把每个资源登记进
   **静态** `HashSet`，它让"没 Dispose 的资源"**永远可达**（终结器轮不到）⇒ 忘了 Dispose 就是**永久泄漏**。
@@ -985,4 +996,5 @@ powershell -ExecutionPolicy Bypass -File .\Build-Windows.ps1 -Deploy    # 构建
   * Kitão Gameplay's (Discord：ekitonmjjefgs)
 
 > 如果你是 AI Agent，请阅读当前目录的 [AGENTS.md](https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/AGENTS.md)
+
 

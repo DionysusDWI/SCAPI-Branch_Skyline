@@ -203,6 +203,24 @@ namespace Game {
         /// <summary>[v0.1.99] 云影确定性自检：沿风向移动 64 个采样点，因子必须**有变化**且在 (0,1] 内。</summary>
         public static string LodCloudShadowSelfCheck() => SkylineLodCloudShadow.SelfCheck();
 
+        /// <summary>
+        /// [v0.1.100] 里程碑 2.3 第三项：**固定光源（火把/灯）造成的亮度斑块**（默认开）。
+        /// 开 = LOD 顶面基色取 `max(实心方块自身 light, **上方空气格 light**)`；
+        /// 关 = 逐位回到 v0.1.99（只读实心方块自身 light ⇒ 看不到火光亮斑）。改动会立刻重建 LOD。
+        /// </summary>
+        public static bool LodAirLightPatch {
+            get => SkylineLod.LodAirLightPatch;
+            set {
+                if (SkylineLod.LodAirLightPatch != value) {
+                    SkylineLod.LodAirLightPatch = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.100] 只读探针：回读某世界坐标所在 LOD 单元的 `light / lightAir / effective`。</summary>
+        public static string LodAirLightProbe(int worldX, int worldZ) => SkylineLod.AirLightProbe(worldX, worldZ);
+
         /// <summary>v0.1.1：LOD 开启时把视图雾的跨度拉远到 LOD 半径的 90%，
         /// 让"视距边缘的真实地形"与 LOD 层共用同一条雾曲线（消除交接跳变）。</summary>
         public static bool LodFogExtend {

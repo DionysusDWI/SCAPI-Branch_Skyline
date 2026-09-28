@@ -7,6 +7,52 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.100] - 2026-09-28
+
+第一百零七个版本：**固定光源的亮度斑块**（里程碑 2.3 第三项）——
+顺带修掉一个**口径错误**：LOD 顶面的取光方式与游戏自己给顶面取光的方式本来不一致。
+
+### 问题（不是"没做"，是**取错了光**）
+
+Survivalcraft 里**光活在相邻的空气格里**（v0.1.82 已用 `zeroLightCells` 记过这条教训），
+而**游戏生成地形几何时顶面取的是"上方那一格"的光**。LOD 从 v0.1.44 起取的是
+**实心方块自身的 light** ⇒ 火把/灯与天空造成的亮斑**在 LOD 上根本不出现**。
+
+### 修法
+
+* 采集时多读一列：每列 `top+1`（地表上方空气格）的光照，**单元内取最大** → `Cell.LightAir`
+  （32 m 统一档在合成时取**组内最大**；亮斑该按"最大"聚合，不是中位）；
+* 顶面基色改成 `max(自身 light, LightAir)`；开关 `skyline.LodAirLightPatch`（默认开，
+  关掉 = 逐位回到 v0.1.99）；
+* 新增只读探针 `skyline.LodAirLightProbe(x, z)` → `light / lightAir / effective / brightened`。
+
+### 实测（`skyline-v0200-airlight-patch.py`，`ok=True`）
+
+观测条件：**关雾 + 冻风 + 固定时刻 + 关壳**（让 LOD 覆盖近带才看得到 LOD 顶面；
+"壳关了"按并行会话的教训**回读了它控制的计数器** `drawnLastFrame=0`）。
+
+| 判据 | 实测 |
+|---|---|
+| **数据级（零噪声）探针** | **67 / 81 格** `LightAir > Light`；`effective == max(light, lightAir)` 全部成立 |
+| 每帧重建的提亮计数 | 开 **4** / 关 **0** |
+| 画面可见 | 1600 px；**稳定掩膜**上开/关差 **16,534 px**；整幅平均亮度 **196.181 → 196.899（更亮）** |
+| 方向 | 掩膜内 **开更亮 13,276 px vs 开更暗 3,960 px** |
+
+### 同版落档两处**互相修正**（另一会话的独立复核）
+
+* 它用 **2×2 受控矩阵**证明"第二模型对'有没有分级边界'的回答**强依赖取景**"⇒
+  **v0.1.98 那条"第二模型说更差"的否定证据不足以单独支撑产品决策**；
+  真正稳定的是**几何判据**（`px(s,d)=s/d·H/(2tan40°)`：32 m 单元在 1024 m 处仍有 13.0 px
+  ⇒ "看不出"的门槛比当前 LOD 半径差一个数量级，只能靠提高近档分辨率/补格内细节）。
+  **这一条是对 v0.1.98 说明的更正**，两者一起读。
+* 测远景判据要**先关雾**（体积雾 关→开改 22.48% 像素）——本版脚本已把它写成前置条件。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0200/`（`airlight-patch.json`、`airlight-on/off-*.png`）、`notes/181`。
+
 ## [v0.1.99] - 2026-09-28
 
 第一百零六个版本：**LOD 参与云层阴影**（里程碑 2.3 的第二项：用户口径里的"云层阴影"）。
@@ -42,7 +88,7 @@
   ⇒ 云影 A/B **必须冻结 `CloudWind`**（脚本已改）；
 * 第二次运行时云影只影响 2/88 格，是因为**同一工作区的另一个会话正在驱动同一个游戏**
   （`skyline-v0198-farfield-matrix.py` 移动相机/改 LOD 状态）⇒ 那次数据不可用；
-  本轮发现后**立即停止了自己的测量**，并把"同一时刻只允许一方驱动桥"写进 notes/178。
+  本轮发现后**立即停止了自己的测量**，并把"同一时刻只允许一方驱动桥"写进 notes/180。
 
 ### 顺带修掉自己引入的一个真问题（门禁抓到的）
 
@@ -58,7 +104,7 @@
 
 * 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
 
-证据：`data/sessions/skyline-v0199/`（`cloud-shadow.json`、`cloudshadow-on/off-*.png`）、`notes/178`。
+证据：`data/sessions/skyline-v0199/`（`cloud-shadow.json`、`cloudshadow-on/off-*.png`）、`notes/180`。
 
 ## [v0.1.98] - 2026-09-28
 
@@ -112,7 +158,7 @@
 * 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；
 * 构建：`Survivalcraft.Windows` Release **0 警告 0 错误**。
 
-证据：`data/sessions/skyline-v0198/`（`lod-uniform.json`、`shell-uniform.json`、`lod-*-1600.png`、`qwen-*.json`）、`notes/177`。
+证据：`data/sessions/skyline-v0198/`（`lod-uniform.json`、`shell-uniform.json`、`lod-*-1600.png`、`qwen-*.json`）、`notes/179`。
 
 ## [v0.1.97] - 2026-09-28
 
@@ -4435,4 +4481,5 @@ Windows，世界 `AgentLab`（创造模式，SCAPI 1.9.3.1 源码树本地构建
 - 命令方块 `place`（`SetCellValueFast`）不刷新 shaft/几何/光照 → 高处建造需用 `ChangeCell` 或 recalc。
 - 上限 1023（`HeightBits=10`）；负 y（地下）未实现；旧存档 y>255 为空。
 - 本源码树的 `Content` 比部分随包发布版新，部署时 `Content.zip` 必须与 dll 同源。
+
 
