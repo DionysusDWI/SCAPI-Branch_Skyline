@@ -7,6 +7,53 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.123] - 2026-09-29
+
+第一百三十个版本：**里程碑 5 的"清管线风险"实验 —— 地形管线吃外部高度场**。
+相对 v0.1.122 的变更：新增两个只用于**测试**的类（默认不装、不改世界设置），
+把"SCAPI 能不能按外部高度场长地形"这件事从"扩散模型"那一侧剥出来单独验证。
+
+### 1. 新增（默认不生效）
+
+* `TerrainContentsGeneratorHeightmap`：照抄 `TerrainContentsGeneratorFlat` 的结构，
+  把每列地表高度从常数 `TerrainLevel` 换成**双线性采样的灰度 PNG**
+  （`SpanMetres=4000` / `AmplitudeMetres=96` / 原点默认**以玩家为中心**）；
+  图片先整份读进 `MemoryStream` 再交给 `Image.Load`（`DetermineFileFormat` 是回绕采样，直传文件流会踩位置坑）；
+* `SkylineTerrainDiffusion`：`TerrainDiffusionInstall/Uninstall/Describe/Probe` ——
+  把生成器临时装到 `SubsystemTerrain.TerrainContentsGenerator`（`TerrainUpdater` 每帧现读 ⇒ 只影响新生成区块），
+  卸载时把**原引用**装回去；`Probe(x,z)` 报"高度图高度 / 生成器高度 / 地形里真的长出来的顶面 /
+  区块状态 / **`ModificationCounter`** / 当前生成器高度"；
+* `heightlab/make-heightmap.py`（离线造确定性高度图）、`heightlab/skyline-v0123-heightmap-terrain.py`（验收）。
+
+### 2. 结论一：**管线能吃**
+
+空 Creative 世界里装生成器 → 分步搬到 3 个**没生成过**的区域（各 3×3 网格、格距 24 m）：
+
+* **27/27 采样点 `|顶面 − 高度图| ≤ 1`，`max|Δ| = 0.976 m`**；观测高度跨度 **42.0 m**、
+  与高度图相关系数 **r = 0.9999**（形状真跟得上，不是"恰好平"）；
+* C# 采样器与 Python 对照实现 `max|C#−Python| = 0.0 m`；
+* 装载动作本身**不改**当前还加载着的区块（未移动时 `[64,79,66] → [64,79,66]`）；
+* 卸载后 `currentGenerator` 回到装载前的同一个类型。
+
+### 3. 结论二：**换生成器是往回追溯的**（判据因此改写）
+
+`TerrainSerializer.SaveChunk` 只在 `chunk.ModificationCounter > 0` 时落盘 ⇒
+**纯生成区块卸载后按"当时"的生成器重新生成**。实测出生点 3 列：`[64,79,66] → [94,79,94]`
+（两列 `mods=0` 被重生成、一列 `mods=508` 因为进过存档而纹丝不动）。
+⇒ 验收判据从"已加载区块不许变"改成"**变了的列必须能用当前生成器解释**"。
+对里程碑 5 的含义：真接扩散模型时必须有"**区域提交/物化**"（模型输出 → 固化区域），
+否则玩家走远再回来，世界会按新输出重新长一遍。
+
+### 4. 两个坑
+
+* **往回追溯会把玩家埋住**：返回出生点时悬停在 `y=71`，而脚下区块已重生成到 94 ⇒ 压死（`health 0`）。
+  ⇒ 装载后所有搬运高度改成"高度图 + 5 m"，并把整段瞬移改成分步 120 m；
+* **跨世界前必须先 Uninstall**：`m_tdSavedGenerator` 是静态字段，切世界后仍指旧世界的生成器；
+  验收脚本加 `atexit` 兜底，崩在中途也会先还原。
+
+**未做（诚实清单）**：没接真模型、没改世界设置、`Pass3/Pass4` 为空（无洞穴/植被）、
+温度湿度是常数、高度图粒度 3.9 m/像素且没测跨图接缝。
+
 ## [v0.1.122] - 2026-09-29
 
 第一百二十九个版本：**Iris 的「镜像 + 半径递增螺旋」阴影核**（`shadowSampling.glsl` 的 `offsetDist`）

@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.122**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.123**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -23,6 +23,11 @@
   `SkylineBuilder` 剖面扫掠——支持**三次贝塞尔曲线**（弧长等距 + 平行传输坐标系）。
 * 大规模建筑压力测试：单区块 4096 件高复杂度家具；家具**逐级降分辨率 LOD**（`d_box(E)` 占替距）、
   几何预算与方盒占位、高复杂度家具安全阀。
+* **[v0.1.123] 外部高度场驱动地形（里程碑 5 的"清管线风险"实验）**：测试类
+  `TerrainContentsGeneratorHeightmap`（**默认不生效**，只能经 `skyline.TerrainDiffusionInstall` 临时装上）
+  证明 SC 地形管线**能按外部高度图长地形** —— 3 个新生地区域 27/27 采样点 `|顶面−高度图| ≤ 1`
+  （`max 0.976 m`）、与高度图相关 `r = 0.9999`；并量出**换生成器是往回追溯的**
+  （`SaveChunk` 只落盘 `ModificationCounter > 0` 的区块）⇒ 真接扩散模型需要"区域提交/物化"。
 
 **超视距 LOD（里程碑 2；当前参考 Distant Horizons）**
 
