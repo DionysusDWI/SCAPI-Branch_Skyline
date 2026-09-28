@@ -22,11 +22,13 @@ namespace Game {
         /// <summary>总开关（默认关）。</summary>
         public static bool ScreenAoEnabled { get; set; }
 
-        /// <summary>采样半径（米，默认 0.8）：接触阴影的世界尺度。</summary>
-        public static float ScreenAoRadius { get; set; } = 0.8f;
+        /// <summary>采样半径（米，默认 **0.5**）：接触阴影的世界尺度。
+        /// 实测（`notes/210`）：半径 2.5~3.5 m 量到的是"整坡压暗"（36 万像素、maxΔ 65~72，观感错），
+        /// 而 0.5 m 是"只动 1 万像素但 maxΔ 142"的局部对比 —— 那才是接触阴影该有的形状。</summary>
+        public static float ScreenAoRadius { get; set; } = 0.5f;
 
-        /// <summary>遮蔽强度（0..1，默认 0.6）。</summary>
-        public static float ScreenAoIntensity { get; set; } = 0.6f;
+        /// <summary>遮蔽强度（0..1，默认 0.7）。</summary>
+        public static float ScreenAoIntensity { get; set; } = 0.7f;
 
         /// <summary>同侧阈值（法线与邻居方向的余弦下限，默认 0.05）：避免"背面"误判成遮蔽。</summary>
         public static float ScreenAoBias { get; set; } = 0.05f;
@@ -46,7 +48,7 @@ namespace Game {
 
         /// <summary>**屏幕空间半径上限**（uv 比例，默认 0.05 = 屏幕宽的 5%）。
         /// 为什么需要：0.8 m 的世界半径在 2 m 处会占到屏幕 24%，8 个抽样全落到远处几何 ⇒ 近处反而没有 AO。</summary>
-        public static float ScreenAoMaxUv { get; set; } = 0.05f;
+        public static float ScreenAoMaxUv { get; set; } = 0.02f;
 
         /// <summary>**深度图 v 翻转**（默认 1.0 = 翻）：预通道渲染到 RT，引擎在 RT 路径上
         /// `gl_Position.y *= -1`（`Shader.PrepareForDrawing` 的 `u_glymul`），而后台缓冲不翻
