@@ -7,6 +7,59 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.101] - 2026-09-28
+
+第一百零八个版本：**里程碑 2.1（DH 深挖）+ 2.2 的"下一步"（按屏幕像素定 LOD 档位）**。
+
+### 1. DH 的 LOD 分级策略（里程碑 2.1，主 agent）
+
+证据来自**本机已安装的成品**（不克隆仓库）：DH 3.3.2 的随包 `lang/en_us.json` 与它运行时生成的
+`config/DistantHorizons.toml`。要点：
+
+* detail level 是 **2 的幂阶梯**（`6 = 1×1 block, 7 = 2×2 blocks, …`），与本分支 `step` 阶梯同形；
+* `maxHorizontalResolution` 最细到 **BLOCK（1 格）**，默认就是它；`horizontalQuality` 控**台阶间距**；
+* **它不用"统一粗档"解决分级**，而是：`ditherDhFade`（靠近时淡出）+
+  `vanillaFadeMode=DOUBLE_PASS`（双 pass 融合，官方描述"smoothest transition"）+
+  `lodShading=AUTO`（与原生方块同样的侧面明暗）+ 亮度/饱和度对齐 + **`noiseDropoff=1024` 用噪声补细节** +
+  `lodBiomeBlending=3`（跨群系渐变）+ **`maxZoomQualityIncrease=4`（按像素密度提级）**。
+
+详见 `notes/182`。
+
+### 2. 按屏幕像素定档位（里程碑 2.2 的"下一步"）
+
+用户口径："基于**实际渲染粒度**去算'观感'…后续再根据性能和双模型核对来**确定分级转换边界**"。
+新增 `CubeShellTierPixelTable()`（只读）：`px = step/d · H/(2·tan(fovY/2))`，
+本机 `pxPerRad = 663.21`（H=1113、FOV 80°）；选档规则 = **"细一档还能看见（px ≥ 阈值，默认 3）就不降档"**。
+开关 `skyline.CubeShellPixelTiers`（**默认关**，保持 v0.1.100 行为）+ `CubeShellPixelThreshold`。
+
+**实测（`skyline-v0201-pixel-tiers.py`，`ok=True`）**：
+
+| | 旧（绝对米数） | 新（按像素） |
+|---|---|---|
+| `stepHistogram` | step8=514、**step16=1045** | **step2=62、step4=1367**、step8=130、step16=0 |
+| 细档（1/2/4）格子 | **0** | **1429** |
+| `meshVertexBytes` | 449,360 | **3,270,320（×7.3）** |
+| `lastDrawMs` | 0.591 | 0.681（+15%） |
+| fps（中位/max） | 29.9 / 30.1 | 29.9 / 30.2（**vsync 绑 30，无参考价值**） |
+
+**结论（这条最重要）**：旧阶梯在 **768 m 已经跳到 16 m 一格**，而 **8 m 一格在那个距离仍有 6.91 px**
+—— "分级过于明显"的直接原因是**过早变粗**，不是粗档本身太粗；按像素定档能把边界变成可核对数字，
+代价是**壳网格几何 ×7.3**（绘制耗时 +15%）。是否改默认要等"性能线 + 放大视觉"两侧齐（见下）。
+
+### 3. 如实记
+
+* 帧率数据在 **vsync 绑 30** 下**不能**回答"GPU 还有没有余量" ⇒ 必须按并行会话提出的三条预算线量；
+* 第二模型对"有没有分级边界"的判读**强依赖取景**（另一会话的 2×2 受控矩阵：四格全答"无分界"）
+  ⇒ 视觉侧只能当辅助，主判据用**像素表 + 几何/性能数字**；
+* `PixelThreshold=3` 是起点，需按"性能 × 视觉"扫一遍再定；`verticalQuality`（悬垂保真）本分支对应
+  `SecondSurfaceEnabled`（默认关），未测。
+
+### 门禁与构建
+
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0201/`（`pixel-tiers.json`）、`data/sessions/dh-dig/`（DH lang 副本）、`notes/182`、`notes/183`。
+
 ## [v0.1.100] - 2026-09-28
 
 第一百零七个版本：**固定光源的亮度斑块**（里程碑 2.3 第三项）——

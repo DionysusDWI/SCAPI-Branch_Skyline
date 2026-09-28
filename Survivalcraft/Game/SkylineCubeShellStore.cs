@@ -1046,6 +1046,111 @@ namespace Game {
             if (UniformStep > 0) {
                 return Math.Clamp(UniformStep, 1, CubeSize);
             }
+            // [v0.1.101] 里程碑 2.2 的**下一步**：档位判据从"绝对米数"改成"**屏幕上还有几个像素**"。
+            //   用户口径："要**基于实际渲染粒度**去算'观感'，而不是用模型的分辨率上限分辨"；
+            //   DH 的做法也是把观感与像素密度绑定（`maxZoomQualityIncrease`：变焦即提级）。
+            //   几何口径：单元边长 s（米）在距离 d 处占 `px = s/d · H / (2·tan(fovY/2))` 像素；
+            //   判据：**"细一档还能看见"就不降档**（细档像素 ≥ `PixelThreshold`）。
+            //   默认**关**（保持 v0.1.100 行为）；口径与数值见 `TierPixelTable()`（只读、不依赖游戏状态）。
+            if (PixelAwareTiers) {
+                return StepForDistancePixels(distance);
+            }
+            float[] tiers = TierMetres;
+            float rel = distance - viewRange;
+            int step = 1;
+            for (int i = 0; i < tiers.Length; i++) {
+                if (rel <= tiers[i]) {
+                    return step;
+                }
+                step *= 2;
+            }
+            return Math.Min(step, CubeSize);
+        }
+
+        // ===== [v0.1.101] 里程碑 2.2 的下一步：**按屏幕像素定档位** =====
+        /// <summary>
+        /// 开 = 档位由"**单元在屏幕上有几个像素**"决定（DH 的 `horizontalQuality` / 变焦提级同一思路，
+        /// 也正是用户说的"基于实际渲染粒度去算观感"）；关 = 逐位回到 v0.1.100 的绝对米数阶梯。
+        /// **默认关**：本版只提供判据与数据，是否改默认要等"性能 + 放大视觉"两侧数据齐（用户口径 2.2）。
+        /// </summary>
+        public static bool PixelAwareTiers { get; set; }
+        /// <summary>细一档的格子小于这么多像素（屏幕上）才允许降档。<see cref="PixelAwareTiers"/> 用。</summary>
+        public static float PixelThreshold { get; set; } = 3f;
+        /// <summary>用于判据的屏幕高度（像素）；`0` = 用当前窗口高度（失败则 720）。</summary>
+        public static int TierScreenHeightPx { get; set; }
+
+        /// <summary>用于判据的竖直 FOV（度，默认与游戏口径一致：100% = 80°）。</summary>
+        public static float TierFovYDegrees { get; set; } = 80f;
+
+        /// <summary>
+        /// 每弧度对应的像素数：`pxPerRad = H / (2·tan(fovY/2))`。
+        /// **这是"观感"的唯一尺度** —— 幅宽变大/视场变窄，同一块地形占的像素就变多。
+        /// </summary>
+        public static float PixelsPerRadian() {
+            int h = TierScreenHeightPx > 0 ? TierScreenHeightPx : (Window.Size.Y > 0 ? Window.Size.Y : 720);
+            float fov = Math.Clamp(TierFovYDegrees, 20f, 120f);
+            return h / (2f * MathF.Tan(fov * MathF.PI / 360f));
+        }
+
+        /// <summary>单元边长 `size`（米）在距离 `distance`（米）处占多少像素。</summary>
+        public static float PixelSize(float size, float distance) =>
+            size / MathF.Max(distance, 0.5f) * PixelsPerRadian();
+
+        /// <summary>
+        /// 判据本体：**"细一档还能看见"就不降档**。
+        /// 从最细的 1 m 起逐级翻倍，只要"当前档的格子"在屏幕上仍有 ≥ `PixelThreshold` 像素就继续用细档；
+        /// 一旦细档已经看不出来（&lt; 阈值），就换更粗的一档（更省几何）。
+        /// </summary>
+        static int StepForDistancePixels(float distance) {
+            int step = 1;
+            while (step < CubeSize) {
+                // 细一档（step）在这一距离上还有 ≥ 阈值像素 ⇒ 保留它
+                if (PixelSize(step, distance) < PixelThreshold) {
+                    step *= 2;                       // 看不出结构了：允许变粗
+                    continue;
+                }
+                break;
+            }
+            return Math.Clamp(step, 1, CubeSize);
+        }
+
+        /// <summary>
+        /// **[只读] 档位像素表**（判据的"计算侧"，不依赖游戏状态）：给一批距离，报每个 step 的屏幕像素数与
+        /// "按像素判据该选哪一档"。用于把"分级边界"从一个拍脑袋的米数变成**可核对的数字**。
+        /// </summary>
+        public static string TierPixelTable(string distancesMetres = "48,96,192,384,768,1024") {
+            JsonArray rows = [];
+            foreach (string part in distancesMetres.Split(',', StringSplitOptions.RemoveEmptyEntries)) {
+                if (!float.TryParse(part.Trim(), System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out float d) || d <= 0f) {
+                    continue;
+                }
+                JsonObject row = new();
+                row["distanceMetres"] = MathF.Round(d, 1);
+                JsonArray px = [];
+                for (int s = 1; s <= CubeSize; s *= 2) {
+                    px.Add(MathF.Round(PixelSize(s, d), 2));
+                }
+                row["pixelPerStep_1_2_4_8_16"] = px;
+                row["pixelAwareStep"] = StepForDistancePixels(d);
+                row["legacyStep"] = LegacyStepForDistance(d, 192f);   // 视距按 192 算（当前测试口径）
+                rows.Add(row);
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["pixelsPerRadian"] = MathF.Round(PixelsPerRadian(), 2),
+                ["screenHeightPx"] = TierScreenHeightPx > 0 ? TierScreenHeightPx
+                    : (Window.Size.Y > 0 ? Window.Size.Y : 720),
+                ["fovYDegrees"] = TierFovYDegrees,
+                ["pixelThreshold"] = PixelThreshold,
+                ["pixelAwareTiers"] = PixelAwareTiers,
+                ["rows"] = rows,
+                ["note"] = "px = step/d · H/(2·tan(fovY/2))；判据='细一档还能看见就不降档'"
+            }.ToJsonString();
+        }
+
+        /// <summary>旧的绝对米数阶梯（只读复算，供 A/B 对表）。</summary>
+        public static int LegacyStepForDistance(float distance, float viewRange) {
             float[] tiers = TierMetres;
             float rel = distance - viewRange;
             int step = 1;
@@ -2355,6 +2460,10 @@ namespace Game {
                 ["frustumCull"] = FrustumCull,
                 // [v0.1.98] 里程碑 2.2：壳带统一单档（消灭"看得见的分级"）
                 ["uniformStep"] = UniformStep,
+                // [v0.1.101] 里程碑 2.2 的下一步：档位是否按"屏幕像素"定（+ 阈值与像素/弧度）
+                ["pixelAwareTiers"] = PixelAwareTiers,
+                ["pixelThreshold"] = PixelThreshold,
+                ["pixelsPerRadian"] = MathF.Round(PixelsPerRadian(), 2),
                 ["frustumCulledLastFrame"] = FrustumCulledLastFrame,
                 ["frustumCulledTotal"] = FrustumCulledTotal,
                 // [v0.1.84] 洞覆盖（milestone 2.1 的兼容性那一半）

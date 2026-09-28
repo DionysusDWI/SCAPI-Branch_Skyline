@@ -159,6 +159,30 @@ namespace Game {
             }
         }
 
+        /// <summary>
+        /// [v0.1.101] 里程碑 2.2 的下一步：**档位按"屏幕像素"定**（`false` = 逐位回到绝对米数阶梯；默认 **关**）。
+        /// 这是把"分级边界"从拍脑袋的米数变成**可核对数字**的那一步（用户口径："基于实际渲染粒度去算观感"）。
+        /// </summary>
+        public static bool CubeShellPixelTiers {
+            get => SkylineCubeShellStore.PixelAwareTiers;
+            set {
+                if (SkylineCubeShellStore.PixelAwareTiers != value) {
+                    SkylineCubeShellStore.PixelAwareTiers = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.101] 细一档小于这么多像素（屏幕上）才允许降档。</summary>
+        public static float CubeShellPixelThreshold {
+            get => SkylineCubeShellStore.PixelThreshold;
+            set => SkylineCubeShellStore.PixelThreshold = Math.Clamp(value, 0.5f, 32f);
+        }
+
+        /// <summary>[v0.1.101] 档位像素表（只读）：把"分级边界"变成可核对的数字。</summary>
+        public static string CubeShellTierPixelTable(string distancesMetres = "48,96,192,384,768,1024")
+            => SkylineCubeShellStore.TierPixelTable(distancesMetres);
+
         /// <summary>[v0.1.98] 统一档的额外位移（默认 1 ⇒ 单元 32 m）。改动会立刻重建 LOD。</summary>
         public static int LodUniformExtraShift {
             get => SkylineLod.UniformExtraShift;
