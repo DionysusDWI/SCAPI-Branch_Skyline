@@ -515,6 +515,9 @@ namespace Game {
                     TerrainRenderer.PrepareForDrawing(camera);
                     // [v0.1.58] 光影接入面：shadow 阶段（外部包在此准备它自己的深度/阴影资源）
                     SkylineShaderHook.Run("shadow", camera);
+                    // [v0.1.113] **相机空间深度预通道**（里程碑 4 的"场景深度纹理"）：
+                    //   必须在不透明地形**之前**跑，片元侧的 SSAO/接触阴影才能采样到完整的深度。
+                    SkylineRuntime.ScreenDepthPass(camera);
                     TerrainRenderer.DrawOpaque(camera);
                     // [v0.1.58] 光影接入面：不透明地形画完之后（外部包在此写自己的 G-buffer / 覆盖地表 shader）
                     SkylineShaderHook.Run("opaque", camera);
@@ -531,6 +534,8 @@ namespace Game {
                     SkylineShaderHook.Run("composite", camera);
                     // [v0.1.58] G-buffer 调试直显（默认关）
                     SkylineGBuffer.DebugDrawIfEnabled(camera);
+                    // [v0.1.113] 相机深度预通道的调试直显（默认关；左上角 1/4 画中画）
+                    SkylineRuntime.ScreenDepthDebugDrawIfEnabled(camera);
                 }
                 else if (drawOrder == m_drawOrders[1]) {
                     TerrainRenderer.DrawTransparent(camera);
