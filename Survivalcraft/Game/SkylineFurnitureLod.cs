@@ -346,11 +346,25 @@ namespace Game {
         public static string FurnitureLod(bool enabled) {
             SkylineFurnitureLod.Enabled = enabled;
             JsonObject result = SkylineFurnitureLod.Describe();
-            if (!enabled) {
-                // 家具几何是**烘进区块网格**的：关掉开关必须把已经烘成粗几何的区块重建一次，
-                // 否则画面还是粗的（A/B 也会因此看起来"没区别"）。
-                result["rebakedChunks"] = SkylineRender.InvalidateFurnitureLodChunks();
-            }
+            // 家具几何是**烘进区块网格**的：**两个方向都必须重建"烘过家具"的区块**，否则画面不变。
+            //   * **开**：旧实现不重建 ⇒ `LodLevel` 全是 0、一个都挑不到，**"打开开关当下没有任何变化"**
+            //     （本轮标定实测到的真缺陷，见 notes/223）；
+            //   * **关**：旧实现只挑 `LodLevel != 0` 的区块 —— 但"开着开关、恰好落在 0 级"的区块
+            //     （比如 60 m 处因为 LOD 开着所以**不让位给方盒**）它的 `LodLevel` 也是 0，
+            //     于是关掉后**方盒让位状态残留**，A/B 量到的不是"关掉的效果"（60 m 实测 115 px 假差）。
+            // ⇒ 两个方向统一用 `InvalidateFurnitureChunks(true)`（只碰 `InstanceCount > 0` 的区块）。
+            result["rebakedChunks"] = SkylineRender.InvalidateFurnitureChunks(true);
+            return result.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.125] **只重建给定方框内的家具区块**（标定/取证用）：`FurnitureLod` 的全量重建会牵动
+        /// 整个视距内的区块，标定时没必要；而且"重建范围"本身要被写进证据里。
+        /// </summary>
+        public static string FurnitureLodRebakeRegion(int x1, int y1, int z1, int x2, int y2, int z2) {
+            JsonObject result = SkylineFurnitureLod.Describe();
+            result["rebakedChunks"] = SkylineRender.InvalidateFurnitureChunks(
+                true, Math.Min(x1, x2), Math.Min(z1, z2), Math.Max(x1, x2), Math.Max(z1, z2));
             return result.ToJsonString();
         }
 

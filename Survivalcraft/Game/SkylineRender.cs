@@ -115,6 +115,48 @@ namespace Game {
             return n;
         }
 
+        /// <summary>
+        /// [v0.1.125] **强制重建"烘过家具"的区块几何**。
+        ///
+        /// 为什么必须单独加它（本轮标定踩到的**真缺陷**）：`InvalidateFurnitureLodChunks()` 只挑
+        /// `LodLevel != 0` 的区块 —— 那对"**关**开关"有效（关之前确实有区块被降过级），
+        /// 但**打开**开关时所有区块的 `LodLevel` 都还是 0 ⇒ **一个都挑不到**，
+        /// 于是"打开家具 LOD 当下没有任何变化"，要等玩家走远再回来（区块自然重建）才生效。
+        /// 后果不只是"标定做不出来"：用户翻开关也会觉得"坏了"。
+        ///
+        /// `includeLevelZero = true` 时以 `InstanceCount > 0`（这个区块真的烘过家具）为准。
+        /// </summary>
+        public static int InvalidateFurnitureChunks(bool includeLevelZero, int x1 = int.MinValue,
+                                                    int z1 = int.MinValue, int x2 = int.MaxValue,
+                                                    int z2 = int.MaxValue) {
+            SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
+            if (subsystemTerrain?.TerrainUpdater == null) {
+                return 0;
+            }
+            int n = 0;
+            foreach (KeyValuePair<long, ChunkInfo> kv in m_chunks) {
+                if (!includeLevelZero && kv.Value.LodLevel == 0) {
+                    continue;
+                }
+                if (includeLevelZero && kv.Value.InstanceCount == 0) {
+                    continue;                                  // 没烘过家具的区块不碰（省重建）
+                }
+                Point2 coords = new((int)(kv.Key >> 32), (int)(kv.Key & 0xFFFFFFFF));
+                if (x1 != int.MinValue) {
+                    int cx0 = coords.X * TerrainChunk.Size, cz0 = coords.Y * TerrainChunk.Size;
+                    if (cx0 > x2 || cx0 + TerrainChunk.Size - 1 < x1
+                        || cz0 > z2 || cz0 + TerrainChunk.Size - 1 < z1) {
+                        continue;                              // 与给定方框不相交
+                    }
+                }
+                subsystemTerrain.TerrainUpdater.DowngradeChunkNeighborhoodState(
+                    coords, 0, TerrainChunkState.InvalidVertices1, true);
+                kv.Value.LodLevel = 0;
+                n++;
+            }
+            return n;
+        }
+
         sealed class ChunkInfo {
             public LodState State = LodState.Mixed;
             public float MinDb = float.MaxValue;
