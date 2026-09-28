@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.117**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.118**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -45,6 +45,9 @@
 * **远处阴影距离淡出**（按 Iris Complementary 的 `smoothstep(far*0.4, far*0.9, dist)`），
   消掉阴影图边界硬切（`GpuShadowFadeScale=0` 可回退）；
 * **体积云 / 体积雾 / 体积神光**：雾里逐步做太阳遮挡判定 × 前向散射；体积雾与神光**同时覆盖远景 LOD 层**；
+  **[v0.1.118] 体积雾新增"基础密度"**（`FogBaseDensity`，默认 **0.10**）：旧的 `max(0, 噪声−阈值)`
+  是纯云团掩膜、相机落进"晴空"时几百米内密度恒为 0（实测只覆盖 **0.19%** 帧面积），
+  加常数底后覆盖 **71%**、产品档"雾开/关"差 **13~16% 帧面积**、光轴 623 px → **5,499 px**（base=0 可逐位回退）；
 * **固定光源**：复用引擎的发光方块扫描建立光源列表，逐帧取 K 近邻在片元里做距离衰减
   （`skyline.PointLights(true)` 打开；默认关，关闭时**零代价**，实测数据见笔记）；
 * **相机空间深度预通道**（`SkylineScreenDepth`，里程碑 4 的"场景深度纹理"）：半分辨率、

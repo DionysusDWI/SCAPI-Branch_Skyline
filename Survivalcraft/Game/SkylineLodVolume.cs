@@ -175,6 +175,7 @@ float u_vfEnable;
 float u_vfBottomY;
 float u_vfTopY;
 float u_vfDensity;
+float u_vfBase;
 float u_vfHaze;
 float u_vfScale;
 float2 u_vfWind;
@@ -278,7 +279,7 @@ float vfDensityAt(float3 p)
 	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
 	float2 q = (p.xz + p.y * u_vfShear * float2(1.7, 1.1)) * u_vfScale + u_vfWind;
 	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + float2(5.1, 9.7)) * 0.3;
-	return max(0.0, n - u_vfThreshold) * prof;
+	return max(u_vfBase, max(0.0, n - u_vfThreshold)) * prof;
 }
 
 float decodeShadowDepth(float4 texel)
@@ -503,6 +504,7 @@ uniform float u_vfEnable;
 uniform float u_vfBottomY;
 uniform float u_vfTopY;
 uniform float u_vfDensity;
+uniform float u_vfBase;
 uniform float u_vfHaze;
 uniform float u_vfScale;
 uniform vec2 u_vfWind;
@@ -608,7 +610,7 @@ float vfDensityAt(vec3 p)
 	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
 	vec2 q = (p.xz + p.y * u_vfShear * vec2(1.7, 1.1)) * u_vfScale + u_vfWind;
 	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + vec2(5.1, 9.7)) * 0.3;
-	return max(0.0, n - u_vfThreshold) * prof;
+	return max(u_vfBase, max(0.0, n - u_vfThreshold)) * prof;
 }
 
 float decodeShadowDepth(vec4 texel)

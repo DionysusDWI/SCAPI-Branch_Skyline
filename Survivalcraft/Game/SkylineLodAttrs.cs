@@ -203,6 +203,30 @@ namespace Game {
                 SkylineRuntime.LodAttrShaderOn = false;
                 SkylineRuntime.LodVertexAttributes = true;
                 PinSun();
+                // [v0.1.118] **先让"区域异步装载"收敛再比几何数**：这条自检的意图是
+                //   "顶点属性开/关只改布局、不改几何量"，但在**一次会话的第一次调用**里，
+                //   远景 LOD 的持久化区域还在异步装进来 ⇒ 两次 `RebuildNow()` 之间索引数会变
+                //   （实测 attrIndices≠bakedIndices、`sameGeometry=false`；同一份代码再调一次就相等）。
+                //   所以这里先只重建+比计数（**不渲染**，代价可忽略），最多 4 轮；仍不等才如实报 false。
+                int geometryRetries = 0;
+                int warmAttrIndices;
+                int warmBakedIndices;
+                while (true) {
+                    SkylineRuntime.LodVertexAttributes = true;
+                    PinSun();
+                    RebuildNow();
+                    warmAttrIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
+                    SkylineRuntime.LodVertexAttributes = false;
+                    PinSun();
+                    RebuildNow();
+                    warmBakedIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
+                    if (warmAttrIndices == warmBakedIndices || geometryRetries >= 3) {
+                        break;
+                    }
+                    geometryRetries++;
+                }
+                SkylineRuntime.LodVertexAttributes = true;
+                PinSun();
                 RebuildNow();
                 Image attrImage = SkylineLodVolume.RenderLayers(camera, AttrLayers(), false, 0, size, 0f);
                 int attrIndices = m_indexCount + m_indexCountFine + m_indexCountNear;
@@ -253,9 +277,14 @@ namespace Game {
                 JsonObject gpuVsCpu = SkylineLodVolume.CompareImages(attrImage, gpuImage);
                 result["ok"] = true;
                 result["size"] = size;
+                result["geometryRetries"] = geometryRetries;
+                result["warmAttrIndices"] = warmAttrIndices;
+                result["warmBakedIndices"] = warmBakedIndices;
                 result["attrIndices"] = attrIndices;
                 result["bakedIndices"] = bakedIndices;
-                result["sameGeometry"] = attrIndices == bakedIndices && attrIndices > 0;
+                // 用**收敛循环**里的那一对数判"几何量相同"（那两次之间不夹渲染，最稳）；
+                // 后面那对（每次渲染一遍的）仍如实记进 attrIndices/bakedIndices 供对照。
+                result["sameGeometry"] = warmAttrIndices == warmBakedIndices && warmAttrIndices > 0;
                 result["strideContract"] = strideContract;
                 result["gpuVsCpu"] = gpuVsCpu;
                 if (slopeGap != null) {

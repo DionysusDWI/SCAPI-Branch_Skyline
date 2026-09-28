@@ -106,6 +106,8 @@ namespace Game {
                 ["volumetricFog"] = VolumetricFogEnabled,
             ["volumetricGodRays"] = VolumetricFogEnabled && VolumetricSunShaftStrength > 0f,
             ["volumetricHaze"] = VolumetricFogEnabled && VolumetricHazeEnabled,
+            // [v0.1.118] 基础密度（决定"雾是不是一直存在"）；脚本收尾要能读它把运行时改回去
+            ["fogBaseDensity"] = (double)FogBaseDensity,
             ["lodFog"] = VolumetricFogEnabled,
                 ["coloredLightFog"] = VolumetricFogEnabled && SkylinePointLights.Enabled
             };
