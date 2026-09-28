@@ -66,6 +66,35 @@ namespace Game {
         /// <summary>[v0.1.64] 太阳仰角下限（sinθ）。低于它按它算，避免日出日落时 bias 发散。</summary>
         public static float GpuShadowSoftSunYFloor { get; set; } = 0.15f;
 
+        /// <summary>[v0.1.102] **PCF 采样核选择**（里程碑 4：按 Dawnlight 的实现换核）。
+        /// `0` = 八边形 8 抽样（v0.1.64 的原核，**默认**，逐位不变）；`1` = Dawnlight 的 Poisson 盘 12 抽样。
+        ///
+        /// 两个核的差别不是"随便换一组偏移"，有两条**可测量**的性质差异（见 `GpuShadowKernelSelfCheck()`）：
+        ///   1. **支撑形状**：原核的 8 个偏移是 `(±1,0)/(0,±1)/(±1,±1)` ——
+        ///      前 4 个半径 1、后 4 个半径 √2，全部落在 `max(|x|,|y|)=1` 的**正方形边界**上。
+        ///      于是"半影沿边缘法向的宽度"随**边缘朝向**在 `2.00t ~ 2.83t` 之间变化（**×1.41**）——
+        ///      同一个物体的影子，斜着看比正着看糊 41%；
+        ///   2. **方向量化误差**：8 个方向均匀分布 ⇒ 半平面遮挡的真实覆盖率与核估计之间，
+        ///      最坏偏差是 **1/8 = 12.5%** 半影；Dawnlight 的 12 抽样把这一项降到 **1/12 = 8.3%**。
+        ///
+        /// Dawnlight 一侧的出处：`lib/CalculateShadow.glsl` 的 `getWarpShadowPCF()`
+        /// （`const vec2 poissonDisk[16]` + `int samples = 12; // 可选 8/12/16`，
+        /// 半径 `1.0 * texelSize.x`）。我们只**换核**，不换它那套 warp/paraboloid 投影 ——
+        /// 本分支的阴影是正交盒投影，没有 warp 空间，硬搬会把整个采样位置算错。
+        /// </summary>
+        public static int GpuShadowKernel { get; set; } = GpuShadowKernelOctagon;
+
+        /// <summary>[v0.1.102] 核代号：八边形 8 抽样（v0.1.64 原核）。</summary>
+        public const int GpuShadowKernelOctagon = 0;
+        /// <summary>[v0.1.102] 核代号：Dawnlight Poisson 盘 12 抽样。</summary>
+        public const int GpuShadowKernelPoisson12 = 1;
+        /// <summary>[v0.1.102] 核代号：双同心环 8+8（16 抽样，本分支按测量设计的核）。</summary>
+        public const int GpuShadowKernelRing16 = 2;
+        /// <summary>[v0.1.102] Poisson 核实际使用的抽样数（Dawnlight 的 `samples` 默认值）。</summary>
+        public const int GpuShadowPoissonSamples = 12;
+        /// <summary>[v0.1.102] 双环核实际使用的抽样数。</summary>
+        public const int GpuShadowRingSamples = 16;
+
         /// <summary>[v0.1.34] 调试：0=正常阴影；1=把"采样到的阴影图深度"直接画到颜色（验证 UV/绑定是否正确）。</summary>
         public static int GpuShadowDebugMode { get; set; }
 
@@ -95,9 +124,227 @@ namespace Game {
                 ["sunYFloor"] = (double)GpuShadowSoftSunYFloor,
                 ["bias"] = (double)GpuShadowSampleBias,
                 ["strength"] = (double)GpuShadowSampleStrength,
-                ["sunRecaptureDeg"] = (double)GpuShadowSunRecaptureDegrees
+                ["sunRecaptureDeg"] = (double)GpuShadowSunRecaptureDegrees,
+                ["kernel"] = GpuShadowKernel,
+                ["kernelSamples"] = GpuShadowKernel switch {
+                    GpuShadowKernelPoisson12 => GpuShadowPoissonSamples,
+                    GpuShadowKernelRing16 => GpuShadowRingSamples,
+                    _ => 8
+                }
             };
             return o.ToJsonString();
+        }
+
+        // [v0.1.102] 核表（自检用）—— **必须与 shader 里的字面量一致**，
+        // `GpuShadowKernelSelfCheck()` 末尾有一条"锚点"检查防止两边漂移。
+        static readonly float[] s_kernelPoissonXY = [
+            -0.94201624f, -0.39906216f,
+             0.94558609f, -0.76890725f,
+            -0.094184101f, -0.92938870f,
+             0.34495938f,  0.29387760f,
+            -0.91588581f,  0.45771432f,
+            -0.81544232f, -0.87912464f,
+            -0.38277543f,  0.27676845f,
+             0.97484398f,  0.75648379f,
+             0.44323325f, -0.97511554f,
+             0.53742981f, -0.47373420f,
+            -0.26496911f, -0.41893023f,
+             0.79197514f,  0.19090188f,
+            -0.24188840f,  0.99706507f,
+            -0.81409955f,  0.91437590f,
+             0.19984126f,  0.78641367f,
+             0.14383161f, -0.14100790f
+        ];
+
+        static readonly float[] s_kernelRingXY = [
+             0.60000002f,  0.00000000f,
+             0.42426407f,  0.42426407f,
+             0.00000000f,  0.60000002f,
+            -0.42426407f,  0.42426407f,
+            -0.60000002f,  0.00000000f,
+            -0.42426407f, -0.42426407f,
+             0.00000000f, -0.60000002f,
+             0.42426407f, -0.42426407f,
+             0.92387956f,  0.38268343f,
+             0.38268343f,  0.92387956f,
+            -0.38268343f,  0.92387956f,
+            -0.92387956f,  0.38268343f,
+            -0.92387956f, -0.38268343f,
+            -0.38268343f, -0.92387956f,
+             0.38268343f, -0.92387956f,
+             0.92387956f, -0.38268343f
+        ];
+
+        /// <summary>[v0.1.102] 取某个核的第 i 个偏移（**与 shader 里的表达式逐字对应**）。</summary>
+        static void KernelOffset(int kernel, int i, float ca, float sa, out float x, out float y) {
+            if (kernel == GpuShadowKernelPoisson12 || kernel == GpuShadowKernelRing16) {
+                float[] table = kernel == GpuShadowKernelPoisson12 ? s_kernelPoissonXY : s_kernelRingXY;
+                float px = table[i * 2], py = table[i * 2 + 1];
+                x = px * ca - py * sa;
+                y = px * sa + py * ca;
+                return;
+            }
+            switch (i) {
+                case 0: x = -ca + sa; y = -sa - ca; break;
+                case 1: x = sa; y = -ca; break;
+                case 2: x = ca + sa; y = sa - ca; break;
+                case 3: x = -ca; y = -sa; break;
+                case 4: x = ca; y = sa; break;
+                case 5: x = -ca - sa; y = -sa + ca; break;
+                case 6: x = -sa; y = ca; break;
+                default: x = ca - sa; y = sa + ca; break;
+            }
+        }
+
+        static int KernelSampleCount(int kernel) =>
+            kernel == GpuShadowKernelPoisson12 ? GpuShadowPoissonSamples
+            : kernel == GpuShadowKernelRing16 ? GpuShadowRingSamples
+            : 8;
+
+        static string KernelName(int kernel) => kernel switch {
+            GpuShadowKernelPoisson12 => "poisson12",
+            GpuShadowKernelRing16 => "ring16",
+            _ => "octagon8"
+        };
+
+        /// <summary>
+        /// [v0.1.102] **采样核自检**（`skyline.GpuShadowKernelSelfCheck`）：把"哪个核更软/更干净"
+        /// 从口味题变成算术题 —— 用**半平面遮挡**（直边，建筑场景里最常见的那种）做解析对表。
+        ///
+        /// 口径（三条都能被数字证伪）：
+        ///   1. **最坏方向量化误差** `maxErr`：边缘法向在 0..360° 扫一圈，核估计的"受光比例"与解析值
+        ///      0.5 的最大偏差。它由方向数决定：8 抽样 → 12.5%，12 → 8.3%，16 → 6.25%（理论值就是 1/n）；
+        ///   2. **支撑各向异性** `extRatio`：核在边缘法向上的投影宽度 max−min，随方向的最大/最小之比。
+        ///      = 1 是完美圆盘；>1 说明"同一个影子斜着看更糊"；
+        ///   3. **无偏**：扫一圈的均值必须贴近 0.5（偏了说明核本身有系统偏差，不是采样噪声）。
+        ///
+        /// 这条自检**不碰 GPU**、不吃帧率，且对三个核用同一套口径，所以可以直接对比。
+        /// </summary>
+        public static string GpuShadowKernelSelfCheck(int rotations = 256) {
+            JsonObject result = new();
+            try {
+                rotations = System.Math.Clamp(rotations, 8, 4096);
+                result["rotations"] = rotations;
+                result["analyticLit"] = 0.5;
+                JsonObject kernels = new();
+                for (int kernel = 0; kernel <= 2; kernel++) {
+                    int n = KernelSampleCount(kernel);
+                    double sum = 0, sumSq = 0, sumExt = 0;
+                    double minExt = double.MaxValue, maxExt = 0, maxErr = 0;
+                    // 估计值只可能是 k/n（n ≤ 16）⇒ 用桶统计"出现过几种离散层级"
+                    bool[] seen = new bool[17];
+                    for (int k = 0; k < rotations; k++) {
+                        float ang = (float)(k * (2.0 * System.Math.PI) / rotations);
+                        float ca = MathF.Cos(ang), sa = MathF.Sin(ang);
+                        int lit = 0;
+                        float lo = float.MaxValue, hi = float.MinValue;
+                        for (int i = 0; i < n; i++) {
+                            KernelOffset(kernel, i, ca, sa, out float ox, out float oy);
+                            if (ox >= 0f) {
+                                lit++;
+                            }
+                            if (ox < lo) {
+                                lo = ox;
+                            }
+                            if (ox > hi) {
+                                hi = ox;
+                            }
+                        }
+                        double v = (double)lit / n;
+                        sum += v;
+                        sumSq += v * v;
+                        maxErr = System.Math.Max(maxErr, System.Math.Abs(v - 0.5));
+                        seen[lit] = true;
+                        double ext = hi - lo;
+                        sumExt += ext;
+                        minExt = System.Math.Min(minExt, ext);
+                        maxExt = System.Math.Max(maxExt, ext);
+                    }
+                    double mean = sum / rotations;
+                    double std = System.Math.Sqrt(System.Math.Max(sumSq / rotations - mean * mean, 0));
+                    int levels = 0;
+                    for (int i = 0; i <= 16; i++) {
+                        if (seen[i]) {
+                            levels++;
+                        }
+                    }
+                    kernels[KernelName(kernel)] = new JsonObject {
+                        ["kernel"] = kernel,
+                        ["samples"] = n,
+                        ["mean"] = System.Math.Round(mean, 6),
+                        ["std"] = System.Math.Round(std, 6),
+                        ["maxErr"] = System.Math.Round(maxErr, 6),
+                        ["maxErrTimesSamples"] = System.Math.Round(maxErr * n, 3),
+                        ["extentMinT"] = System.Math.Round(minExt, 4),
+                        ["extentMaxT"] = System.Math.Round(maxExt, 4),
+                        ["extentMeanT"] = System.Math.Round(sumExt / rotations, 4),
+                        ["extRatio"] = System.Math.Round(maxExt / System.Math.Max(minExt, 1e-9), 4),
+                        ["distinctLitLevels"] = levels
+                    };
+                }
+                result["kernels"] = kernels;
+                // 断言（都是"设计上必须成立"，不是把实测值抄回代码）：
+                //   A. 无偏：三个核一圈的均值都在 0.5 ± 0.02 内；
+                //   B1. **规则角分布**的两个核（八边形 8 / 双环 16）量化误差 = 1/n：maxErr × n 必须 = 1；
+                //   B2. Dawnlight 的 blue-noise 盘在**直边**上打破这条：实测 maxErr × n = 3
+                //       （12 个样本里有 3 个落到了边缘的另一侧）—— 这是它的性质，不是本自检的失败，
+                //       所以它**单独记一条**、并且**追加**进 `poissonWorseThanOctagonOnStraightEdge`。
+                //   C. 现核的支撑是正方形：extRatio ≥ 1.35（否则说明这条自检没有分辨力）；
+                //   D. 双环核把支撑各向异性压到 1.15 以内，且最坏误差 ≤ 8 抽样核的 2/3；
+                //   E. 反漂移：shader 源里真的含有这两张表和核选择 uniform。
+                bool unbiased = true, quantOk = true;
+                for (int kernel = 0; kernel <= 2; kernel++) {
+                    JsonObject k = kernels[KernelName(kernel)].AsObject();
+                    if (System.Math.Abs(k["mean"].GetValue<double>() - 0.5) > 0.02) {
+                        unbiased = false;
+                    }
+                }
+                for (int kernel = 0; kernel <= 2; kernel += 2) {
+                    if (System.Math.Abs(
+                            kernels[KernelName(kernel)]["maxErrTimesSamples"].GetValue<double>() - 1.0) > 0.02) {
+                        quantOk = false;
+                    }
+                }
+                double octRatio = kernels["octagon8"]["extRatio"].GetValue<double>();
+                double ringRatio = kernels["ring16"]["extRatio"].GetValue<double>();
+                double ringErr = kernels["ring16"]["maxErr"].GetValue<double>();
+                double octErr = kernels["octagon8"]["maxErr"].GetValue<double>();
+                double poiErr = kernels["poisson12"]["maxErr"].GetValue<double>();
+                bool squareDetected = octRatio >= 1.35;
+                bool ringIsotropic = ringRatio <= 1.15;
+                bool ringFiner = ringErr <= octErr * (2.0 / 3.0) + 1e-6;
+                bool anchors = GpuShadowOpaquePsh.Contains("u_shadowKernel")
+                    && GpuShadowOpaquePsh.Contains("rotKernelOffset")
+                    && GpuShadowOpaquePsh.Contains("-0.94201624")
+                    && GpuShadowOpaquePsh.Contains("0.92387956");
+                result["checks"] = new JsonObject {
+                    ["A_unbiased"] = unbiased,
+                    ["B1_regularKernelsQuantizeAsOneOverN"] = quantOk,
+                    ["C_legacySupportIsSquare"] = squareDetected,
+                    ["D_ringIsotropic"] = ringIsotropic,
+                    ["D_ringFinerThanOctagon"] = ringFiner,
+                    ["E_shaderAnchorsPresent"] = anchors
+                };
+                // 如实标注：Dawnlight 的核在**直边**这一项上比现核更差（这是本轮的负结果，不是笔误）
+                result["poissonWorseThanOctagonOnStraightEdge"] = poiErr > octErr;
+                result["ok"] = unbiased && quantOk && squareDetected && ringIsotropic && ringFiner && anchors;
+                result["activeKernel"] = GpuShadowKernel;
+            }
+            catch (System.Exception e) {
+                result["ok"] = false;
+                result["err"] = e.Message;
+            }
+            return result.ToJsonString();
+        }
+
+        /// <summary>[v0.1.102] 切换 PCF 采样核（0=八边形 8 / 1=Dawnlight Poisson 12 / 2=双环 16）。</summary>
+        public static string GpuShadowKernelSet(int kernel) {
+            GpuShadowKernel = System.Math.Clamp(kernel, 0, 2);
+            JsonObject result = (JsonObject)JsonNode.Parse(GpuShadowSoftInfo());
+            result["ok"] = true;
+            result["hint"] = "核只改片元的采样偏移，不需要重建深度图（下一帧即生效）；"
+                + "取证请用 skyline.GpuShadowKernelSelfCheck() 与 skyline.GpuShadowSoftInfo()";
+            return result.ToJsonString();
         }
 
         public static string GpuShadowSampleDescribe() =>
@@ -243,6 +490,8 @@ namespace Game {
                 shader.GetParameter("u_shadowReliefNear", true).SetValue(nearRelief);
                 shader.GetParameter("u_shadowSoftSlopeBias", true).SetValue(GpuShadowSoftSlopeBias);
                 shader.GetParameter("u_shadowSoftReliefTexels", true).SetValue(GpuShadowSoftReliefTexels);
+                // [v0.1.102] 核选择：0=八边形 8 抽样（v0.1.64 原核），1=Dawnlight Poisson 盘 12 抽样
+                shader.GetParameter("u_shadowKernel", true).SetValue((float)GpuShadowKernel);
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
@@ -383,6 +632,7 @@ float u_shadowReliefFar;
 float u_shadowReliefNear;
 float u_shadowSoftSlopeBias;
 float u_shadowSoftReliefTexels;
+float u_shadowKernel;
 float u_shadowEnable;
 float u_vfEnable;
 float u_vfBottomY;
@@ -445,6 +695,103 @@ float decodeShadowDepth(float4 texel)
 		return (hi * 256.0 + lo) / 65535.0;
 	}
 	return texel.r;
+}
+
+// [v0.1.102] Dawnlight 的 Poisson 盘核（`lib/CalculateShadow.glsl` 的 `poissonDisk[16]` 逐字搬过来；
+// 它自己的 `getWarpShadowPCF()` 取前 12 个，`int samples = 12;`）。只换核：本分支没有 warp 空间。
+// ⚠️ **不要用 `const` 数组**：本引擎 Windows 侧跑的是 ANGLE/GL ES，实测第一版写成
+// `static const float2 k[16] = {...}` 时整支像素着色器编译失败
+// （`OpenGL does not allow constant arrays` / `array assignments require #version 120`），
+// 阴影采样被自动关掉、A/B 变成「测空气」。所以这里改成「逐点字面量 + 一个旋转 helper」。
+float2 rotKernelOffset(float2 o, float ca, float sa)
+{
+	return float2(o.x * ca - o.y * sa, o.x * sa + o.y * ca);
+}
+
+float pcfPoisson12Far(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.94201624, -0.39906216), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.94558609, -0.76890725), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.094184101, -0.92938870), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.34495938, 0.29387760), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.91588581, 0.45771432), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.81544232, -0.87912464), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.38277543, 0.27676845), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.97484398, 0.75648379), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.44323325, -0.97511554), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.53742981, -0.47373420), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.26496911, -0.41893023), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.79197514, 0.19090188), ca, sa) * t)) + sb);
+	return acc * 0.0833333333;
+}
+
+float pcfPoisson12Near(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.94201624, -0.39906216), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.94558609, -0.76890725), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.094184101, -0.92938870), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.34495938, 0.29387760), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.91588581, 0.45771432), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.81544232, -0.87912464), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.38277543, 0.27676845), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.97484398, 0.75648379), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.44323325, -0.97511554), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.53742981, -0.47373420), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.26496911, -0.41893023), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.79197514, 0.19090188), ca, sa) * t)) + sb);
+	return acc * 0.0833333333;
+}
+
+// [v0.1.102] 本分支自己设计的核（**依据是对上面两个核的测量**，不是口味）：
+// 双同心环 8+8，半径 0.6t / 1.0t，环间角偏移 22.5°。
+// 出处：`GpuShadowKernelSelfCheck()` 量出「八边形核的支撑是**正方形**」（角点半径 √2 ⇒ 斜向半影宽 41%）、
+// 且只有 8 个方向（半平面最坏误差 12.5%）；Dawnlight 的 blue-noise 盘虽然把支撑变成圆盘，
+// 但方向不规则 ⇒ 半平面最坏误差反而涨到 **25%**。把「圆盘支撑 + 规则角分布 + 16 抽样」合起来
+// 就同时拿到两个好处：最坏误差 6.25% × 支撑各向异性 ≈1.02。
+float pcfRing16Far(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.00000000, 0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.00000000, -0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(-0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uv + rotKernelOffset(float2(0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	return acc * 0.0625;
+}
+
+float pcfRing16Near(float2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.00000000, 0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.00000000, -0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(-0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uv + rotKernelOffset(float2(0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	return acc * 0.0625;
 }
 
 float2 shadowUv(float4 clip, float flipY)
@@ -521,30 +868,48 @@ void main(
 				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
 			float ca = cos(ang);
 			float sa = sin(ang);
-			float acc = 0.0;
-			if (insideNear)
+			// [v0.1.102] 核选择：1 = Dawnlight 的 Poisson 盘 12 抽样（`lib/CalculateShadow.glsl`），
+			// 2 = 本分支的双环 8+8（16 抽样），0 = v0.1.64 的八边形 8 抽样（逐位不变）。
+			// 三个核共用同一 t / 同一 bias 补偿，所以 A/B 只换了**核**。
+			if (u_shadowKernel > 1.5)
 			{
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(sa * t, -ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca + sa) * t, (sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-ca * t, -sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(ca * t, sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-sa * t, ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+				lit = insideNear
+					? pcfRing16Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfRing16Far(uvFar, t, fragDepth, sb, ca, sa);
+			}
+			else if (u_shadowKernel > 0.5)
+			{
+				lit = insideNear
+					? pcfPoisson12Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfPoisson12Far(uvFar, t, fragDepth, sb, ca, sa);
 			}
 			else
 			{
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(sa * t, -ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca + sa) * t, (sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-ca * t, -sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(ca * t, sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-sa * t, ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+				float acc = 0.0;
+				if (insideNear)
+				{
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(sa * t, -ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca + sa) * t, (sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-ca * t, -sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(ca * t, sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2(-sa * t, ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNear + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+				}
+				else
+				{
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(sa * t, -ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca + sa) * t, (sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-ca * t, -sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(ca * t, sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2(-sa * t, ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFar + float2((ca - sa) * t, (sa + ca) * t))) + sb);
+				}
+				lit = acc * 0.125;
 			}
-			lit = acc * 0.125;
 		}
 		else
 		{
@@ -637,6 +1002,7 @@ uniform float u_shadowReliefFar;
 uniform float u_shadowReliefNear;
 uniform float u_shadowSoftSlopeBias;
 uniform float u_shadowSoftReliefTexels;
+uniform float u_shadowKernel;
 uniform float u_shadowEnable;
 uniform float u_vfEnable;
 uniform float u_vfBottomY;
@@ -707,6 +1073,96 @@ float decodeShadowDepth(vec4 texel)
 	return texel.r;
 }
 
+// [v0.1.102] Dawnlight 的 Poisson 盘核（与 HLSL 段同一张表，逐字来自 `lib/CalculateShadow.glsl`）。
+// ⚠️ **不用 const 数组**：实测本引擎的 GL ES 路径会直接报
+// `OpenGL does not allow constant arrays` ⇒ 整支像素着色器编译失败。改成逐点字面量 + 旋转 helper。
+vec2 rotKernelOffset(vec2 o, float ca, float sa)
+{
+	return vec2(o.x * ca - o.y * sa, o.x * sa + o.y * ca);
+}
+
+float pcfPoisson12Far(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.94201624, -0.39906216), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.94558609, -0.76890725), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.094184101, -0.92938870), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.34495938, 0.29387760), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.91588581, 0.45771432), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.81544232, -0.87912464), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.38277543, 0.27676845), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.97484398, 0.75648379), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.44323325, -0.97511554), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.53742981, -0.47373420), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.26496911, -0.41893023), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.79197514, 0.19090188), ca, sa) * t)) + sb);
+	return acc * 0.0833333333;
+}
+
+float pcfPoisson12Near(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.94201624, -0.39906216), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.94558609, -0.76890725), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.094184101, -0.92938870), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.34495938, 0.29387760), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.91588581, 0.45771432), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.81544232, -0.87912464), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.38277543, 0.27676845), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.97484398, 0.75648379), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.44323325, -0.97511554), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.53742981, -0.47373420), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.26496911, -0.41893023), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.79197514, 0.19090188), ca, sa) * t)) + sb);
+	return acc * 0.0833333333;
+}
+
+// [v0.1.102] 双同心环 8+8（与 HLSL 段同一张表）：圆盘支撑 + 规则角分布 + 16 抽样
+
+float pcfRing16Far(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.00000000, 0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.00000000, -0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(-0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uv + rotKernelOffset(vec2(0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	return acc * 0.0625;
+}
+
+float pcfRing16Near(vec2 uv, float t, float fragDepth, float sb, float ca, float sa)
+{
+	float acc = 0.0;
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.00000000, 0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.42426407, 0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.60000002, 0.00000000), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.00000000, -0.60000002), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.42426407, -0.42426407), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.38268343, 0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.92387956, 0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(-0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.38268343, -0.92387956), ca, sa) * t)) + sb);
+	acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uv + rotKernelOffset(vec2(0.92387956, -0.38268343), ca, sa) * t)) + sb);
+	return acc * 0.0625;
+}
+
 vec2 shadowUv(vec4 clip, float flipY)
 {
 	vec2 uv = vec2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
@@ -770,30 +1226,46 @@ void main()
 				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
 			float ca = cos(ang);
 			float sa = sin(ang);
-			float acc = 0.0;
-			if (insideNear)
+			// [v0.1.102] 核选择（与 HLSL 段同一算法）
+			if (u_shadowKernel > 1.5)
 			{
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(sa * t, -ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-ca * t, -sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(ca * t, sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-sa * t, ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+				lit = insideNear
+					? pcfRing16Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfRing16Far(uvFar, t, fragDepth, sb, ca, sa);
+			}
+			else if (u_shadowKernel > 0.5)
+			{
+				lit = insideNear
+					? pcfPoisson12Near(uvNear, t, fragDepth, sb, ca, sa)
+					: pcfPoisson12Far(uvFar, t, fragDepth, sb, ca, sa);
 			}
 			else
 			{
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(sa * t, -ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-ca * t, -sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(ca * t, sa * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-sa * t, ca * t))) + sb);
-				acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+				float acc = 0.0;
+				if (insideNear)
+				{
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(sa * t, -ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-ca * t, -sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(ca * t, sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2(-sa * t, ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMapNear, uvNear + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+				}
+				else
+				{
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca + sa) * t, (-sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(sa * t, -ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca + sa) * t, (sa - ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-ca * t, -sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(ca * t, sa * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((-ca - sa) * t, (-sa + ca) * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2(-sa * t, ca * t))) + sb);
+					acc += step(fragDepth, decodeShadowDepth(texture2D(u_shadowMap, uvFar + vec2((ca - sa) * t, (sa + ca) * t))) + sb);
+				}
+				lit = acc * 0.125;
 			}
-			lit = acc * 0.125;
 		}
 		else
 		{

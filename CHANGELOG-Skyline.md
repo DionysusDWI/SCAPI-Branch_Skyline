@@ -7,6 +7,66 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.102] - 2026-09-28
+
+第一百零九个版本：**里程碑 4 的第一块实装 —— 按 Dawnlight 的实现换掉软阴影的采样核，并把它量成数字**。
+相对 v0.1.101 的变更：
+
+### 1. Dawnlight 的软阴影核（可切换）
+
+* Dawnlight 的 `lib/CalculateShadow.glsl` 里 `getWarpShadowPCF()` 用的是**16 点 Poisson 盘、取前 12 个**
+  （`int samples = 12;`）。本版把**那张盘逐字搬过来**，作为 `GpuShadowKernel = 1`。
+* **只换核，不搬它的 warp / paraboloid 投影**：本分支的阴影是正交盒投影、没有 warp 空间，
+  它的 `getWarpShadowPCF0()` 依赖 `ParaboloidWarp`，硬搬会把采样位置整体算错。
+* 三档核：`0` = 八边形 8 抽样（v0.1.64 原核，**默认，逐位不变**）、`1` = Dawnlight Poisson 12、
+  `2` = **双同心环 8+8**（16 抽样，本分支按本节的测量设计）。
+  桥：`skyline.GpuShadowKernelSet(n)`、`skyline.GpuShadowSoftInfo()` 新增 `kernel` / `kernelSamples`。
+
+### 2. 把"哪个核更软"变成算术（`skyline.GpuShadowKernelSelfCheck()`）
+
+判据用**半平面遮挡**（直边 —— 建筑场景里最常见的那种），边缘法向扫 0..360°，与解析覆盖率 0.5 对表：
+
+| 核 | 抽样 | 扫一圈均值 | **最坏方向误差** | 误差×抽样 | **支撑各向异性** | 离散层级 |
+|---|---|---|---|---|---|---|
+| `octagon8`（默认） | 8 | 0.5015 | **12.5%** | 1.00 | **1.414** | 2 |
+| `poisson12`（Dawnlight） | 12 | 0.5000 | **25.0%** | 3.00 | 1.483 | 7 |
+| `ring16`（本分支） | 16 | 0.5015 | **6.25%** | 1.00 | **1.082** | 2 |
+
+* **负结果（如实记）**：Dawnlight 的 blue-noise 盘在**直边**这一项上比我们现有的八边形核**更差**
+  （最坏误差 12.5% → **25%**，各向异性 1.414 → 1.483）。原因是 blue-noise 是"最小间距"采样、角分布不规则，
+  12 个抽样下半平面覆盖率的估计会差到 **3 个量化步**。这与"Poisson 一定更平滑"的直觉相反，记下来免得重踩。
+* **现核的真实缺陷不是方向数，而是支撑形状**：它的 8 个偏移是 `(±1,0)/(0,±1)/(±1,±1)`，
+  全部落在 `max(|x|,|y|)=1` 的**正方形边界**上（角点半径 √2）⇒ **同一个影子，斜着看比正着看糊 41%**。
+* **`ring16` 同时压住两条**：圆盘支撑（各向异性 1.082）+ 规则角分布（量化误差 6.25%）。
+  等宽用法：`GpuShadowSoftRadius` 由 1.5 → **1.95** 即可把平均半影宽度拉回现核水平，剩下的差别只有形状/量化。
+
+### 3. 两个自己踩到并修掉的坑
+
+* **`const` 数组编不过**：本引擎 Windows 侧走 **ANGLE / GL ES**，第一版写成 `static const float2 k[16] = {...}`
+  ⇒ `OpenGL does not allow constant arrays`、整支像素着色器编译失败、**阴影采样被自动关掉**；
+  改成"逐点字面量 + 一个旋转 helper"后通过（两种方言同构）。
+* **A/B 被太阳走动骗过**：第一版只冻风、没钉住时刻，两次 burst 之间画面差 **13,169 px**，
+  而相邻两张只差 41 px ⇒ "换核有效"其实是"太阳在走"。修法：**每张截图前把时刻拨回同一个值**，
+  并把每张的太阳读数写进证据（本轮跨度 ≤0.017°）。
+
+### 4. 验收（按用户口径"关雾看光影"）
+
+* `skyline.GpuShadowKernelSelfCheck()` **ok=true**：6 条断言全过（无偏 / 规则核量化误差 = 1/n /
+  现核支撑确实是正方形 / ring16 各向异性 ≤1.15 / ring16 最坏误差 ≤ 8 抽样核的 2/3 / shader 反漂移锚点）；
+* 画面 A/B（同一机位、冻风、**每张前钉时刻**、关自研体积雾）：
+  噪声底（同设置重拍两轮）**0 px**（稳定掩膜 99.999%）；
+  octagon8 → poisson12 **4,277 px**、octagon8 → ring16 **4,333 px**、poisson12 → ring16 **528 px**；
+  采样变体编译成功（`err=''`、`resolved=1089`）—— 这一条是上一版假信号的分水岭；
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
+
+证据：`data/sessions/skyline-v0102/`（`shadow-kernel.json` + 各核截图）、`notes/191`。
+
+### 5. 本版没做（如实）
+
+* **"哪个核更自然"的目视对照没有做成可比样本**：这一轮的取景落在 297 m 高的平台上，近处可见地形很少
+  ⇒ 默认**仍是** `GpuShadowKernel = 0`，等放大对照与性能三条线一起定；
+* Dawnlight 的**大气散射 LUT / 神光 / 聚簇点光源 / 海洋 FFT / 色调映射**本版都没动。
+
 ## [v0.1.101] - 2026-09-28
 
 第一百零八个版本：**里程碑 2.1（DH 深挖）+ 2.2 的"下一步"（按屏幕像素定 LOD 档位）**。
@@ -23,7 +83,7 @@
   `lodShading=AUTO`（与原生方块同样的侧面明暗）+ 亮度/饱和度对齐 + **`noiseDropoff=1024` 用噪声补细节** +
   `lodBiomeBlending=3`（跨群系渐变）+ **`maxZoomQualityIncrease=4`（按像素密度提级）**。
 
-详见 `notes/182`。
+详见 `notes/185`。
 
 ### 2. 按屏幕像素定档位（里程碑 2.2 的"下一步"）
 
@@ -58,7 +118,7 @@
 
 * 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
 
-证据：`data/sessions/skyline-v0201/`（`pixel-tiers.json`）、`data/sessions/dh-dig/`（DH lang 副本）、`notes/182`、`notes/183`。
+证据：`data/sessions/skyline-v0201/`（`pixel-tiers.json`）、`data/sessions/dh-dig/`（DH lang 副本）、`notes/185`、`notes/183`。
 
 ## [v0.1.100] - 2026-09-28
 
@@ -104,7 +164,7 @@ Survivalcraft 里**光活在相邻的空气格里**（v0.1.82 已用 `zeroLightC
 
 * 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误**。
 
-证据：`data/sessions/skyline-v0200/`（`airlight-patch.json`、`airlight-on/off-*.png`）、`notes/181`。
+证据：`data/sessions/skyline-v0200/`（`airlight-patch.json`、`airlight-on/off-*.png`）、`notes/184`。
 
 ## [v0.1.99] - 2026-09-28
 
@@ -4534,5 +4594,6 @@ Windows，世界 `AgentLab`（创造模式，SCAPI 1.9.3.1 源码树本地构建
 - 命令方块 `place`（`SetCellValueFast`）不刷新 shaft/几何/光照 → 高处建造需用 `ChangeCell` 或 recalc。
 - 上限 1023（`HeightBits=10`）；负 y（地下）未实现；旧存档 y>255 为空。
 - 本源码树的 `Content` 比部分随包发布版新，部署时 `Content.zip` 必须与 dll 同源。
+
 
 
