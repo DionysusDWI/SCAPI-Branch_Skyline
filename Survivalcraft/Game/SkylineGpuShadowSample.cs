@@ -43,8 +43,13 @@ namespace Game {
         /// 近图 2×128/1024 = 0.25 m/texel → ≈0.375 m。**近场接触阴影天然更锐**（这正是级联想要的效果）。
         /// ⚠️ 第一版把"米"当 UV 传进去（1.0 UV = 整张贴图宽）→ 8 个抽样全落到边界外 → 阴影整片消失；
         /// 实测的软/硬 A/B 立刻暴露（见 notes/143）。
+        ///
+        /// **[v0.1.103] 默认 1.5 → 1.95**：默认核换成了 `ring16`（见 `GpuShadowKernel`），
+        /// 而两个核在边缘法向上的**平均投影宽度**不同（八边形 2.55t vs 双环 1.95t，t = 本值 × texel），
+        /// 所以半径要乘 2.55/1.95 ≈ 1.31 才能**保持平均半影宽度不变** —— 换核只改形状与量化，
+        /// 不改"软不软"（milestone 3.2 的要求是软阴影）。换算：远图 ≈1.95 m、近图 ≈0.49 m。
         /// </summary>
-        public static float GpuShadowSoftRadius { get; set; } = 1.5f;
+        public static float GpuShadowSoftRadius { get; set; } = 1.95f;
 
         /// <summary>[v0.1.64] **坡度 bias 系数**（默认 1.0 = 按最坏情况补偿）。
         /// 为什么必须有这一项（实测踩到）：地面上相邻 texel 沿太阳方向的深度变化是
@@ -66,8 +71,9 @@ namespace Game {
         /// <summary>[v0.1.64] 太阳仰角下限（sinθ）。低于它按它算，避免日出日落时 bias 发散。</summary>
         public static float GpuShadowSoftSunYFloor { get; set; } = 0.15f;
 
-        /// <summary>[v0.1.102] **PCF 采样核选择**（里程碑 4：按 Dawnlight 的实现换核）。
-        /// `0` = 八边形 8 抽样（v0.1.64 的原核，**默认**，逐位不变）；`1` = Dawnlight 的 Poisson 盘 12 抽样。
+        /// <summary>[v0.1.102 引入 / v0.1.103 改默认] **PCF 采样核选择**（里程碑 4：按 Dawnlight 的实现换核）。
+        /// `0` = 八边形 8 抽样（v0.1.64 的原核）；`1` = Dawnlight 的 Poisson 盘 12 抽样；
+        /// `2` = 双同心环 8+8（16 抽样）—— **v0.1.103 起默认**。
         ///
         /// 两个核的差别不是"随便换一组偏移"，有两条**可测量**的性质差异（见 `GpuShadowKernelSelfCheck()`）：
         ///   1. **支撑形状**：原核的 8 个偏移是 `(±1,0)/(0,±1)/(±1,±1)` ——
@@ -81,8 +87,17 @@ namespace Game {
         /// （`const vec2 poissonDisk[16]` + `int samples = 12; // 可选 8/12/16`，
         /// 半径 `1.0 * texelSize.x`）。我们只**换核**，不换它那套 warp/paraboloid 投影 ——
         /// 本分支的阴影是正交盒投影，没有 warp 空间，硬搬会把整个采样位置算错。
+        ///
+        /// **[v0.1.103] 默认由 `octagon8` 改为 `ring16`**，依据是同一套判据下的三条实测：
+        ///   1. `GpuShadowKernelSelfCheck()`：量化误差 **12.5% → 6.25%**、支撑各向异性 **1.414 → 1.082**
+        ///      （八边形的支撑是正方形，斜向半影宽 41%；双环是圆盘，太阳本来也是圆盘）；
+        ///   2. **等宽**：半径同时由 1.5 → 1.95（见 `GpuShadowSoftRadius`），平均半影宽度不变，
+        ///      A/B 出来的差别只剩形状/量化（1600 px 截图 4,323 px，噪声底 0 px）；
+        ///   3. **代价**：配对交替测（0/2 各两轮、每轮 17~18 s）帧率差 **+1.18%**（在跑步动噪声内）、
+        ///      显存/内存不变 ⇒ **没有可测代价**。
+        /// 仍然如实记：**"哪个更自然"的放大目视对照还没做**（见 `notes/191 §5`）。
         /// </summary>
-        public static int GpuShadowKernel { get; set; } = GpuShadowKernelOctagon;
+        public static int GpuShadowKernel { get; set; } = GpuShadowKernelRing16;
 
         /// <summary>[v0.1.102] 核代号：八边形 8 抽样（v0.1.64 原核）。</summary>
         public const int GpuShadowKernelOctagon = 0;
@@ -94,6 +109,23 @@ namespace Game {
         public const int GpuShadowPoissonSamples = 12;
         /// <summary>[v0.1.102] 双环核实际使用的抽样数。</summary>
         public const int GpuShadowRingSamples = 16;
+
+        /// <summary>[v0.1.103] **各核的真实最大采样半径**（单位 = `GpuShadowSoftRadius` × texel）。
+        ///
+        /// 为什么需要它：`u_shadowSoftSlopeBias` 那一项按"**抽样半径**覆盖的归一化深度差"补偿，
+        /// 原式写死 `× 1.4142136`（= 八边形核的角点半径 √2）。换核之后这个系数就不再成立：
+        ///   * `octagon8` 的 8 个偏移半径是 `1` 与 `√2` ⇒ **1.41421**；
+        ///   * `poisson12` 的盘最大半径是 `1.23423`（`(0.97484398, 0.75648379)`）；
+        ///   * `ring16` 的两条环半径是 `0.6` 与 `1.0` ⇒ **1.0**。
+        /// 实测（v0.1.103 第一版）：只把半径从 1.5 抬到 1.95、这一项却仍按 1.4142 计 ⇒
+        /// bias 额外多 30%（≈1.9 m 的归一化深度）⇒ "换核"的像素差被**放大到 77,619 px**。
+        /// 按真实最大半径缩放后，bias 与旧默认基本持平，剩下的才是真正的形状/量化差别。
+        /// </summary>
+        public static float GpuShadowKernelSlopeScale(int kernel) => kernel switch {
+            GpuShadowKernelPoisson12 => 1.23423f,
+            GpuShadowKernelRing16 => 1f,
+            _ => 1.41421f
+        };
 
         /// <summary>[v0.1.34] 调试：0=正常阴影；1=把"采样到的阴影图深度"直接画到颜色（验证 UV/绑定是否正确）。</summary>
         public static int GpuShadowDebugMode { get; set; }
@@ -130,7 +162,8 @@ namespace Game {
                     GpuShadowKernelPoisson12 => GpuShadowPoissonSamples,
                     GpuShadowKernelRing16 => GpuShadowRingSamples,
                     _ => 8
-                }
+                },
+                ["kernelSlopeScale"] = System.Math.Round((double)GpuShadowKernelSlopeScale(GpuShadowKernel), 5)
             };
             return o.ToJsonString();
         }
@@ -231,6 +264,7 @@ namespace Game {
                     int n = KernelSampleCount(kernel);
                     double sum = 0, sumSq = 0, sumExt = 0;
                     double minExt = double.MaxValue, maxExt = 0, maxErr = 0;
+                    float maxRad = 0f;
                     // 估计值只可能是 k/n（n ≤ 16）⇒ 用桶统计"出现过几种离散层级"
                     bool[] seen = new bool[17];
                     for (int k = 0; k < rotations; k++) {
@@ -240,6 +274,7 @@ namespace Game {
                         float lo = float.MaxValue, hi = float.MinValue;
                         for (int i = 0; i < n; i++) {
                             KernelOffset(kernel, i, ca, sa, out float ox, out float oy);
+                            maxRad = System.Math.Max(maxRad, MathF.Sqrt(ox * ox + oy * oy));
                             if (ox >= 0f) {
                                 lit++;
                             }
@@ -279,7 +314,10 @@ namespace Game {
                         ["extentMaxT"] = System.Math.Round(maxExt, 4),
                         ["extentMeanT"] = System.Math.Round(sumExt / rotations, 4),
                         ["extRatio"] = System.Math.Round(maxExt / System.Math.Max(minExt, 1e-9), 4),
-                        ["distinctLitLevels"] = levels
+                        ["distinctLitLevels"] = levels,
+                        // [v0.1.103] 核的**真实最大采样半径**：bias 的"抽样半径"系数必须等于它
+                        ["samplingRadius"] = System.Math.Round(maxRad, 5),
+                        ["slopeScaleInUse"] = System.Math.Round(GpuShadowKernelSlopeScale(kernel), 5)
                     };
                 }
                 result["kernels"] = kernels;
@@ -293,10 +331,16 @@ namespace Game {
                 //   D. 双环核把支撑各向异性压到 1.15 以内，且最坏误差 ≤ 8 抽样核的 2/3；
                 //   E. 反漂移：shader 源里真的含有这两张表和核选择 uniform。
                 bool unbiased = true, quantOk = true;
+                // [v0.1.103] F：bias 的"抽样半径"系数必须等于该核真的最大采样半径（防止换核后 bias 走偏）
+                bool slopeScaleOk = true;
                 for (int kernel = 0; kernel <= 2; kernel++) {
                     JsonObject k = kernels[KernelName(kernel)].AsObject();
                     if (System.Math.Abs(k["mean"].GetValue<double>() - 0.5) > 0.02) {
                         unbiased = false;
+                    }
+                    if (System.Math.Abs(k["samplingRadius"].GetValue<double>()
+                                        - k["slopeScaleInUse"].GetValue<double>()) > 0.001) {
+                        slopeScaleOk = false;
                     }
                 }
                 for (int kernel = 0; kernel <= 2; kernel += 2) {
@@ -323,11 +367,13 @@ namespace Game {
                     ["C_legacySupportIsSquare"] = squareDetected,
                     ["D_ringIsotropic"] = ringIsotropic,
                     ["D_ringFinerThanOctagon"] = ringFiner,
-                    ["E_shaderAnchorsPresent"] = anchors
+                    ["E_shaderAnchorsPresent"] = anchors,
+                    ["F_slopeScaleMatchesSamplingRadius"] = slopeScaleOk
                 };
                 // 如实标注：Dawnlight 的核在**直边**这一项上比现核更差（这是本轮的负结果，不是笔误）
                 result["poissonWorseThanOctagonOnStraightEdge"] = poiErr > octErr;
-                result["ok"] = unbiased && quantOk && squareDetected && ringIsotropic && ringFiner && anchors;
+                result["ok"] = unbiased && quantOk && squareDetected && ringIsotropic && ringFiner && anchors
+                               && slopeScaleOk;
                 result["activeKernel"] = GpuShadowKernel;
             }
             catch (System.Exception e) {
@@ -492,6 +538,8 @@ namespace Game {
                 shader.GetParameter("u_shadowSoftReliefTexels", true).SetValue(GpuShadowSoftReliefTexels);
                 // [v0.1.102] 核选择：0=八边形 8 抽样（v0.1.64 原核），1=Dawnlight Poisson 盘 12 抽样
                 shader.GetParameter("u_shadowKernel", true).SetValue((float)GpuShadowKernel);
+                // [v0.1.103] bias 的"抽样半径"系数必须按**这个核的真实最大半径**给（八边形 √2 / 双环 1.0）
+                shader.GetParameter("u_shadowKernelSlopeScale", true).SetValue(GpuShadowKernelSlopeScale(GpuShadowKernel));
                 m_gpuShadowSampleError = "";
                 m_gpuShadowSampleResolved++;
                 m_gpuShadowSampleLastReason = "resolved";
@@ -633,6 +681,7 @@ float u_shadowReliefNear;
 float u_shadowSoftSlopeBias;
 float u_shadowSoftReliefTexels;
 float u_shadowKernel;
+float u_shadowKernelSlopeScale;
 float u_shadowEnable;
 float u_vfEnable;
 float u_vfBottomY;
@@ -865,7 +914,7 @@ void main(
 			// 没有坡度项 → 大片受光地面被压暗（实测 48.5%）；没有 relief 项 → 残留斜向条纹 acne。
 			float relief = insideNear ? u_shadowReliefNear : u_shadowReliefFar;
 			float sb = u_shadowBias + (u_shadowSoftReliefTexels
-				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
+				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale) * relief;
 			float ca = cos(ang);
 			float sa = sin(ang);
 			// [v0.1.102] 核选择：1 = Dawnlight 的 Poisson 盘 12 抽样（`lib/CalculateShadow.glsl`），
@@ -1003,6 +1052,7 @@ uniform float u_shadowReliefNear;
 uniform float u_shadowSoftSlopeBias;
 uniform float u_shadowSoftReliefTexels;
 uniform float u_shadowKernel;
+uniform float u_shadowKernelSlopeScale;
 uniform float u_shadowEnable;
 uniform float u_vfEnable;
 uniform float u_vfBottomY;
@@ -1223,7 +1273,7 @@ void main()
 			// bias 补偿（与 HLSL 段同一算法）：relief texel + 抽样半径×1.4142，再乘每 texel 归一化深度
 			float relief = insideNear ? u_shadowReliefNear : u_shadowReliefFar;
 			float sb = u_shadowBias + (u_shadowSoftReliefTexels
-				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * 1.4142136) * relief;
+				+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale) * relief;
 			float ca = cos(ang);
 			float sa = sin(ang);
 			// [v0.1.102] 核选择（与 HLSL 段同一算法）
