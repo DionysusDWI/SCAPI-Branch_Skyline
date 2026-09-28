@@ -525,6 +525,7 @@ namespace Game {
                 shader.GetParameter("u_vfSkyMix", true).SetValue(Math.Clamp(FogSkyMix, 0f, 1f));
                 shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
                 shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
+                shader.GetParameter("u_vfHaze", true).SetValue(VolumetricHazeEnabled ? 1f : 0f);
                 shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
                 shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
                 shader.GetParameter("u_vfPhasePower", true)
@@ -698,6 +699,7 @@ namespace Game {
                     shader.GetParameter("u_vfSkyMix", true).SetValue(Math.Clamp(FogSkyMix, 0f, 1f));
                     shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
                     shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
+                    shader.GetParameter("u_vfHaze", true).SetValue(VolumetricHazeEnabled ? 1f : 0f);
                     // [v0.1.104] 体积神光（Dawnlight ShaftLighting 的适配路线，见 SkylineVolumetricFog）
                     shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
                     shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
@@ -1068,6 +1070,7 @@ float u_vfEnable;
 float u_vfBottomY;
 float u_vfTopY;
 float u_vfDensity;
+float u_vfHaze;
 float u_vfScale;
 float2 u_vfWind;
 float u_vfThreshold;
@@ -1642,7 +1645,8 @@ void main(
 					}
 				}
 #endif
-				result.rgb = lerp(result.rgb, vfCol, vfAlpha);
+				// [v0.1.117] 霾 / 光轴解耦：u_vfHaze=0 时**只去掉「雾色混白」那一步**，光轴项照旧用 vfAlpha
+				result.rgb = lerp(result.rgb, vfCol, vfAlpha * u_vfHaze);
 				if (u_vfSunShaft > 0.0)
 				{
 					float vfPhase = 0.25 + 0.75 * pow(saturate(dot(vfRd, u_sunDir)), u_vfPhasePower);
@@ -1716,6 +1720,7 @@ uniform float u_vfEnable;
 uniform float u_vfBottomY;
 uniform float u_vfTopY;
 uniform float u_vfDensity;
+uniform float u_vfHaze;
 uniform float u_vfScale;
 uniform vec2 u_vfWind;
 uniform float u_vfThreshold;
@@ -2295,7 +2300,8 @@ void main()
 					}
 				}
 #endif
-				result.rgb = mix(result.rgb, vfCol, vfAlpha);
+				// [v0.1.117] 霾 / 光轴解耦（与 HLSL 段同一算法）
+				result.rgb = mix(result.rgb, vfCol, vfAlpha * u_vfHaze);
 				if (u_vfSunShaft > 0.0)
 				{
 					float vfPhase = 0.25 + 0.75 * pow(clamp(dot(vfRd, u_sunDir), 0.0, 1.0), u_vfPhasePower);

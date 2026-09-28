@@ -104,8 +104,9 @@ namespace Game {
                 ["vanillaSkyHorizonFog"] = !FogDisabled,
                 ["vanillaEntityFade"] = !FogDisabled,
                 ["volumetricFog"] = VolumetricFogEnabled,
-                ["volumetricGodRays"] = VolumetricFogEnabled && VolumetricSunShaftStrength > 0f,
-                ["lodFog"] = VolumetricFogEnabled,
+            ["volumetricGodRays"] = VolumetricFogEnabled && VolumetricSunShaftStrength > 0f,
+            ["volumetricHaze"] = VolumetricFogEnabled && VolumetricHazeEnabled,
+            ["lodFog"] = VolumetricFogEnabled,
                 ["coloredLightFog"] = VolumetricFogEnabled && SkylinePointLights.Enabled
             };
             root["layers"] = layers;

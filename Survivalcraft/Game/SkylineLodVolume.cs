@@ -175,6 +175,7 @@ float u_vfEnable;
 float u_vfBottomY;
 float u_vfTopY;
 float u_vfDensity;
+float u_vfHaze;
 float u_vfScale;
 float2 u_vfWind;
 float u_vfThreshold;
@@ -461,7 +462,8 @@ void main(
 				vfOd *= vfOdScale;
 				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
 				float3 vfCol = lerp(u_vfColor, max(u_fogColor, float3(0.02, 0.02, 0.02)), u_vfSkyMix);
-				rgb = lerp(rgb, vfCol, vfAlpha);
+				// [v0.1.117] 霾 / 光轴解耦（与地形段同一算法，见 SkylineVolumetricFog）
+				rgb = lerp(rgb, vfCol, vfAlpha * u_vfHaze);
 				if (u_vfSunShaft > 0.0)
 				{
 					float vfPhase = 0.25 + 0.75 * pow(saturate(dot(vfRd, u_sunDir)), u_vfPhasePower);
@@ -501,6 +503,7 @@ uniform float u_vfEnable;
 uniform float u_vfBottomY;
 uniform float u_vfTopY;
 uniform float u_vfDensity;
+uniform float u_vfHaze;
 uniform float u_vfScale;
 uniform vec2 u_vfWind;
 uniform float u_vfThreshold;
@@ -779,7 +782,8 @@ void main()
 				vfOd *= vfOdScale;
 				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
 				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
-				rgb = mix(rgb, vfCol, vfAlpha);
+				// [v0.1.117] 霾 / 光轴解耦（与 HLSL 段同一算法）
+				rgb = mix(rgb, vfCol, vfAlpha * u_vfHaze);
 				if (u_vfSunShaft > 0.0)
 				{
 					float vfPhase = 0.25 + 0.75 * pow(clamp(dot(vfRd, u_sunDir), 0.0, 1.0), u_vfPhasePower);

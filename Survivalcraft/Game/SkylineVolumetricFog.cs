@@ -31,6 +31,14 @@ namespace Game {
         /// <summary>体积雾总开关。**默认开**（用户口径是"替换原有 Fog"）。</summary>
         public static bool VolumetricFogEnabled { get; set; } = true;
 
+        /// <summary>[v0.1.117] **霾 / 光轴解耦**（默认 true = v0.1.116 的行为）。
+        /// 为什么要它：用户口径是"**可以把 Fog 关掉以便于测试光影的视觉效果**"，而本分支的
+        /// **体积神光是长在体积雾的同一次 8 步步进里的** —— `vfAlpha`（= 密度积分 → 不透明度）
+        /// 同时决定"雾色混白"与"光轴亮度"两件事 ⇒ 关雾就把最显眼的光影效果一起关掉了。
+        /// 关掉这一项 = **保留光轴与其它一切**，只把"雾色混白"那一步的权重乘 0（着色器里的 `u_vfHaze`）；
+        /// 于是"关雾之后的光影"不至于连光轴都没了。判据见 `heightlab/skyline-v0117-haze-godrays.py`。</summary>
+        public static bool VolumetricHazeEnabled { get; set; } = true;
+
         /// <summary>雾带底高（米）。默认 0（贴地）。</summary>
         public static float FogBottomY { get; set; }
 
