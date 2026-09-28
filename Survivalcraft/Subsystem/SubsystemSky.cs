@@ -24,6 +24,10 @@ namespace Game {
             public int? LastUpdateTemperature;
 
             public float? LastUpdateFogDensity;
+            /// <summary>[v0.1.111] 关雾开关也要进"是否重建穹顶"的判据 —— 它改的是穹顶的**顶点色**
+            /// （`CalculateSkyColor` 里霾因子 f）。若不记这一项，关雾后穹顶会一直拿着旧的、发白的顶点色
+            /// （测试里把时刻钉住时尤其明显：那是"改了开关但画面不变"的假信号）。</summary>
+            public bool? LastUpdateFogDisabled;
 
             public float LastUpdateLightningStrikeBrightness;
 
@@ -517,6 +521,8 @@ namespace Game {
                 if (seasonalTemperature == lastUpdateTemperature.GetValueOrDefault()
                     && lastUpdateTemperature.HasValue
                     && value.LastUpdateTemperature.HasValue
+                    && value.LastUpdateFogDisabled.HasValue
+                    && value.LastUpdateFogDisabled.Value == SkylineRuntime.FogDisabled
                     && !(MathF.Abs(m_viewFogDensity - (value.LastUpdateFogDensity ?? 0f)) > 0.002f)) {
                     flag = false;
                 }
@@ -524,6 +530,7 @@ namespace Game {
             if (flag) {
                 value.LastUpdateTimeOfDay = timeOfDay;
                 value.LastUpdatePrecipitationIntensity = precipitationIntensity;
+                value.LastUpdateFogDisabled = SkylineRuntime.FogDisabled;
                 value.LastUpdateLightningStrikeBrightness = m_lightningStrikeBrightness;
                 value.LastUpdateTemperature = seasonalTemperature;
                 value.LastUpdateFogDensity = m_viewFogDensity;
@@ -950,14 +957,20 @@ namespace Game {
             float num2 = (FogIntegral(viewPosition.Y) - FogIntegral(position.Y)) / (viewPosition.Y - position.Y);
             float num3 = MathUtils.Saturate(ViewHazeDensity * (num - ViewHazeStart));
             float num4 = num2 * ViewFogDensity * num;
-            return MathUtils.Saturate(num3 + num4);
+            // [v0.1.111] 关雾（FogDisabled）时 CPU 侧雾量一并归零：掉落物/抛射物/发光精灵/投影的远处褪色
+            // 都读这里（调用点形如 `1f - CalculateFog(...)`）⇒ 原来关雾后它们仍会褪色。
+            return SkylineRuntime.CpuFog(MathUtils.Saturate(num3 + num4), "cpu.fog");
         }
 
         public virtual float CalculateFogNoHazeSurvivalcraft(Vector3 viewPosition, Vector3 position) {
             Vector3 vector = viewPosition - position;
             vector.Y *= VisibilityRangeYMultiplier;
             float num = vector.Length();
-            return MathUtils.Saturate((FogIntegral(viewPosition.Y) - FogIntegral(position.Y)) / (viewPosition.Y - position.Y) * ViewFogDensity * num);
+            // [v0.1.111] 这就是天空穹顶的 `CalculateSkyFog`（看 1000 m 外的雾量）：它决定日月与云的
+            // 雾色混合、以及地平线那一圈白化 —— 原来它**不受 `FogDisabled` 影响**（截图里那条白带）。
+            return SkylineRuntime.CpuFog(
+                MathUtils.Saturate((FogIntegral(viewPosition.Y) - FogIntegral(position.Y)) / (viewPosition.Y - position.Y) * ViewFogDensity * num),
+                "cpu.fogNoHaze");
         }
 
         public virtual float CalculateLightIntensitySurvivalcraft(float timeOfDay) {
@@ -977,7 +990,9 @@ namespace Game {
             - 0.7f * (0.5f - 0.5f * MathF.Cos((m_subsystemGameInfo.WorldSettings.TimeOfYear - SubsystemSeasons.MidSummer) * 2f * MathF.PI));
 
         public virtual float CalculateHazeFactorSurvivalcraft() =>
-            MathUtils.Saturate(m_subsystemWeather.PrecipitationIntensity + 30f * m_viewFogDensity);
+            MathUtils.Saturate(m_subsystemWeather.PrecipitationIntensity
+                               // [v0.1.111] 霾因子里的"雾密度"项随关雾归零（降水项保留：雨天的灰仍然是天气）。
+                               + SkylineRuntime.CpuFog(30f * m_viewFogDensity, "cpu.hazeFactor"));
 
         public virtual Color CalculateSkyColorSurvivalcraft(Vector3 direction, int temperature) {
             float timeOfDay = m_subsystemTimeOfDay.TimeOfDay;

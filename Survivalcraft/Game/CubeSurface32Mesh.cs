@@ -951,9 +951,9 @@ namespace Game {
                 shader.GetParameter("u_fogYMultiplier", true).SetValue(sky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor", true).SetValue(new Vector3(sky.ViewFogColor));
                 shader.GetParameter("u_fogBottomTopDensity", true)
-                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity)));
+                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity), "voxelShell"));
                 shader.GetParameter("u_hazeStartDensity", true)
-                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity)));
+                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity), "voxelShell"));
                 shader.GetParameter("u_texture", true).SetValue(
                     subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
                 Display.BlendState = BlendState.Opaque;

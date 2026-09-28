@@ -7,6 +7,60 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+> 进行中：`SkylineLod.OverdrawPrevention`（DH 的 `overdrawPrevention` 同规格：LOD 从原版视距的
+> 40% 就开始画、再用抖动淡出补边界）。**代码已就位、默认 0 = 逐位保持现状**，尚未实测与发版。
+
+## [v0.1.110] - 2026-09-28
+
+第一百一十七个版本：**把"关雾"从"大部分关掉"做成"真的关干净"**（用户口径：
+"可以将 Fog 关掉以便于测试光影的视觉效果"）。相对 v0.1.109 的变更：
+
+### 1. 三类漏网的雾被找出来，接进同一条变换
+
+`FogDisabled` 从 v0.1.35 起就有，但它只覆盖了 7 处"把 `SubsystemSky.View*` 送进 uniform"的地方。
+本轮逐处审计后补上三类：
+
+| 漏网的东西 | 为什么会漏 | 现在 |
+|---|---|---|
+| 粒子 / 移动方块 / 挖掘裂纹 / 方块选中框 | 这 4 个 pass 把 `ViewFogBottom/Top/Density` 与 `ViewHazeStart/Density` **直接**塞进 uniform | 改走 `SkylineRuntime.FogBand(..., "particles")`、`HazeStartDensity(..., "movingBlocks")` … |
+| 天空穹顶的地平线白化 + 天空色/云的霾灰度 | `CalculateSkyFog` / `CalculateHazeFactor` 是 **CPU 侧**公式，根本不看 uniform | 新增 `SkylineRuntime.CpuFog(...)`，两处一并归零（**降水项保留**：雨天该灰还得灰） |
+| 掉落物 / 抛射物 / 发光精灵 / 投影的远处褪色 | 同上，调用点形如 `1f - CalculateFog(...)` | 同上 |
+
+### 2. 逐 pass 账本 `FogStatus()`
+
+口径：关雾时**每个出现过的 pass 都必须 `zeroed == calls`**，否则 `passesAllZeroed=false`。
+这条判据在本轮直接抓出了上面 4 个漏网 pass（改之前它们**根本不在账本里**）。
+另有 `FogPassesReset()` 清账、`FogDescribe()` 一行摘要。
+
+### 3. 一条调用 `FogAll(bool)`
+
+`FogAll(true)` = 原版几何雾 + 天空穹顶雾 + 实体褪色 + 方块选中框/粒子/移动方块/挖掘裂纹的雾
++ 自研体积雾 / 体积神光 / 远景 LOD 雾 / 彩光雾 **全关**，并返回 `FogStatus()` 的 JSON；
+`FogAll(false)` 一键还原。**测光影只要一条调用**。
+
+### 4. 顺手修掉一个真 bug（自己踩的）
+
+天空穹顶的**顶点色**缓存条件是"时刻 / 降水 / 温度 / 雾密度"四项，关雾开关**不在其中** ⇒
+把开关翻过来后穹顶会继续拿着旧的、发白的顶点色（在"钉住时刻"的测试里尤其明显：改了开关而画面不动）。
+已把 `FogDisabled` 记进缓存条件（`SkyDome.LastUpdateFogDisabled`）。
+
+### 5. 验收（`heightlab/skyline-v0111-fog-coverage.py`）
+
+* **负对照**：雾全开时账本里有 9 个 pass 拿到非零雾 ⇒ 探针是活的（不是"测不出雾"）；
+* **关干净**：`passesAllZeroed=true`，7 层全 false；
+* **像素**（稳定掩膜 + 噪声底）：高台只翻 `FogDisabled` 全网面 **8,907 px vs 噪声底 528 px**；
+  **下到地面高度（雾带内）天空区 3,241 px vs 噪声底 0 px（maxΔ=164）**；
+* **负结果如实记**：高台 y≈339 在雾带（0..150）之外，天空雾按公式**恒为 0**（在那里量它等于白量）；
+  `blockHighlight` 的雾参数只出现在 **VR** 的 fill-highlight 路径（非 VR 描边那支不带雾），
+  `digCracks` 需要挖掘进度而本测试世界是创造模式 ⇒ 这两条只以"代码路径已统一"作证，不冒充像素证据；
+* 回归门禁 **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**，构建 **0 警告 0 错误**。
+
+### 6. 一条会重踩的测试口径
+
+**先改状态、再清零账本**：`FogPassesReset` 与 `FogAll` 是两次 invoke，中间还会渲染 2 帧旧状态
+（实测 terrain 每条多出 332 次 = 2 帧 × 166 块），顺序写反会把"关干净"判据打红成假失败。
+本版还记录了另一条：第一版像素对比没等流式加载收敛，量出 **37.8% 的假信号**（真值 ~1%）。
+
 ## [v0.1.109] - 2026-09-28
 
 第一百一十六个版本：**按 Distant Horizons 的源码规格实装 LOD 的"观感"两项**（里程碑 2 的新口径：

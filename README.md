@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.109**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.110**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -44,6 +44,11 @@
 * **固定光源**：复用引擎的发光方块扫描建立光源列表，逐帧取 K 近邻在片元里做距离衰减
   （`skyline.PointLights(true)` 打开；默认关，关闭时**零代价**，实测数据见笔记）；
 * LOD 参与云层阴影（烘进顶点色）与固定光源亮斑（顶面取**上方空气格**的光）。
+* **关雾（为了看清光影本身）**：`FogDisabled`（默认开）覆盖**全部**吃雾参数的 pass
+  —— 地形三 pass / LOD 两层 / 体素壳 / 静态与蒙皮模型 / 粒子 / 移动方块 / 挖掘裂纹 / 方块选中框
+  / 天空穹顶地平线 / 掉落物与抛射物的远处褪色；加自研体积雾、神光、远景 LOD 雾、彩光雾，
+  **一条调用 `FogAll(true)` 全关**（`false` 还原），`FogStatus()` 给逐 pass 账本
+  （关雾时要求每个 pass 的 `zeroed == calls`）。
 
 **参考环境（工作区内）**
 
@@ -162,5 +167,4 @@ powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
   * Kitão Gameplay's (Discord：ekitonmjjefgs)
 
 > 如果你是 AI Agent，请阅读当前目录的 [AGENTS.md](https://gitee.com/SC-SPM/SurvivalcraftApi/raw/SCAPI1.9/AGENTS.md)
-
 

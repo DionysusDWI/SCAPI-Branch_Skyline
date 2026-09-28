@@ -322,9 +322,9 @@ namespace Game {
                 m_subsystemSky.ViewFogTop - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogDensity
             );
-            modelShader.FogBottomTopDensity = SkylineRuntime.FogBand(modelFogBand);
+            modelShader.FogBottomTopDensity = SkylineRuntime.FogBand(modelFogBand, "models");
             modelShader.HazeStartDensity = SkylineRuntime.HazeStartDensity(
-                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity));
+                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity), "models");
             modelShader.FogYMultiplier = m_subsystemSky.VisibilityRangeYMultiplier;
             modelShader.WorldUp = Vector3.TransformNormal(Vector3.UnitY, camera.ViewMatrix);
             modelShader.Transforms.View = Matrix.Identity;
@@ -459,9 +459,9 @@ namespace Game {
                 m_subsystemSky.ViewFogTop - camera.ViewPosition.Y,
                 m_subsystemSky.ViewFogDensity
             );
-            skinnedShader.FogBottomTopDensity = SkylineRuntime.FogBand(skinnedFogBand);
+            skinnedShader.FogBottomTopDensity = SkylineRuntime.FogBand(skinnedFogBand, "models.skinned");
             skinnedShader.HazeStartDensity = SkylineRuntime.HazeStartDensity(
-                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity));
+                new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity), "models.skinned");
             skinnedShader.FogYMultiplier = m_subsystemSky.VisibilityRangeYMultiplier;
             skinnedShader.WorldUp = Vector3.TransformNormal(Vector3.UnitY, camera.ViewMatrix);
             // 蒙皮模型：World[0] 设置为 ViewMatrix，View 设置为 Identity

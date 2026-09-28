@@ -92,9 +92,14 @@ namespace Game {
                 shader.GetParameter("u_viewPosition").SetValue(camera.ViewPosition);
                 shader.GetParameter("u_fogYMultiplier").SetValue(SubsystemSky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor").SetValue(new Vector3(SubsystemSky.ViewFogColor));
-                shader.GetParameter("u_hazeStartDensity").SetValue(new Vector2(SubsystemSky.ViewHazeStart, SubsystemSky.ViewHazeDensity));
+                // [v0.1.111] 粒子 pass 原来把 View* 直接塞进 uniform ⇒ 关雾关不干净；改走统一变换。
+                shader.GetParameter("u_hazeStartDensity")
+                    .SetValue(SkylineRuntime.HazeStartDensity(
+                        new Vector2(SubsystemSky.ViewHazeStart, SubsystemSky.ViewHazeDensity), "particles"));
                 shader.GetParameter("u_fogBottomTopDensity")
-                    .SetValue(new Vector3(SubsystemSky.ViewFogBottom, SubsystemSky.ViewFogTop, SubsystemSky.ViewFogDensity));
+                    .SetValue(SkylineRuntime.FogBand(
+                        new Vector3(SubsystemSky.ViewFogBottom, SubsystemSky.ViewFogTop, SubsystemSky.ViewFogDensity),
+                        "particles"));
                 shader.GetParameter("u_alphaThreshold").SetValue(0f);
                 ShaderParameter parameter = shader.GetParameter("u_texture");
                 ShaderParameter parameter2 = shader.GetParameter("u_samplerState");

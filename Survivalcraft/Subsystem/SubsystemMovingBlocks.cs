@@ -414,9 +414,14 @@ namespace Game {
                 m_shader.GetParameter("u_samplerState").SetValue(SamplerState.PointClamp);
                 m_shader.GetParameter("u_fogYMultiplier").SetValue(m_subsystemSky.VisibilityRangeYMultiplier);
                 m_shader.GetParameter("u_fogColor").SetValue(new Vector3(m_subsystemSky.ViewFogColor));
+                // [v0.1.111] 移动方块 pass 原来把 View* 直接塞进 uniform ⇒ 关雾关不干净；改走统一变换。
                 m_shader.GetParameter("u_fogBottomTopDensity")
-                    .SetValue(new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity));
-                m_shader.GetParameter("u_hazeStartDensity").SetValue(new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity));
+                    .SetValue(SkylineRuntime.FogBand(
+                        new Vector3(m_subsystemSky.ViewFogBottom, m_subsystemSky.ViewFogTop, m_subsystemSky.ViewFogDensity),
+                        "movingBlocks"));
+                m_shader.GetParameter("u_hazeStartDensity")
+                    .SetValue(SkylineRuntime.HazeStartDensity(
+                        new Vector2(m_subsystemSky.ViewHazeStart, m_subsystemSky.ViewHazeDensity), "movingBlocks"));
                 m_shader.GetParameter("u_alphaThreshold").SetValue(0.5f);
                 Display.DrawIndexed(
                     PrimitiveType.TriangleList,

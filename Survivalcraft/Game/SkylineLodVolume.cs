@@ -817,9 +817,9 @@ void main()
                 shader.GetParameter("u_fogYMultiplier", true).SetValue(sky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor", true).SetValue(new Vector3(sky.ViewFogColor));
                 shader.GetParameter("u_fogBottomTopDensity", true)
-                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity)));
+                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity), "lodVolume"));
                 shader.GetParameter("u_hazeStartDensity", true)
-                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity)));
+                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity), "lodVolume"));
                 // [v0.1.109] DH 规格的两项"观感"：抖动淡出 + 噪声补细节
                 {
                     bool look = SkylineLodLook.Enabled;

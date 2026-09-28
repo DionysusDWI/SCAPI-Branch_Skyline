@@ -157,6 +157,22 @@ namespace Game {
         /// 关掉 = 逐位回到 v0.1.97 的三档行为（A/B 用）。
         /// </summary>
         public static bool UniformBeyondLoaded { get; set; } = true;
+
+        static float m_lastSkipRadius = 200f;
+        /// <summary>[v0.1.110] 最近一次重建时 LOD 的**内边界半径**（米）—— 抖动淡出用它当起点。</summary>
+        public static float LastSkipRadius => m_lastSkipRadius;
+
+        /// <summary>[v0.1.110] **DH 的 `overdrawPrevention` 同规格开关**（0..1，默认 **0 = 保持现状**）。
+        ///
+        /// DH 的语义（源码 `core/util/RenderUtil.java`）：近裁剪面 = `overdrawPrevention × 原版视距`，
+        /// 默认 **0.4** —— 也就是 **LOD 从视距的 40% 就开始画**，再用 `ditherDhFade` 的抖动淡出
+        /// 把"相机附近"那一带化掉。好处：**原版区块缺失/未加载时不会露洞**（LOD 已在下面兜住）。
+        ///
+        /// 本分支的差别（必须如实）：我们的 LOD 在那个带里仍是 **32³ 粗档**（`UniformBeyondLoaded` 默认开），
+        /// 粗档高度是"4 个子单元的中位"，在起伏地形上可能**高于真实地面** ⇒ 会"穿地"。
+        /// 所以本开关默认 0，且**必须与 `SkylineLodLook.DitherFadeStartMetres` 一起用**（抖动淡出掩护重叠带）。
+        /// </summary>
+        public static float OverdrawPrevention { get; set; }
         /// <summary>[v0.1.98] 统一档的单元边长 = CellShift + 本值（默认 4+1 = 5 ⇒ **32 m**）。</summary>
         public static int UniformExtraShift { get; set; } = 1;
 
@@ -1207,7 +1223,12 @@ namespace Game {
                     CellsWithSecond++;
                 }
             }
-            float skipRadius = visualRange + FineSize * 0.5f;                  // 视距内不画（v0.1.0 修复）
+            // [v0.1.110] DH 的 `overdrawPrevention`：默认 0 ⇒ 保持"视距内不画"（v0.1.0 的修复）；
+            // 设为 0.4（DH 默认）⇒ LOD 从**视距的 40%** 就开始画，靠 `SkylineLodLook` 的抖动淡出掩护重叠带。
+            float skipRadius = UniformBeyondLoaded && OverdrawPrevention > 0.001f
+                ? MathF.Max(visualRange * Math.Clamp(OverdrawPrevention, 0f, 1f), FineSize * 0.5f)
+                : visualRange + FineSize * 0.5f;                              // 视距内不画（v0.1.0 修复）
+            m_lastSkipRadius = skipRadius;   // [v0.1.110] 供抖动淡出取"LOD 的实际内边界"
             float fineRange = MathF.Max(visualRange * FineRangeFactor, skipRadius + FineSize * 4f);
             // [v0.1.45] 近环 4 m 层：只覆盖 [skipRadius, skipRadius+NearBandMetres]
             float nearRange = skipRadius + NearBandMetres;
@@ -1871,14 +1892,14 @@ namespace Game {
                 shader.GetParameter("u_fogYMultiplier", true).SetValue(sky.VisibilityRangeYMultiplier);
                 shader.GetParameter("u_fogColor", true).SetValue(new Vector3(sky.ViewFogColor));
                 shader.GetParameter("u_fogBottomTopDensity", true)
-                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity)));
+                    .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity), "lod"));
                 // v0.1.1：**与真实地形共用同一条视图雾曲线**。原来自算 [0.55R, R] 的雾带，
                 // 而原版真实地形在 `视距 × 0.8` 处就已 100% 雾化——两者交界"地形全雾消失 /
                 // LOD 无雾跳出"，交接感明显（用户反馈）。现在 `SkylineAtmosphere.AdjustHazeSpan`
                 // 已把视图雾的跨度拉远到 LOD 半径的 90%，这里直接采用 sky 的 (start, density)，
                 // 两个渲染层在交界处与全程都连续。
                 shader.GetParameter("u_hazeStartDensity", true)
-                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity)));
+                    .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity), "lod"));
                 shader.GetParameter("u_texture", true).SetValue(
                     subsystemTerrain.SubsystemAnimatedTextures.AnimatedBlocksTexture);
                 Display.BlendState = BlendState.Opaque;
