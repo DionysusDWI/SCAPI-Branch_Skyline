@@ -144,6 +144,10 @@ namespace Game {
             //   —— 雾只存在于前者 ⇒ 会把"管道一致"的断言污染成 mean 36/255 的大差（实测踩到）。
             //   自检检查的是**顶点属性/着色器管道**，不是雾；所以期间关掉、结束还原。
             bool savedVolFog = SkylineRuntime.VolumetricFogEnabled;
+            // [v0.1.109] **LOD 观感（抖动淡出 / 噪声补细节）也要先关掉**：它们只存在于体积着色器一侧，
+            //   而这条自检比的是"属性着色器 vs 游戏 Opaque" —— 不关会把 gpuVsCpu 从 mean 0.19 抬到 0.44
+            //   （实测踩到）。同云影/雾的口径：自检期间一律关。
+            bool savedLodLook = SkylineLodLook.Enabled;
             // [v0.1.105] **固定太阳**：坡向明暗与自阴影都用"跟踪到的真太阳"，而世界时间一直在走
             //   ⇒ CPU 烘焙那一次与 GPU 渲染那一次之间太阳会动一点点，极端情况下个别单元的
             //   自阴影可见性会翻转 ⇒ 这条自检**偶发 ok=false**（实测：单独跑 3/3 过；放进巡检/门禁
@@ -193,6 +197,7 @@ namespace Game {
                 SkylineCubeShellStore.RestrictLod = false;
                 SkylineLodCloudShadow.Enabled = false;
                 SkylineRuntime.VolumetricFogEnabled = false;
+                SkylineLodLook.Enabled = false;
                 SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层
                 SkylineLod.SelfShadowStrength = 0f;
                 SkylineRuntime.LodAttrShaderOn = false;
@@ -237,6 +242,7 @@ namespace Game {
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 SkylineLodCloudShadow.Enabled = savedCloudShadow;
                 SkylineRuntime.VolumetricFogEnabled = savedVolFog;
+                SkylineLodLook.Enabled = savedLodLook;
                 RebuildNow();
                 if (attrImage == null || bakedImage == null || gpuImage == null) {
                     result["ok"] = false;
@@ -287,6 +293,7 @@ namespace Game {
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 SkylineLodCloudShadow.Enabled = savedCloudShadow;
                 SkylineRuntime.VolumetricFogEnabled = savedVolFog;
+                SkylineLodLook.Enabled = savedLodLook;
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;

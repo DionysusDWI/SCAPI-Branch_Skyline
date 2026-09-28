@@ -216,6 +216,26 @@ float u_shadowSoftReliefTexels;
 float u_shadowKernel;
 float u_shadowKernelSlopeScale;
 
+// [v0.1.109] DH 规格的两项观感（抖动淡出 + 噪声补细节；见 SkylineLodLook）
+float u_lodDitherFade;
+float u_lodFadeStart;
+float u_lodNoiseEnable;
+float u_lodNoiseSteps;
+float u_lodNoiseIntensity;
+float u_lodNoiseDropoff;
+
+// DH 用 4×4 Bayer 常量数组做抖动；本引擎 GLES 路径不接受 const 数组，
+// 改用 Iris 光影包 Complementary 的 IGN（屏幕空间稳定有序噪声，同一用途）。
+float lodIgn(float2 fragCoord)
+{
+	return frac(52.9829189 * frac(0.06711056 * fragCoord.x + 0.00583715 * fragCoord.y));
+}
+
+// DH `applyNoise` 里的 `rand(vec3) = rand(co.xy + rand(co.z))`，两种方言都按这个写（不用常量数组）
+float lodRand1(float co) { return frac(sin(co * 91.3458) * 47453.5453); }
+float lodRand2(float2 co) { return frac(sin(dot(co, float2(12.9898, 78.233))) * 43758.5453); }
+float lodRand3(float3 co) { return lodRand2(co.xy + lodRand1(co.z)); }
+
 float vfHash12(float2 p)
 {
 	float3 p3 = frac(float3(p.x, p.y, p.x) * 0.1031);
@@ -315,6 +335,34 @@ void main(
 )
 {
 	float4 albedo = v_color * u_texture.Sample(u_samplerState, v_texcoord);
+	// [v0.1.109] DH 规格 · 噪声补细节（`flat_shaded.frag` 的 `applyNoise`）：改的是**基色**，
+	// 且只在正常颜色通道生效（通道 1/2/3 是自检/G-buffer 调试通道，不能被动）。
+	if (u_channel < 0.5 && u_lodNoiseEnable > 0.5)
+	{
+		float lodLum = (albedo.r + albedo.g + albedo.b) / 3.0;
+		float lodAmp = u_lodNoiseIntensity * 0.01
+			* (1.0 - (2.0 * lodLum - 1.0) * (2.0 * lodLum - 1.0)) * albedo.a;
+		float3 lodQ = floor(v_world * max(u_lodNoiseSteps, 0.001)) / max(u_lodNoiseSteps, 0.001);
+		float lodRnd = lodRand3(lodQ) * 2.0 * lodAmp - lodAmp;
+		float3 lodNoisy = albedo.rgb + (1.0 - albedo.rgb) * lodRnd;
+		if (u_lodNoiseDropoff > 0.5)
+		{
+			float lodDistF = min(length(v_world - u_viewPosition) / u_lodNoiseDropoff, 1.0);
+			lodNoisy = lerp(lodNoisy, albedo.rgb, lodDistF);
+		}
+		albedo.rgb = saturate(lodNoisy);
+	}
+	// [v0.1.109] DH 规格 · 抖动淡出（`flat_shaded.frag` 的 `ditherDhFade`）：靠近时按屏幕空间
+	// 抖动概率**丢弃**片元 ⇒ 与真地形的交界是渐隐而不是硬切。抖动用 Iris 侧的 IGN（见 SkylineLodLook）。
+	if (u_channel < 0.5 && u_lodDitherFade > 0.5)
+	{
+		float lodViewDist = length(v_world - u_viewPosition);
+		float lodFade = smoothstep(u_lodFadeStart, u_lodFadeStart * 1.5, lodViewDist);
+		if (lodFade <= lodIgn(sv_position.xy) + 0.001)
+		{
+			discard;
+		}
+	}
 	float3 n = normalize(v_normal);
 	float lit;
 	if (v_slopeTop > 0.5)
@@ -471,6 +519,24 @@ uniform float u_shadowSoftReliefTexels;
 uniform float u_shadowKernel;
 uniform float u_shadowKernelSlopeScale;
 
+// [v0.1.109] DH 规格的两项观感（见 SkylineLodLook 的文档）
+uniform float u_lodDitherFade;
+uniform float u_lodFadeStart;
+uniform float u_lodNoiseEnable;
+uniform float u_lodNoiseSteps;
+uniform float u_lodNoiseIntensity;
+uniform float u_lodNoiseDropoff;
+
+// 与 HLSL 段同一组辅助函数（IGN 抖动 + DH 的 rand(vec3)）
+float lodIgn(vec2 fragCoord)
+{
+	return fract(52.9829189 * fract(0.06711056 * fragCoord.x + 0.00583715 * fragCoord.y));
+}
+
+float lodRand1(float co) { return fract(sin(co * 91.3458) * 47453.5453); }
+float lodRand2(vec2 co) { return fract(sin(dot(co, vec2(12.9898, 78.233))) * 43758.5453); }
+float lodRand3(vec3 co) { return lodRand2(co.xy + lodRand1(co.z)); }
+
 varying vec4 v_color;
 varying vec2 v_texcoord;
 varying vec3 v_normal;
@@ -569,6 +635,32 @@ float sunShaftVisibility(vec3 p)
 void main()
 {
 	vec4 albedo = v_color * texture2D(u_texture, v_texcoord);
+	// [v0.1.109] DH 规格 · 噪声补细节（与 HLSL 段同一算法）
+	if (u_channel < 0.5 && u_lodNoiseEnable > 0.5)
+	{
+		float lodLum = (albedo.r + albedo.g + albedo.b) / 3.0;
+		float lodAmp = u_lodNoiseIntensity * 0.01
+			* (1.0 - (2.0 * lodLum - 1.0) * (2.0 * lodLum - 1.0)) * albedo.a;
+		vec3 lodQ = floor(v_world * max(u_lodNoiseSteps, 0.001)) / max(u_lodNoiseSteps, 0.001);
+		float lodRnd = lodRand3(lodQ) * 2.0 * lodAmp - lodAmp;
+		vec3 lodNoisy = albedo.rgb + (1.0 - albedo.rgb) * lodRnd;
+		if (u_lodNoiseDropoff > 0.5)
+		{
+			float lodDistF = min(length(v_world - u_viewPosition) / u_lodNoiseDropoff, 1.0);
+			lodNoisy = mix(lodNoisy, albedo.rgb, lodDistF);
+		}
+		albedo.rgb = clamp(lodNoisy, 0.0, 1.0);
+	}
+	// [v0.1.109] DH 规格 · 抖动淡出（与 HLSL 段同一算法）
+	if (u_channel < 0.5 && u_lodDitherFade > 0.5)
+	{
+		float lodViewDist = length(v_world - u_viewPosition);
+		float lodFade = smoothstep(u_lodFadeStart, u_lodFadeStart * 1.5, lodViewDist);
+		if (lodFade <= lodIgn(gl_FragCoord.xy) + 0.001)
+		{
+			discard;
+		}
+	}
 	vec3 n = normalize(v_normal);
 	float lit;
 	if (v_slopeTop > 0.5)
@@ -728,6 +820,24 @@ void main()
                     .SetValue(SkylineRuntime.FogBand(new Vector3(sky.ViewFogBottom, sky.ViewFogTop, sky.ViewFogDensity)));
                 shader.GetParameter("u_hazeStartDensity", true)
                     .SetValue(SkylineRuntime.HazeStartDensity(new Vector2(sky.ViewHazeStart, sky.ViewHazeDensity)));
+                // [v0.1.109] DH 规格的两项"观感"：抖动淡出 + 噪声补细节
+                {
+                    bool look = SkylineLodLook.Enabled;
+                    float fadeStart = SkylineLodLook.DitherFadeStartMetres > 0.5f
+                        ? SkylineLodLook.DitherFadeStartMetres
+                        : SettingsManager.VisibilityRange;
+                    shader.GetParameter("u_lodDitherFade", true)
+                        .SetValue(look && SkylineLodLook.DitherFade ? 1f : 0f);
+                    shader.GetParameter("u_lodFadeStart", true).SetValue(fadeStart);
+                    shader.GetParameter("u_lodNoiseEnable", true)
+                        .SetValue(look && SkylineLodLook.NoiseEnabled && SkylineLodLook.NoiseIntensity > 0f ? 1f : 0f);
+                    shader.GetParameter("u_lodNoiseSteps", true)
+                        .SetValue(Math.Max(SkylineLodLook.NoiseSteps, 0.25f));
+                    shader.GetParameter("u_lodNoiseIntensity", true)
+                        .SetValue(Math.Max(SkylineLodLook.NoiseIntensity, 0f));
+                    shader.GetParameter("u_lodNoiseDropoff", true)
+                        .SetValue(Math.Max(SkylineLodLook.NoiseDropoff, 0f));
+                }
                 Display.BlendState = BlendState.Opaque;
                 Display.DepthStencilState = DepthStencilState.Default;
                 Display.RasterizerState = RasterizerState.CullCounterClockwiseScissor;

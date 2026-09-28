@@ -7,6 +7,61 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.109] - 2026-09-28
+
+第一百一十六个版本：**按 Distant Horizons 的源码规格实装 LOD 的"观感"两项**（里程碑 2 的新口径：
+"全面学习 DH，源码可复用与迁移，尽可能做到同等规格"）+ **远端 README 精简到 1 万字符以内**。
+相对 v0.1.108 的变更：
+
+### 1. 取到 DH 源码（本机克隆，含 core 子模块）
+
+`.resource/refs/distant-horizons/`（`--depth 1` + `coreSubProjects` 子模块），
+关键着色器在 `coreSubProjects/core/src/main/resources/shaders/`。
+从 `flat_shaded.frag` 读出 DH 的两条"观感规格"与它们的**默认参数**：
+
+| DH 配置 | 默认 | 作用 |
+|---|---|---|
+| `ditherDhFade` | **true** | 靠近时按屏幕空间抖动概率**丢弃** LOD 片元 ⇒ 与真地形交界渐隐而不是硬切 |
+| `noiseSteps` / `noiseIntensity` / `noiseDropoff` | **4 / 5 / 1024** | 按**量化世界坐标**取随机数给基色加噪 ⇒ 粗单元不再是一整块平色，并随距离淡出 |
+
+### 2. 实装（`SkylineLodLook`，默认全开 = 与 DH 同规格）
+
+* **抖动淡出**：`fade = smoothstep(start, start*1.5, dist)`，`fade <= 抖动值` 就 `discard`；
+  DH 用 4×4 Bayer **常量数组**，而本引擎 GLES 路径**不接受 const 数组**（v0.1.102 踩过）⇒
+  改用 **Iris 光影包 Complementary 的 IGN**（`fract(52.9829189*fract(0.06711056x+0.00583715y))`，
+  同类屏幕空间稳定有序抖动，且出自本轮主要参考对象）；
+* **噪声补细节**：`amp = intensity*0.01 * (1-(2*lum-1)^2) * alpha`（暗/亮两端减弱），
+  `rand(floor(world*steps)/steps)` 双向推色，再 `mix(newCol, c, min(dist/dropoff,1))` 随距离淡出；
+* 两项都**只在正常颜色通道生效**（`u_channel < 0.5`），不污染 G-buffer/自检调试通道。
+
+### 3. 验收
+
+| 判据 | 实测（俯视 LOD 场景、关雾、冻风、钉时刻、关 LOD 云影） |
+|---|---|
+| 噪声单独开 | **1,341 px** |
+| 抖动淡出单独开 | **1,417 px** |
+| 噪声底（同设置重拍） | **0 px** |
+| 门禁 | **PASS 18 / FAIL 0 / SKIP 0 / KNOWN 0**；构建 **0 警告 0 错误** |
+
+**顺手抓到并修掉**：`AttrSelfCheck` 的门禁被新观感打红（`gpuVsCpu` 0.187 → **0.438**）——
+原因是这两项只存在于体积着色器一侧。按既有口径（自检期间临时关云影、关雾）把 LOD 观感也一并关掉，
+恢复 0.187。
+
+### 4. README 精简（用户新要求：≤10000 字符）
+
+远端 `README.md` 由 **70,853 → 6,685 字符**（−943/+46 行）：删掉逐版特性长表（历史移交
+`CHANGELOG-Skyline.md`），只保留"当前能力清单 + 构建/运行 + 文档入口"。
+
+### 5. 如实记
+
+* 本机场景下两项观感的像素量级是**千级（0.1~0.2%）**——DH 的默认参数本身保守（噪声强度 5%）；
+* 抖动淡出会让"同设置连拍"的稳定掩膜从 ~95% 降到 ~92%（被丢的片元随 LOD 网格重建而变），
+  所以 A/B 必须用**稳定掩膜**看信号，这一点已写进脚本；
+* **没做**：DH 的 `overdrawPrevention`（把 LOD 起点按原版视距的百分比前移）、DH 的四叉树 LOD 存储与
+  `DhSectionPos` 级联——那是"同规格"的下一大步。
+
+证据：`data/sessions/skyline-v0109/`；笔记 `notes/205`；DH 源码：`.resource/refs/distant-horizons/`。
+
 ## [v0.1.108] - 2026-09-28
 
 第一百一十五个版本：**按新口径把阴影侧换成 Iris 的实现** —— 远处阴影**距离淡出**。
