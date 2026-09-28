@@ -204,6 +204,10 @@ float u_shadowStrength;
 // [v0.1.112] 昼光因子（阴影强度按昼光缩放；本层只用于体积神光的可见性判定，但 uniform 必须声明，
 //   否则共享的 BindShadowFogParams 会在缺参数处抛异常、后面那一串雾 uniform 全部绑不上）
 float u_shadowDayFactor;
+// [v0.1.115] 里程碑 2.3：**LOD 的体素也接收太阳阴影**（同一张太阳深度图）
+float u_lodShadowReceive;
+float u_shadowFadeStart;
+float u_shadowFadeEnd;
 float u_shadowFlipY;
 float u_shadowDepth16;
 float u_shadowEnable;
@@ -402,6 +406,20 @@ void main(
 		return;
 	}
 	float3 rgb = lerp(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);
+	// [v0.1.115] 里程碑 2.3：**LOD 的体素也接收太阳阴影**（与地形同一张深度图、同一 bias、同一昼光因子）。
+	//   出图 = 照到（与地形「图外即受光」同口径）；`u_shadowFade*` 用与地形同一条远处淡出。
+	if (u_lodShadowReceive > 0.5)
+	{
+		float lodShadowLit = sunShaftVisibility(v_world);
+		float lodShadowDist = length(v_world - u_viewPosition);
+		float lodShadowFade = 1.0;
+		if (u_shadowFadeEnd > u_shadowFadeStart)
+		{
+			lodShadowFade = 1.0 - smoothstep(u_shadowFadeStart, u_shadowFadeEnd, lodShadowDist);
+		}
+		lit *= 1.0 - u_shadowStrength * u_shadowDayFactor * lodShadowFade * (1.0 - lodShadowLit);
+		rgb = lerp(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);   // 阴影改的是 lit ⇒ 重算一次
+	}
 	// [v0.1.105] **体积雾 + 体积神光接到 LOD 层**：原来这一层只有「被 FogDisabled 置 0 的原版雾」
 	//   ⇒ 远景 LOD 上完全没有我们的体积雾（`notes/169 §3`、`notes/194 §6` 都记过这条缺口）。
 	//   现在与真地形的不透明变体用**逐字相同的算法**（8 步积分 + 单次散射神光）。
@@ -508,6 +526,10 @@ uniform float u_nearCascade;
 uniform float u_shadowBias;
 uniform float u_shadowStrength;
 uniform float u_shadowDayFactor;
+// [v0.1.115] 里程碑 2.3：LOD 的体素也接收太阳阴影（同一张太阳深度图）
+uniform float u_lodShadowReceive;
+uniform float u_shadowFadeStart;
+uniform float u_shadowFadeEnd;
 uniform float u_shadowFlipY;
 uniform float u_shadowDepth16;
 uniform float u_shadowEnable;
@@ -704,6 +726,20 @@ void main()
 		return;
 	}
 	vec3 rgb = mix(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);
+	// [v0.1.115] 里程碑 2.3：**LOD 的体素也接收太阳阴影**（与 HLSL 段/地形同一口径：
+	//   同一张太阳深度图、同一 bias、同一昼光因子与远处淡出；出图 = 照到）
+	if (u_lodShadowReceive > 0.5)
+	{
+		float lodShadowLit = sunShaftVisibility(v_world);
+		float lodShadowDist = length(v_world - u_viewPosition);
+		float lodShadowFade = 1.0;
+		if (u_shadowFadeEnd > u_shadowFadeStart)
+		{
+			lodShadowFade = 1.0 - smoothstep(u_shadowFadeStart, u_shadowFadeEnd, lodShadowDist);
+		}
+		lit *= 1.0 - u_shadowStrength * u_shadowDayFactor * lodShadowFade * (1.0 - lodShadowLit);
+		rgb = mix(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);
+	}
 	// [v0.1.105] 体积雾 + 体积神光接到 LOD 层（与 HLSL 段同一算法）
 	if (u_vfEnable > 0.5)
 	{

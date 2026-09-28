@@ -422,6 +422,20 @@ namespace Game {
             GpuShadowSampleEnabled && m_gpuShadowHasMap && m_gpuShadowRt != null;
 
         /// <summary>
+        /// **[v0.1.115] 里程碑 2.3：LOD 层是否接收太阳阴影**（默认 **false**，先按可选发）。
+        ///
+        /// 为什么之前没有：LOD 着色器里本来只有"体积神光的可见性判定"（`sunShaftVisibility`），
+        /// **没有把阴影乘到 LOD 表面上** —— 而 goal 的 2.3 明确要求"LOD 的体素也要参与软阴影计算
+        /// （Iris 产生的太阳阴影、云层阴影、固定光源亮度斑块）"。
+        /// 本开关把与地形**同一张**太阳深度图、同一 bias、同一昼光因子与远处淡出接到 LOD 的 `lit` 上。
+        ///
+        /// 为什么默认关（先量再定）：DH 与 Iris 的参考实现**默认不让远景层接收阴影**
+        /// （`dhShadow.enabled=false`；v0.1.106 的笔记已记过这条"双重压暗"的顾虑），
+        /// 而我们的 LOD 已经有"烘进顶点色的自阴影 + 云影"，再叠一层实时阴影可能偏暗。
+        /// </summary>
+        public static bool LodShadowReceive { get; set; }
+
+        /// <summary>
         /// **[v0.1.112] 阴影的"昼光因子"**（0..1）：太阳阴影的强度必须跟着**昼光**走。
         ///
         /// 为什么必须加：本分支的阴影判定只问"这一点在深度图后面吗"，**不看太阳还照不照得亮**。
@@ -538,6 +552,9 @@ namespace Game {
                     .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.4f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
                 shader.GetParameter("u_shadowFadeEnd", true)
                     .SetValue(Math.Max(GpuShadowFadeScale, 0f) * 0.9f * Math.Max(m_gpuShadowRadiusAtCapture, 1f));
+                // [v0.1.115] 里程碑 2.3：LOD 层接收太阳阴影（只有 LOD 着色器声明了这个 uniform；
+                //   地形那条路有自己的绑定块，用不到它）
+                shader.GetParameter("u_lodShadowReceive", true).SetValue(LodShadowReceive ? 1f : 0f);
                 // [v0.1.114] 屏幕空间 AO（默认关；关掉时 u_aoEnable=0 ⇒ 画面逐位不变）
                 string aoErr = BindScreenAo(shader);
                 if (aoErr.Length > 0) {
