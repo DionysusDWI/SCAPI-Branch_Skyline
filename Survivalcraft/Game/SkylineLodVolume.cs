@@ -80,6 +80,7 @@ void main(
 	out float3 v_normal : TEXCOORD2,
 	out float v_matid : TEXCOORD3,
 	out float v_slopeTop : TEXCOORD4,
+	out float3 v_world : TEXCOORD5,
 	out float v_fog : FOG,
 	out float4 sv_position: SV_POSITION
 )
@@ -89,6 +90,7 @@ void main(
 	v_normal = a_normal.xyz * 2.0 - 1.0;
 	v_matid = a_matid;
 	v_slopeTop = a_normal.w;
+	v_world = a_position;
 	v_fog = calculateFog(a_position);
 	sv_position = mul(float4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0), u_viewProjectionMatrix);
 }
@@ -122,6 +124,7 @@ varying vec2 v_texcoord;
 varying vec3 v_normal;
 varying float v_matid;
 varying float v_slopeTop;
+varying vec3 v_world;
 varying float v_fog;
 
 float fogIntegral(float y)
@@ -145,6 +148,7 @@ void main()
 	v_normal = a_normal.xyz * 2.0 - 1.0;
 	v_matid = a_matid;
 	v_slopeTop = a_normal.w;
+	v_world = a_position;
 	v_fog = calculateFog(a_position);
 	gl_Position = u_viewProjectionMatrix * vec4(a_position.x - u_origin.x, a_position.y, a_position.z - u_origin.y, 1.0);
 	OPENGL_POSITION_FIX;
@@ -164,6 +168,140 @@ float u_slopeStrength;
 float u_sunAmount;
 float u_channel;
 float3 u_fogColor;
+// [v0.1.105] 体积雾 + 体积神光 + 阴影图（由 `SkylineRuntime.BindShadowFogParams` 统一绑定；
+// 本文件只负责**消费**，口径与真地形的不透明变体逐字相同）
+float3 u_viewPosition;
+float u_vfEnable;
+float u_vfBottomY;
+float u_vfTopY;
+float u_vfDensity;
+float u_vfScale;
+float2 u_vfWind;
+float u_vfThreshold;
+float u_vfStrength;
+float3 u_vfColor;
+float u_vfSkyMix;
+float u_vfMaxDistance;
+float u_vfShear;
+float u_vfSunShaft;
+float3 u_vfSunColor;
+float u_vfPhasePower;
+Texture2D u_shadowMap;
+SamplerState u_shadowSampler;
+Texture2D u_shadowMapNear;
+SamplerState u_shadowSamplerNear;
+float4x4 u_sunViewProjection;
+float4x4 u_sunViewProjectionNear;
+float2 u_sunOrigin;
+float2 u_sunOriginNear;
+float3 u_eye;
+float3 u_eyeNear;
+float u_depthMax;
+float u_depthMaxNear;
+float u_nearCascade;
+float u_shadowBias;
+float u_shadowStrength;
+float u_shadowFlipY;
+float u_shadowDepth16;
+float u_shadowEnable;
+float u_shadowDebug;
+float u_shadowSoft;
+float u_shadowSoftRadius;
+float u_shadowTexelFar;
+float u_shadowTexelNear;
+float u_shadowReliefFar;
+float u_shadowReliefNear;
+float u_shadowSoftSlopeBias;
+float u_shadowSoftReliefTexels;
+float u_shadowKernel;
+float u_shadowKernelSlopeScale;
+
+float vfHash12(float2 p)
+{
+	float3 p3 = frac(float3(p.x, p.y, p.x) * 0.1031);
+	p3 += dot(p3, float3(p3.y, p3.z, p3.x) + 33.33);
+	return frac((p3.x + p3.y) * p3.z);
+}
+
+float vfNoise2(float2 p)
+{
+	float2 i = floor(p);
+	float2 f = frac(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = vfHash12(i);
+	float b = vfHash12(i + float2(1.0, 0.0));
+	float c = vfHash12(i + float2(0.0, 1.0));
+	float d = vfHash12(i + float2(1.0, 1.0));
+	return lerp(lerp(a, b, f.x), lerp(c, d, f.x), f.y);
+}
+
+float vfHeightAt(float3 p)
+{
+	return (p.y - u_vfBottomY) / max(u_vfTopY - u_vfBottomY, 0.001);
+}
+
+float vfDensityAt(float3 p)
+{
+	float h = vfHeightAt(p);
+	if (h < 0.0 || h > 1.0)
+	{
+		return 0.0;
+	}
+	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
+	float2 q = (p.xz + p.y * u_vfShear * float2(1.7, 1.1)) * u_vfScale + u_vfWind;
+	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + float2(5.1, 9.7)) * 0.3;
+	return max(0.0, n - u_vfThreshold) * prof;
+}
+
+float decodeShadowDepth(float4 texel)
+{
+	if (u_shadowDepth16 > 0.5)
+	{
+		float hi = floor(texel.r * 255.0 + 0.5);
+		float lo = floor(texel.g * 255.0 + 0.5);
+		return (hi * 256.0 + lo) / 65535.0;
+	}
+	return texel.r;
+}
+
+float2 shadowUv(float4 clip, float flipY)
+{
+	float2 uv = float2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+	if (flipY > 0.5)
+	{
+		uv.y = 1.0 - uv.y;
+	}
+	return uv;
+}
+
+float sunShaftVisibility(float3 p)
+{
+	if (u_shadowEnable < 0.5)
+	{
+		return 1.0;
+	}
+	float3 relFar = float3(p.x - u_sunOrigin.x, p.y, p.z - u_sunOrigin.y);
+	float2 uvFarS = shadowUv(mul(float4(relFar, 1.0), u_sunViewProjection), u_shadowFlipY);
+	float3 relNear = float3(p.x - u_sunOriginNear.x, p.y, p.z - u_sunOriginNear.y);
+	float2 uvNearS = shadowUv(mul(float4(relNear, 1.0), u_sunViewProjectionNear), u_shadowFlipY);
+	bool inFarS = uvFarS.x >= 0.0 && uvFarS.x <= 1.0 && uvFarS.y >= 0.0 && uvFarS.y <= 1.0;
+	bool inNearS = u_nearCascade > 0.5 && uvNearS.x >= 0.0 && uvNearS.x <= 1.0
+		&& uvNearS.y >= 0.0 && uvNearS.y <= 1.0;
+	if (!inFarS && !inNearS)
+	{
+		return 1.0;
+	}
+	float shaftDepthMax = inNearS ? u_depthMaxNear : u_depthMax;
+	float3 shaftEye = inNearS ? u_eyeNear : u_eye;
+	float shaftDepth = saturate(dot(shaftEye - p, u_sunDir) / max(shaftDepthMax, 0.0001));
+	float shaftMap = inNearS
+		? decodeShadowDepth(u_shadowMapNear.Sample(u_shadowSamplerNear, uvNearS))
+		: decodeShadowDepth(u_shadowMap.Sample(u_shadowSampler, uvFarS));
+	float shaftRelief = inNearS ? u_shadowReliefNear : u_shadowReliefFar;
+	float shaftBias = u_shadowBias
+		+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale * shaftRelief;
+	return shaftDepth <= shaftMap + shaftBias ? 1.0 : 0.0;
+}
 
 void main(
 	in float4 v_color : COLOR,
@@ -171,6 +309,7 @@ void main(
 	in float3 v_normal : TEXCOORD2,
 	in float v_matid : TEXCOORD3,
 	in float v_slopeTop : TEXCOORD4,
+	in float3 v_world : TEXCOORD5,
 	in float v_fog: FOG,
 	out float4 svTarget: SV_TARGET
 )
@@ -212,6 +351,57 @@ void main(
 		return;
 	}
 	float3 rgb = lerp(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);
+	// [v0.1.105] **体积雾 + 体积神光接到 LOD 层**：原来这一层只有「被 FogDisabled 置 0 的原版雾」
+	//   ⇒ 远景 LOD 上完全没有我们的体积雾（`notes/169 §3`、`notes/194 §6` 都记过这条缺口）。
+	//   现在与真地形的不透明变体用**逐字相同的算法**（8 步积分 + 单次散射神光）。
+	if (u_vfEnable > 0.5)
+	{
+		float3 vfDelta = v_world - u_viewPosition;
+		float vfLen = length(vfDelta);
+		if (vfLen > 0.001)
+		{
+			float3 vfRd = vfDelta / vfLen;
+			float vfT0 = 0.0;
+			float vfT1 = min(vfLen, u_vfMaxDistance);
+			if (abs(vfRd.y) > 1e-5)
+			{
+				float vfTa = (u_vfBottomY - u_viewPosition.y) / vfRd.y;
+				float vfTb = (u_vfTopY - u_viewPosition.y) / vfRd.y;
+				vfT0 = max(vfT0, min(vfTa, vfTb));
+				vfT1 = min(vfT1, max(vfTa, vfTb));
+			}
+			else if (u_viewPosition.y < u_vfBottomY || u_viewPosition.y > u_vfTopY)
+			{
+				vfT1 = 0.0;
+			}
+			if (vfT1 > vfT0)
+			{
+				float vfDt = (vfT1 - vfT0) * 0.125;
+				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
+				float vfOd = 0.0;
+				float vfScat = 0.0;
+				for (int vfI = 0; vfI < 8; vfI++)
+				{
+					float3 vfP = u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * (float(vfI) + 0.5));
+					float vfD = vfDensityAt(vfP);
+					vfOd += vfD;
+					vfScat += vfD * sunShaftVisibility(vfP);
+				}
+				float vfOdScale = vfDt * u_vfDensity;
+				float vfOdRaw = max(vfOd, 1e-5);
+				vfOd *= vfOdScale;
+				float vfAlpha = saturate((1.0 - exp(-vfOd)) * u_vfStrength);
+				float3 vfCol = lerp(u_vfColor, max(u_fogColor, float3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				rgb = lerp(rgb, vfCol, vfAlpha);
+				if (u_vfSunShaft > 0.0)
+				{
+					float vfPhase = 0.25 + 0.75 * pow(saturate(dot(vfRd, u_sunDir)), u_vfPhasePower);
+					float vfLit = saturate(vfScat / vfOdRaw);
+					rgb += u_vfSunColor * (vfLit * vfAlpha * vfPhase * u_vfSunShaft);
+				}
+			}
+		}
+	}
 	svTarget = float4(rgb, albedo.a);
 }
 
@@ -219,6 +409,10 @@ void main(
 #ifdef GLSL
 
 // <Sampler Name='u_samplerState' Texture='u_texture' />
+// [v0.1.105] 阴影图的两个采样器必须在这里登记（引擎的 shader 元数据要求），否则绑定时会报
+// 「Texture u_shadowMap has no sampler defined in shader metadata」并让整支 LOD 着色器准备失败。
+// <Sampler Name='u_shadowSampler' Texture='u_shadowMap' />
+// <Sampler Name='u_shadowSamplerNear' Texture='u_shadowMapNear' />
 
 precision highp float;
 
@@ -232,12 +426,145 @@ uniform float u_sunAmount;
 uniform float u_channel;
 uniform vec3 u_fogColor;
 
+// [v0.1.105] 体积雾 + 体积神光 + 阴影图（由 `SkylineRuntime.BindShadowFogParams` 统一绑定）
+uniform vec3 u_viewPosition;
+uniform float u_vfEnable;
+uniform float u_vfBottomY;
+uniform float u_vfTopY;
+uniform float u_vfDensity;
+uniform float u_vfScale;
+uniform vec2 u_vfWind;
+uniform float u_vfThreshold;
+uniform float u_vfStrength;
+uniform vec3 u_vfColor;
+uniform float u_vfSkyMix;
+uniform float u_vfMaxDistance;
+uniform float u_vfShear;
+uniform float u_vfSunShaft;
+uniform vec3 u_vfSunColor;
+uniform float u_vfPhasePower;
+uniform sampler2D u_shadowMap;
+uniform sampler2D u_shadowMapNear;
+uniform mat4 u_sunViewProjection;
+uniform mat4 u_sunViewProjectionNear;
+uniform vec2 u_sunOrigin;
+uniform vec2 u_sunOriginNear;
+uniform vec3 u_eye;
+uniform vec3 u_eyeNear;
+uniform float u_depthMax;
+uniform float u_depthMaxNear;
+uniform float u_nearCascade;
+uniform float u_shadowBias;
+uniform float u_shadowStrength;
+uniform float u_shadowFlipY;
+uniform float u_shadowDepth16;
+uniform float u_shadowEnable;
+uniform float u_shadowDebug;
+uniform float u_shadowSoft;
+uniform float u_shadowSoftRadius;
+uniform float u_shadowTexelFar;
+uniform float u_shadowTexelNear;
+uniform float u_shadowReliefFar;
+uniform float u_shadowReliefNear;
+uniform float u_shadowSoftSlopeBias;
+uniform float u_shadowSoftReliefTexels;
+uniform float u_shadowKernel;
+uniform float u_shadowKernelSlopeScale;
+
 varying vec4 v_color;
 varying vec2 v_texcoord;
 varying vec3 v_normal;
 varying float v_matid;
 varying float v_slopeTop;
 varying float v_fog;
+varying vec3 v_world;
+
+float vfHash12(vec2 p)
+{
+	vec3 p3 = fract(vec3(p.x, p.y, p.x) * 0.1031);
+	p3 += dot(p3, vec3(p3.y, p3.z, p3.x) + 33.33);
+	return fract((p3.x + p3.y) * p3.z);
+}
+
+float vfNoise2(vec2 p)
+{
+	vec2 i = floor(p);
+	vec2 f = fract(p);
+	f = f * f * (3.0 - 2.0 * f);
+	float a = vfHash12(i);
+	float b = vfHash12(i + vec2(1.0, 0.0));
+	float c = vfHash12(i + vec2(0.0, 1.0));
+	float d = vfHash12(i + vec2(1.0, 1.0));
+	return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
+float vfHeightAt(vec3 p)
+{
+	return (p.y - u_vfBottomY) / max(u_vfTopY - u_vfBottomY, 0.001);
+}
+
+float vfDensityAt(vec3 p)
+{
+	float h = vfHeightAt(p);
+	if (h < 0.0 || h > 1.0)
+	{
+		return 0.0;
+	}
+	float prof = smoothstep(0.0, 0.15, h) * smoothstep(1.0, 0.7, h);
+	vec2 q = (p.xz + p.y * u_vfShear * vec2(1.7, 1.1)) * u_vfScale + u_vfWind;
+	float n = vfNoise2(q) * 0.7 + vfNoise2(q * 2.3 + vec2(5.1, 9.7)) * 0.3;
+	return max(0.0, n - u_vfThreshold) * prof;
+}
+
+float decodeShadowDepth(vec4 texel)
+{
+	if (u_shadowDepth16 > 0.5)
+	{
+		float hi = floor(texel.r * 255.0 + 0.5);
+		float lo = floor(texel.g * 255.0 + 0.5);
+		return (hi * 256.0 + lo) / 65535.0;
+	}
+	return texel.r;
+}
+
+vec2 shadowUv(vec4 clip, float flipY)
+{
+	vec2 uv = vec2(clip.x * 0.5 + 0.5, 0.5 - clip.y * 0.5);
+	if (flipY > 0.5)
+	{
+		uv.y = 1.0 - uv.y;
+	}
+	return uv;
+}
+
+float sunShaftVisibility(vec3 p)
+{
+	if (u_shadowEnable < 0.5)
+	{
+		return 1.0;
+	}
+	vec3 relFar = vec3(p.x - u_sunOrigin.x, p.y, p.z - u_sunOrigin.y);
+	vec2 uvFarS = shadowUv(u_sunViewProjection * vec4(relFar, 1.0), u_shadowFlipY);
+	vec3 relNear = vec3(p.x - u_sunOriginNear.x, p.y, p.z - u_sunOriginNear.y);
+	vec2 uvNearS = shadowUv(u_sunViewProjectionNear * vec4(relNear, 1.0), u_shadowFlipY);
+	bool inFarS = uvFarS.x >= 0.0 && uvFarS.x <= 1.0 && uvFarS.y >= 0.0 && uvFarS.y <= 1.0;
+	bool inNearS = u_nearCascade > 0.5 && uvNearS.x >= 0.0 && uvNearS.x <= 1.0
+		&& uvNearS.y >= 0.0 && uvNearS.y <= 1.0;
+	if (!inFarS && !inNearS)
+	{
+		return 1.0;
+	}
+	float shaftDepthMax = inNearS ? u_depthMaxNear : u_depthMax;
+	vec3 shaftEye = inNearS ? u_eyeNear : u_eye;
+	float shaftDepth = clamp(dot(shaftEye - p, u_sunDir) / max(shaftDepthMax, 0.0001), 0.0, 1.0);
+	float shaftMap = inNearS
+		? decodeShadowDepth(texture2D(u_shadowMapNear, uvNearS))
+		: decodeShadowDepth(texture2D(u_shadowMap, uvFarS));
+	float shaftRelief = inNearS ? u_shadowReliefNear : u_shadowReliefFar;
+	float shaftBias = u_shadowBias
+		+ u_shadowSoftSlopeBias * u_shadowSoftRadius * u_shadowKernelSlopeScale * shaftRelief;
+	return shaftDepth <= shaftMap + shaftBias ? 1.0 : 0.0;
+}
 
 void main()
 {
@@ -280,7 +607,57 @@ void main()
 		gl_FragColor = vec4(lit, lit, lit, 1.0);
 		return;
 	}
-	gl_FragColor = vec4(mix(albedo.rgb * lit, u_fogColor * v_color.a, v_fog), albedo.a);
+	vec3 rgb = mix(albedo.rgb * lit, u_fogColor * v_color.a, v_fog);
+	// [v0.1.105] 体积雾 + 体积神光接到 LOD 层（与 HLSL 段同一算法）
+	if (u_vfEnable > 0.5)
+	{
+		vec3 vfDelta = v_world - u_viewPosition;
+		float vfLen = length(vfDelta);
+		if (vfLen > 0.001)
+		{
+			vec3 vfRd = vfDelta / vfLen;
+			float vfT0 = 0.0;
+			float vfT1 = min(vfLen, u_vfMaxDistance);
+			if (abs(vfRd.y) > 1e-5)
+			{
+				float vfTa = (u_vfBottomY - u_viewPosition.y) / vfRd.y;
+				float vfTb = (u_vfTopY - u_viewPosition.y) / vfRd.y;
+				vfT0 = max(vfT0, min(vfTa, vfTb));
+				vfT1 = min(vfT1, max(vfTa, vfTb));
+			}
+			else if (u_viewPosition.y < u_vfBottomY || u_viewPosition.y > u_vfTopY)
+			{
+				vfT1 = 0.0;
+			}
+			if (vfT1 > vfT0)
+			{
+				float vfDt = (vfT1 - vfT0) * 0.125;
+				float vfJit = vfHash12(v_world.xz * 41.0) * vfDt;
+				float vfOd = 0.0;
+				float vfScat = 0.0;
+				for (int vfI = 0; vfI < 8; vfI++)
+				{
+					vec3 vfP = u_viewPosition + vfRd * (vfT0 + vfJit + vfDt * (float(vfI) + 0.5));
+					float vfD = vfDensityAt(vfP);
+					vfOd += vfD;
+					vfScat += vfD * sunShaftVisibility(vfP);
+				}
+				float vfOdScale = vfDt * u_vfDensity;
+				float vfOdRaw = max(vfOd, 1e-5);
+				vfOd *= vfOdScale;
+				float vfAlpha = clamp((1.0 - exp(-vfOd)) * u_vfStrength, 0.0, 1.0);
+				vec3 vfCol = mix(u_vfColor, max(u_fogColor, vec3(0.02, 0.02, 0.02)), u_vfSkyMix);
+				rgb = mix(rgb, vfCol, vfAlpha);
+				if (u_vfSunShaft > 0.0)
+				{
+					float vfPhase = 0.25 + 0.75 * pow(clamp(dot(vfRd, u_sunDir), 0.0, 1.0), u_vfPhasePower);
+					float vfLit = clamp(vfScat / vfOdRaw, 0.0, 1.0);
+					rgb += u_vfSunColor * (vfLit * vfAlpha * vfPhase * u_vfSunShaft);
+				}
+			}
+		}
+	}
+	gl_FragColor = vec4(rgb, albedo.a);
 }
 
 #endif";
@@ -315,6 +692,13 @@ void main()
                 }
                 SkylineFaceShading.Refresh();     // 与 CPU 侧同源：每次画之前按同一公式取一遍因子
                 Shader shader = EnsureShader();
+                // [v0.1.105] **体积雾 + 体积神光 + 阴影图**绑到 LOD 的着色器上（与真地形同一个绑定函数）。
+                // 必须在下面 LOD 自己的绑定**之前**调用 —— 后面会把 `u_sunDir` 覆盖成 LOD 自己的
+                // 坡向太阳方向（`SlopeSunDirection()`），那是这条管线要的口径。
+                string bindErr = SkylineRuntime.BindShadowFogParams(shader, SkylineRuntime.ShadowSampleReady);
+                if (bindErr.Length > 0) {
+                    m_lastError = "BindShadowFogParams: " + bindErr;
+                }
                 Vector3 viewPosition = camera.InvertedViewMatrix.Translation;
                 Vector3 v = new(MathF.Floor(viewPosition.X), 0f, MathF.Floor(viewPosition.Z));
                 Matrix matrix = Matrix.CreateTranslation(0f, yOffset, 0f)

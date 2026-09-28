@@ -7,6 +7,46 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.105] - 2026-09-28
+
+第一百一十二个版本：**体积雾与体积神光接到远景 LOD 层**（把记了两遍的缺口补上）。相对 v0.1.104 的变更：
+
+### 1. 缺口是什么
+
+体积雾/神光自 v0.1.69/v0.1.104 起只作用在**不透明地形片元**上；远景 **LOD 层**用的是它自己的属性着色器
+（`SkylineLodVolume`），那里只有"被 `FogDisabled` 置 0 的原版雾" ⇒ **LOD 上完全没有体积雾**。
+`notes/169 §3` 与 `notes/194 §6` 都记过这条：
+站在高台上时，近处平台有雾、脚下的远景 LOD 平板**一点雾都没有**，交界处露馅。
+
+### 2. 做法：把同一套 uniform 与同一段算法接到 LOD 着色器
+
+* 新增 **`SkylineRuntime.BindShadowFogParams(shader, shadows)`**：把"阴影图 + 体积雾 + 神光"那一组 uniform
+  绑到**任意** shader 上（地形那条路仍然自己绑，两边口径必须一致，代码里写了警告）；
+  另加 `SkylineRuntime.ShadowSampleReady`（LOD 用它决定 `u_shadowEnable`）。
+* LOD 的体积着色器（HLSL/GLSL 两个方言）新增：`v_world` 插值 + `vf*` 噪声/密度函数 +
+  `sunShaftVisibility()` + **与地形逐字相同的 8 步雾积分与单次散射神光**。
+* 采样器必须按引擎要求登记（`<Sampler Name='u_shadowSampler' Texture='u_shadowMap' />`），
+  否则会报 `Texture u_shadowMap has no sampler defined in shader metadata` 并让整支 LOD 着色器准备失败（本轮踩到）。
+* `BindShadowFogParams` 必须在 LOD 自己的绑定**之前**调用 —— 后面会把 `u_sunDir` 覆盖成坡向用的太阳方向。
+
+### 3. 验收
+
+| 判据 | 实测（同一机位、冻风、关 LOD 云影、每张前钉时刻） |
+|---|---|
+| LOD 上雾的效果 | `VolumetricFogEnabled` 开/关 **稳定掩膜 45,084 px（3.1%）**、平均亮度 **137.67 → 134.62** |
+| 属性自检不能被雾污染 | `AttrSelfCheck` 期间临时关雾（与它早就临时关云影同一口径）⇒ **`ok=true`**、`gpuVsCpu mean 0.188 / max 1 / gt8 0/5035` |
+| **代价**（配对交替、雾开/关各三轮、每轮 12 s、关垂直同步） | 关 → 105.75，开 → 104.88 ⇒ **−0.82%**（在跑步动噪声内） |
+| 回归门禁 | **PASS 17 / FAIL 0 / SKIP 1 / KNOWN 0**（SKIP = `shell-column`，高台现场脚下没有壳，见 `notes/195`） |
+| 构建 | **0 警告 0 错误** |
+
+证据：`data/sessions/skyline-v0105/`（`lodfog/` 截图与 `perf-lodfog.json`、`regression-lodfog.json`）；笔记 `notes/198`。
+
+### 4. 如实记
+
+* 神光在 LOD 上只表现为"朝太阳方向的前向散射辉光"，经典光柱仍需遮挡物同框（见 `notes/194 §6`）；
+* 镜面/透明 LOD 子集（`albedo.a`）不参与雾；只有不透明 LOD 片元加雾；
+* 本版没做 Dawnlight 的**色调映射 / 聚簇点光源 / 大气散射 LUT**。
+
 ## [v0.1.104] - 2026-09-28
 
 第一百一十一个版本：**体积神光（Dawnlight `ShaftLighting` 的适配路线）**。相对 v0.1.103 的变更：

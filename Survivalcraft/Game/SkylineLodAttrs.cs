@@ -139,6 +139,11 @@ namespace Game {
             //   而**这条自检比的就是"两次抓帧必须逐位一致"**（属性开/关只是顶点布局不同）。
             //   所以自检期间把它关掉：它检查的是顶点属性/着色器管道，不是云影。
             bool savedCloudShadow = SkylineLodCloudShadow.Enabled;
+            // [v0.1.105] **体积雾/神光也要先关掉**：它们现在也注入 LOD 的体积着色器
+            //   （`SkylineRuntime.BindShadowFogParams`），而这条自检比的是"属性着色器 vs 游戏 Opaque"
+            //   —— 雾只存在于前者 ⇒ 会把"管道一致"的断言污染成 mean 36/255 的大差（实测踩到）。
+            //   自检检查的是**顶点属性/着色器管道**，不是雾；所以期间关掉、结束还原。
+            bool savedVolFog = SkylineRuntime.VolumetricFogEnabled;
             // [v0.1.105] **固定太阳**：坡向明暗与自阴影都用"跟踪到的真太阳"，而世界时间一直在走
             //   ⇒ CPU 烘焙那一次与 GPU 渲染那一次之间太阳会动一点点，极端情况下个别单元的
             //   自阴影可见性会翻转 ⇒ 这条自检**偶发 ok=false**（实测：单独跑 3/3 过；放进巡检/门禁
@@ -187,6 +192,7 @@ namespace Game {
                 size = Math.Clamp(size <= 0 ? 256 : size, 64, Math.Min(Display.MaxTextureSize, 1024));
                 SkylineCubeShellStore.RestrictLod = false;
                 SkylineLodCloudShadow.Enabled = false;
+                SkylineRuntime.VolumetricFogEnabled = false;
                 SkylineLod.SlopeShadingStrength = 0f;      // 只比"面因子"这一层
                 SkylineLod.SelfShadowStrength = 0f;
                 SkylineRuntime.LodAttrShaderOn = false;
@@ -230,6 +236,7 @@ namespace Game {
                 SkylineLod.SelfShadowStrength = savedShadow;
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 SkylineLodCloudShadow.Enabled = savedCloudShadow;
+                SkylineRuntime.VolumetricFogEnabled = savedVolFog;
                 RebuildNow();
                 if (attrImage == null || bakedImage == null || gpuImage == null) {
                     result["ok"] = false;
@@ -279,6 +286,7 @@ namespace Game {
                 SkylineLod.SelfShadowStrength = savedShadow;
                 SkylineCubeShellStore.RestrictLod = savedRestrictLod;
                 SkylineLodCloudShadow.Enabled = savedCloudShadow;
+                SkylineRuntime.VolumetricFogEnabled = savedVolFog;
                 m_lastError = e.Message;
                 result["ok"] = false;
                 result["err"] = e.Message;

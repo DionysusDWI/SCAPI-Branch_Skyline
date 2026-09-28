@@ -393,6 +393,83 @@ namespace Game {
             return result.ToJsonString();
         }
 
+        /// <summary>[v0.1.105] "阴影图+体积雾"这一套现在能不能用（**LOD 层**用它决定 `u_shadowEnable`）。</summary>
+        public static bool ShadowSampleReady =>
+            GpuShadowSampleEnabled && m_gpuShadowHasMap && m_gpuShadowRt != null;
+
+        /// <summary>[v0.1.105] 把**阴影图 + 体积雾/神光**那一组 uniform 绑到**任意** shader 上
+        /// （远景 LOD 层复用同一套；地形那条路由 `ResolveOpaqueShader` 自己绑）。
+        ///
+        /// ⚠️ **两边必须保持同一口径**：这里的每一项都要与 `ResolveOpaqueShader` 里的对应项一致，
+        /// 否则"同一个影子/同一层雾在 LOD 与真地形上不一样"，交界处会露馅。
+        /// 返回 `""` 表示成功，否则返回错误串（调用方自己决定是否记日志，**不抛**）。
+        /// </summary>
+        public static string BindShadowFogParams(Shader shader, bool shadows) {
+            try {
+                shader.GetParameter("u_shadowEnable", true).SetValue(shadows ? 1f : 0f);
+                shader.GetParameter("u_shadowMap", true).SetValue(shadows ? m_gpuShadowRt : m_gpuShadowDummyRt);
+                shader.GetParameter("u_shadowSampler", true).SetValue(m_gpuShadowSampler);
+                shader.GetParameter("u_sunViewProjection", true).SetValue(m_gpuShadowViewProjection);
+                shader.GetParameter("u_sunOrigin", true).SetValue(m_gpuShadowOrigin);
+                shader.GetParameter("u_eye", true).SetValue(m_gpuShadowEye);
+                shader.GetParameter("u_sunDir", true).SetValue(m_gpuShadowSun);
+                shader.GetParameter("u_depthMax", true).SetValue(m_gpuShadowDepthMax);
+                shader.GetParameter("u_shadowMapNear", true)
+                    .SetValue(shadows ? (m_gpuShadowRtNear ?? m_gpuShadowRt) : m_gpuShadowDummyRt);
+                shader.GetParameter("u_shadowSamplerNear", true).SetValue(m_gpuShadowSampler);
+                shader.GetParameter("u_sunViewProjectionNear", true).SetValue(m_gpuShadowViewProjectionNear);
+                shader.GetParameter("u_sunOriginNear", true).SetValue(m_gpuShadowOriginNear);
+                shader.GetParameter("u_eyeNear", true).SetValue(m_gpuShadowEyeNear);
+                shader.GetParameter("u_depthMaxNear", true).SetValue(m_gpuShadowDepthMaxNear);
+                shader.GetParameter("u_nearCascade", true).SetValue(
+                    (m_gpuShadowHasNearMap && m_gpuShadowRtNear != null) ? 1f : 0f);
+                shader.GetParameter("u_shadowBias", true).SetValue(GpuShadowSampleBias);
+                shader.GetParameter("u_shadowStrength", true).SetValue(GpuShadowSampleStrength);
+                shader.GetParameter("u_shadowFlipY", true).SetValue(GpuShadowFlipY ? 1f : 0f);
+                shader.GetParameter("u_shadowDepth16", true).SetValue(m_gpuShadowDepth16AtCapture ? 1f : 0f);
+                shader.GetParameter("u_shadowDebug", true).SetValue(0f);
+                float fogTime = (float)Time.RealTime;
+                float fogBottom = Math.Min(FogBottomY, FogTopY - 1f);
+                shader.GetParameter("u_vfEnable", true).SetValue(VolumetricFogEnabled ? 1f : 0f);
+                shader.GetParameter("u_vfBottomY", true).SetValue(fogBottom);
+                shader.GetParameter("u_vfTopY", true).SetValue(Math.Max(FogTopY, fogBottom + 1f));
+                shader.GetParameter("u_vfDensity", true).SetValue(Math.Max(FogDensity, 0f));
+                shader.GetParameter("u_vfScale", true).SetValue(Math.Max(FogScale, 1e-6f));
+                shader.GetParameter("u_vfWind", true).SetValue(FogWind * fogTime);
+                shader.GetParameter("u_vfThreshold", true).SetValue(Math.Clamp(FogThreshold, 0f, 0.99f));
+                shader.GetParameter("u_vfStrength", true).SetValue(Math.Clamp(FogStrength, 0f, 1f));
+                shader.GetParameter("u_vfColor", true).SetValue(FogColor);
+                shader.GetParameter("u_vfSkyMix", true).SetValue(Math.Clamp(FogSkyMix, 0f, 1f));
+                shader.GetParameter("u_vfMaxDistance", true).SetValue(Math.Max(FogMaxDistance, 10f));
+                shader.GetParameter("u_vfShear", true).SetValue(Math.Max(FogHeightShear, 0f));
+                shader.GetParameter("u_vfSunShaft", true).SetValue(Math.Max(VolumetricSunShaftStrength, 0f));
+                shader.GetParameter("u_vfSunColor", true).SetValue(VolumetricSunShaftColor);
+                shader.GetParameter("u_vfPhasePower", true)
+                    .SetValue(Math.Clamp(VolumetricSunShaftPhasePower, 1f, 64f));
+                shader.GetParameter("u_shadowSoft", true).SetValue(GpuShadowSoftEnabled ? 1f : 0f);
+                shader.GetParameter("u_shadowSoftRadius", true).SetValue(GpuShadowSoftRadius);
+                shader.GetParameter("u_shadowTexelFar", true).SetValue(
+                    1f / System.Math.Max(m_gpuShadowSizeAtCapture, 1));
+                shader.GetParameter("u_shadowTexelNear", true).SetValue(
+                    1f / System.Math.Max(m_gpuShadowSizeAtCapture, 1));
+                float sunY = System.MathF.Max(System.MathF.Abs(m_gpuShadowSun.Y), GpuShadowSoftSunYFloor);
+                float farRelief = 2f * m_gpuShadowRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1)
+                                  / System.Math.Max(m_gpuShadowDepthMax, 0.0001f) / sunY;
+                float nearRelief = 2f * m_gpuShadowNearRadiusAtCapture / System.Math.Max(m_gpuShadowSizeAtCapture, 1)
+                                   / System.Math.Max(m_gpuShadowDepthMaxNear, 0.0001f) / sunY;
+                shader.GetParameter("u_shadowReliefFar", true).SetValue(farRelief);
+                shader.GetParameter("u_shadowReliefNear", true).SetValue(nearRelief);
+                shader.GetParameter("u_shadowSoftSlopeBias", true).SetValue(GpuShadowSoftSlopeBias);
+                shader.GetParameter("u_shadowSoftReliefTexels", true).SetValue(GpuShadowSoftReliefTexels);
+                shader.GetParameter("u_shadowKernel", true).SetValue((float)GpuShadowKernel);
+                shader.GetParameter("u_shadowKernelSlopeScale", true).SetValue(GpuShadowKernelSlopeScale(GpuShadowKernel));
+                return "";
+            }
+            catch (System.Exception e) {
+                return e.Message;
+            }
+        }
+
         public static string GpuShadowSampleDescribe() =>
             $"gpuShadowSample enabled={GpuShadowSampleEnabled} strength={GpuShadowSampleStrength:0.##} "
             + $"bias={GpuShadowSampleBias:0.####} flipY={GpuShadowFlipY} hasMap={m_gpuShadowHasMap} "
