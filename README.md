@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.119**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.120**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -54,6 +54,10 @@
 * **相机空间深度预通道**（`SkylineScreenDepth`，里程碑 4 的"场景深度纹理"）：半分辨率、
   16 bit 线性视距、只画 112 m 内的真地形；Iris 的屏幕空间体积光 / SSAO / TAA 都以它为前置，
   片元侧用 `ScreenDepthInvViewProjection + ScreenDepthScaleMetres` 重建世界坐标（默认关，等消费者）；
+* **[v0.1.120] 屏幕空间体积光**（`SkylineScreenVolumetricLight`，Iris `volumetricLight.glsl` 的迁移）：
+  全屏**加法** pass、12 步 `pow(t,2)` 分布 + 逐像素 IGN 抖动、每步查太阳阴影图；
+  **天空片元也走满 256 m**（旧的地形内 8 步路线在天空区恒为 0）——实测朝太阳 **6.6% 帧面积**、
+  天空区 13,068 px、方向比 ≈54×、代价 +2.46%（噪声内）；默认关（与旧神光同时开会重复计数）。
 * **屏幕空间 AO**（`SkylineScreenAo`，深度预通道的第一个消费者）：horizon-based（每方向取最大仰角）、
   法线从深度重建、8 方向 × 3 步、旋转为**屏幕像素的 IGN**（v0.1.116：旧的世界坐标连续哈希会在曲面上
   留下同心环，换成 IGN 后环被打散）+ 24~56 m 远处淡出；实测默认档只影响 **0.95%** 的帧面积

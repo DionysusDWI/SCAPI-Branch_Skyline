@@ -532,6 +532,11 @@ namespace Game {
                     TerrainRenderer.DrawAlphaTested(camera);
                     // [v0.1.58] 光影接入面：不透明 pass 全部结束（外部包在此做合成）
                     SkylineShaderHook.Run("composite", camera);
+                    // [v0.1.120] **屏幕空间体积光**（Iris `volumetricLight.glsl` 的迁移）：
+                    //   全屏加法 pass，用相机深度图重建世界位置 + 每步查太阳阴影图；
+                    //   天空片元也走满 `ScreenVolumetricMaxDistance`（旧的地形内 8 步路线做不到这件事）。
+                    //   默认关；关掉时这一帧不画任何东西。
+                    SkylineRuntime.ScreenVolumetricLightPass(camera);
                     // [v0.1.58] G-buffer 调试直显（默认关）
                     SkylineGBuffer.DebugDrawIfEnabled(camera);
                     // [v0.1.113] 相机深度预通道的调试直显（默认关；左上角 1/4 画中画）
