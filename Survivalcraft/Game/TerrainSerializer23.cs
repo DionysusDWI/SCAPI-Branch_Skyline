@@ -641,6 +641,15 @@ namespace Game {
 
         const int MaxRecentFailures = 8;
 
+        /// <summary>
+        /// [v0.1.148 · `notes/257` 修法 A 的开关] **默认 false = 保持引擎原行为**
+        /// （记日志后 `return true`）。打开后：非 IO 坏档异常**额外返回 false** ⇒
+        /// 更新器把该区块当成"存档里没有"并**按同一坐标重新生成**，避免"空内容 + 玩家编辑
+        /// ⇒ 原地形被固化丢失"（`notes/257 §6` 实测）。
+        /// 默认关的理由：这改变"坏档时的世界演化"，属语义变更，交审计/用户裁定。
+        /// </summary>
+        public static bool RegenerateCorruptChunk { get; set; }
+
         static void RecordChunkLoadFailure(TerrainChunk chunk, string kind, Exception e, bool accepted) {
             string row = new JsonObject {
                 ["chunk"] = new JsonArray(chunk.Coords.X, chunk.Coords.Y),
@@ -708,8 +717,16 @@ namespace Game {
                     // [v0.1.147 · notes/257 方案 C] 记进账本：这一支**会落到下面的 return true**
                     // ⇒ 调用方以为加载成功，但格子从未被填充。`acceptedAfterFailure` 就是这个次数。
                     m_chunkLoadNonIoFailures++;
-                    m_chunkLoadAcceptedAfterFailure++;
-                    RecordChunkLoadFailure(chunk, "non-io", e, true);
+                    // [v0.1.148] 修法 A 的开关版（默认关）：打开时把坏档当"存档里没有"处理
+                    // ⇒ 更新器按同一坐标重新生成，而不是带着空内容往下走。
+                    bool accepted = !RegenerateCorruptChunk;
+                    if (accepted) {
+                        m_chunkLoadAcceptedAfterFailure++;
+                    }
+                    RecordChunkLoadFailure(chunk, "non-io", e, accepted);
+                    if (!accepted) {
+                        return false;
+                    }
                 }
                 _ = Time.RealTime;
                 return true;
