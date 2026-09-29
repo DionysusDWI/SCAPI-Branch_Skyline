@@ -353,6 +353,30 @@ namespace Game {
         /// `acceptedAfterFailure>0` = "坏档被当成已加载"真实发生过。</summary>
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
+        /// <summary>
+        /// **[v0.1.156 · CC `074658Z` Q2 裁定] 只读**：把"逐 pass 之外"的两大块成本量出来 ——
+        /// **区块分配/释放**（`Terrain.AllocateChunk/FreeChunk`）与**存盘**（`TerrainSerializer23.SaveChunkData`）。
+        ///
+        /// 为什么要它：lockstep 把可并行的 `lightMs` 腰斩（1067→561 ms）而**端到端墙钟不动**
+        /// （`notes/278 §3`）⇒ 说明大头在"逐 pass 之外"。审计要求把**未归因时间压到 10% 以内**
+        /// 再引用占比数字。本探针只报累计计数与累计毫秒，**不重置、不改行为**。
+        /// </summary>
+        public static string TerrainCostStats() {
+            Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+            TerrainSerializer23 ser = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)
+                ?.TerrainSerializer as TerrainSerializer23;
+            return new JsonObject {
+                ["allocCount"] = terrain?.AllocCount ?? -1,
+                ["allocMs"] = Math.Round(terrain?.AllocMs ?? -1, 1),
+                ["freeCount"] = terrain?.FreeCount ?? -1,
+                ["freeMs"] = Math.Round(terrain?.FreeMs ?? -1, 1),
+                ["saveChunkCount"] = ser?.SaveChunkCount ?? -1,
+                ["saveChunkMs"] = Math.Round(ser?.SaveChunkMs ?? -1, 1),
+                ["note"] = "累计只读账本：分配/释放来自 Terrain，存盘来自 TerrainSerializer23；"
+                           + "配合 TerrainUpdateStats 的逐 pass 分账，用来把未归因时间压到 10% 以内"
+            }.ToJsonString();
+        }
+
         /// <summary>[v0.1.151 · 验收用] 该区块本轮是否**从存档读出**过（只读）。</summary>
         public static string ChunkLoadedFromDisk(int cx, int cz) => new JsonObject {
             ["chunk"] = new JsonArray(cx, cz),

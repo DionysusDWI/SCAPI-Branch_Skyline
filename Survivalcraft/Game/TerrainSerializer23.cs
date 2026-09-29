@@ -798,6 +798,9 @@ namespace Game {
 
         public virtual void SaveChunkData(TerrainChunk chunk) {
             lock (m_lock) {
+                // [v0.1.156 · CC `074658Z` Q2 裁定] **只读计时**：存盘是"未归因时间"的头号嫌疑之一
+                //   （预加载里 ~0.7 s 不在逐 pass 分账内）。只累加计数与耗时，不改行为。
+                long sw0 = System.Diagnostics.Stopwatch.GetTimestamp();
                 // [v0.1.151] 精准回答"坏档区块有没有被写回"（口径③的区块级判据）
                 if (m_corruptChunkCoords.Contains(ChunkKey(chunk.Coords.X, chunk.Coords.Y))) {
                     m_corruptChunksSaved++;
@@ -813,8 +816,15 @@ namespace Game {
                     Log.Error(ExceptionManager.MakeFullErrorMessage($"Error saving chunk ({chunk.Coords.X},{chunk.Coords.Y}).", e));
                 }
                 _ = Time.RealTime;
+                SaveChunkCount++;
+                SaveChunkMs += (System.Diagnostics.Stopwatch.GetTimestamp() - sw0) * 1000.0
+                               / System.Diagnostics.Stopwatch.Frequency;
             }
         }
+
+        // [v0.1.156] 存盘只读账本（累计；探针读，不重置）
+        public long SaveChunkCount;
+        public double SaveChunkMs;
 
         public virtual void Dispose() {
             Utilities.Dispose(ref m_storage);

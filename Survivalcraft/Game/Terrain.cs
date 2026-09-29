@@ -212,10 +212,17 @@ namespace Game {
             if (GetChunkAtCoords(chunkX, chunkZ) != null) {
                 throw new InvalidOperationException("Chunk already allocated.");
             }
+            // [v0.1.156 · CC `074658Z` Q2 裁定] **只读计时**：把"分配"的成本量出来，
+            //   好把预加载里那 ~0.7 s **未归因**时间压到 10% 以内（`notes/248 P3` 同一条）。
+            //   只累加计数与耗时，不改任何行为。
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             TerrainChunk terrainChunk = new(this, chunkX, chunkZ);
             m_allocatedChunks.Add(terrainChunk);
             m_allChunks.Add(chunkX, chunkZ, terrainChunk);
             m_allocatedChunksArray = null;
+            AllocCount++;
+            AllocMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
+                       / System.Diagnostics.Stopwatch.Frequency;
             return terrainChunk;
         }
 
@@ -223,10 +230,20 @@ namespace Game {
             if (!m_allocatedChunks.Remove(chunk)) {
                 throw new InvalidOperationException("Chunk not allocated.");
             }
+            long t0 = System.Diagnostics.Stopwatch.GetTimestamp();
             m_allChunks.Remove(chunk.Coords.X, chunk.Coords.Y);
             m_allocatedChunksArray = null;
             chunk.Dispose();
+            FreeCount++;
+            FreeMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0
+                      / System.Diagnostics.Stopwatch.Frequency;
         }
+
+        // [v0.1.156] 分配/释放的只读账本（累计；探针读，不重置）
+        public long AllocCount;
+        public double AllocMs;
+        public long FreeCount;
+        public double FreeMs;
 
         public static int ComparePoints(Point2 c1, Point2 c2) {
             if (c1.Y != c2.Y) {
