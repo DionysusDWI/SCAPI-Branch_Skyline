@@ -296,6 +296,11 @@ namespace Game {
         /// 解析/建段/弧长等距采样，返回稠密折线 + 站点 + 步距统计，供几何误差核对。</summary>
         public static string BezierSample(string spec) => SkylineBuilder.CurveSample(spec);
 
+        /// <summary>[v0.1.141 · 审计第 1 项 / B-03] **LOD 距离契约探针**（只读）：同一串距离下
+        /// 并排给出"单元中心"与"到块 AABB 最短距离"两种口径的档号，以及边界/开闭/竖直规则。</summary>
+        public static string LodDistanceContract(float d0, float d1, int steps) =>
+            SkylineLod.LodDistanceContract(d0, d1, steps);
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);

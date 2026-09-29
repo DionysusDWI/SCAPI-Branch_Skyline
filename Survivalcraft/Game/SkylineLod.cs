@@ -218,6 +218,107 @@ namespace Game {
         public static int TierForDistance(float distanceMetres) =>
             Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(distanceMetres) + 1, 1, 3);
 
+        /// <summary>
+        /// [v0.1.141 · 审计功能单第 1 项 / B-03] **距离契约探针（只读，不改语义）**。
+        ///
+        /// 目标原文把 LOD 分级定义为"与**对应 LOD 区块的最短距离**"，而现状用的是**单元中心**到相机的
+        /// 水平距离（`BuildMergedTier`：`wx = cx*16+8`）。本探针把两种口径在**同一串距离**上并排给出，
+        /// 并把边界/开闭/竖直口径显式写成字符串，使"要不要换"变成一张可读的表（换与不换都由用户/审计裁定）。
+        ///
+        /// 三种列：`tierCentre`（现状）、`tierShortestOfCentreTier`（用中心档推出的块边长算最短距离）、
+        /// `tierShortestFixedPoint`（自洽解：边长由最短距离规则自己推出，迭代到不动点）。
+        /// </summary>
+        public static string LodDistanceContract(float d0, float d1, int steps) {
+            steps = Math.Clamp(steps, 2, 512);
+            if (d1 < d0) {
+                (d0, d1) = (d1, d0);
+            }
+            var rows = new JsonArray();
+            int flips = 0;
+            float firstFlip = -1f, lastFlip = -1f, maxOutwardShift = 0f;
+            int prevCentre = -1, prevShort = -1, prevFixed = -1;
+            bool centreMonotone = true, shortMonotone = true, fixedMonotone = true;
+            for (int i = 0; i < steps; i++) {
+                float d = d0 + (d1 - d0) * i / (steps - 1);
+                int tierCentre = TierForDistance(d);
+                float sideOfCentreTier = CellSize << tierCentre;
+                float shortestNaive = MathF.Max(0f, d - sideOfCentreTier * 0.5f);
+                int tierShort = TierForDistance(shortestNaive);
+                // 自洽解：块边长本身由"最短距离档"决定，迭代到不动点（最多 4 次，必然稳定）
+                int tierFixed = tierCentre;
+                for (int k = 0; k < 4; k++) {
+                    float side = CellSize << tierFixed;
+                    int next = TierForDistance(MathF.Max(0f, d - side * 0.5f));
+                    if (next == tierFixed) {
+                        break;
+                    }
+                    tierFixed = next;
+                }
+                bool differ = tierCentre != tierShort || tierCentre != tierFixed;
+                if (differ) {
+                    flips++;
+                    if (firstFlip < 0) {
+                        firstFlip = d;
+                    }
+                    lastFlip = d;
+                }
+                // 换口径后边界整体外推的量 = 半个块边长（"最短距离"比"中心距离"少半个块边长）
+                maxOutwardShift = MathF.Max(maxOutwardShift, sideOfCentreTier * 0.5f);
+                if (prevCentre >= 0 && tierCentre < prevCentre) {
+                    centreMonotone = false;
+                }
+                if (prevShort >= 0 && tierShort < prevShort) {
+                    shortMonotone = false;
+                }
+                if (prevFixed >= 0 && tierFixed < prevFixed) {
+                    fixedMonotone = false;
+                }
+                prevCentre = tierCentre;
+                prevShort = tierShort;
+                prevFixed = tierFixed;
+                if (i < 256) {
+                    rows.Add(new JsonObject {
+                        ["distanceMetres"] = Math.Round(d, 2),
+                        ["tierCentre"] = tierCentre,
+                        ["blockMetresCentreTier"] = sideOfCentreTier,
+                        ["shortestDistanceMetres"] = Math.Round(shortestNaive, 2),
+                        ["tierShortestOfCentreTier"] = tierShort,
+                        ["tierShortestFixedPoint"] = tierFixed,
+                        ["differ"] = differ,
+                    });
+                }
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["rangeMetres"] = new JsonArray(Math.Round(d0, 2), Math.Round(d1, 2)),
+                ["steps"] = steps,
+                ["listedRows"] = rows.Count,
+                ["rules"] = new JsonObject {
+                    ["levelRule"] = "d ≤ unitMetres（= DhQualityParams 的 unit × McChunkWidthBlocks，"
+                                    + "MEDIUM 下 = 12×16 = 192 m）⇒ level 0；否则 floor(log_base(d/unit))，"
+                                    + "**边界点归较低档（左闭右开）**",
+                    ["tierRule"] = "tier = clamp(level + 1, 1, 3)（v0.1.132 的 off-by-one 修复口径）",
+                    ["verticalRule"] = "**只按水平**距离分级（Sqrt(dx²+dz²)）；覆盖/卸载按**球**"
+                                       + "（SphereLoadingEnabled）—— 两者不得混用",
+                    ["centreRule"] = "现状：16 m 单元中心（cx*16+8）到相机的水平距离",
+                    ["shortestRule"] = "目标原文：到该合并块 AABB 的最短水平距离；本表用径向估算 "
+                                       + "max(0, d − 块边长/2)，另有自洽不动点列",
+                },
+                ["boundariesMetres"] = new JsonArray(Math.Round(MergeBoundaries().B1, 1),
+                                                     Math.Round(MergeBoundaries().B2, 1)),
+                ["centreTierMonotone"] = centreMonotone,
+                ["shortestTierMonotone"] = shortMonotone,
+                ["shortestFixedPointMonotone"] = fixedMonotone,
+                ["rowsWhereTiersDiffer"] = flips,
+                ["firstDifferingDistanceMetres"] = firstFlip < 0 ? null : Math.Round(firstFlip, 2),
+                ["lastDifferingDistanceMetres"] = lastFlip < 0 ? null : Math.Round(lastFlip, 2),
+                ["maxHalfBlockShiftMetres"] = Math.Round(maxOutwardShift, 2),
+                ["mergeLadderEnabled"] = MergeLadderEnabled,
+                ["rows"] = rows,
+                ["note"] = "只读探针：本探针**不改变**任何分级语义；换口径的收益/代价由这张表裁定"
+            }.ToJsonString();
+        }
+
         static readonly Dictionary<long, Cell> m_cellsM2 = [];   // 64 m 档（合并 4³）
         static readonly Dictionary<long, Cell> m_cellsM3 = [];   // 128 m 档（合并 8³）
         static int m_ladderTier1Cells, m_ladderTier2Cells, m_ladderTier3Cells;
