@@ -260,6 +260,13 @@ namespace Game {
 
         public static long ShellInvalidatedByEdit => SkylineCubeShellStore.InvalidatedByEdit;
 
+        /// <summary>[v0.1.136 · CC 审计 P2] 区域单元格式的内存往返自检（含 HasSecond=true 合成样本）。</summary>
+        public static string RegionCellRoundTripSelfCheck() =>
+            SkylineLod.RegionCellRoundTripSelfCheck();
+
+        /// <summary>[v0.1.136 · CC 审计 P3] 读取失败的坏区域数（读完即从 known 摘掉）。</summary>
+        public static long RegionsCorrupt => SkylineLod.RegionsCorrupt;
+
         /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），

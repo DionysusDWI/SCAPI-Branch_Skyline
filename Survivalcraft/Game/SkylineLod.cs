@@ -676,6 +676,12 @@ namespace Game {
         /// </summary>
         public static long CellCaptureDeferred { get; private set; }
 
+        /// <summary>
+        /// [v0.1.136 · CC 审计 P3] 因预算不足跳过、且**从未采过**的单元数（与 `CellCaptureDeferred` 分开计）。
+        /// 这类单元没有脏标记，等区块重新加载时由轮转的 `FirstSeen` 采；有脏标记的那批才叫"延期"。
+        /// </summary>
+        public static long CellCaptureSkippedUnsampled { get; private set; }
+
         /// <summary>[v0.1.129] 最近一次卸载预扫的耗时（毫秒，含补采）。</summary>
         public static float CellCaptureLastMs { get; private set; }
 
@@ -708,7 +714,17 @@ namespace Game {
                     }
                     if (budget <= 0) {
                         CellCaptureSkippedOverBudget++;
-                        CellCaptureDeferred++;
+                        // [v0.1.136 · CC 审计 P3] 延期计数**只对脏单元**递增：
+                        //   旧写法与"超预算跳过"在同一分支同时 +1 ⇒ 两个计数恒等、没有独立信息量
+                        //   （区分不了"延期后会补采"与"从未采过、等 FirstSeen"）。现在三分账：
+                        //   * `CellCaptureDeferred`        = 超预算 **且脏**（脏标记保留 ⇒ 真延期）；
+                        //   * `CellCaptureSkippedUnsampled`= 超预算 **且从未采过**（无脏标记 ⇒ 等区块回来走 FirstSeen）。
+                        if (dirty) {
+                            CellCaptureDeferred++;
+                        }
+                        else {
+                            CellCaptureSkippedUnsampled++;
+                        }
                         continue;
                     }
                     if (CaptureLeavingCell(chunk, key)) {
@@ -2719,6 +2735,7 @@ namespace Game {
                 ["cellsCapturedOnUnload"] = CellsCapturedOnUnload,
                 ["cellCaptureSkippedOverBudget"] = CellCaptureSkippedOverBudget,
                 ["cellCaptureDeferred"] = CellCaptureDeferred,
+                ["cellCaptureSkippedUnsampled"] = CellCaptureSkippedUnsampled,
                 ["cellCapturePerCall"] = CellCapturePerCall,
                 ["cellCaptureLastMs"] = Math.Round(CellCaptureLastMs, 2),
                 ["refresh"] = RefreshSurveyJson(),

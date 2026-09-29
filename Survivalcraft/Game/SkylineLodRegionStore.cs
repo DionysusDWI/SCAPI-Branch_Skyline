@@ -55,6 +55,10 @@ namespace Game {
         static long m_regionsLoaded;
         static long m_regionsSaved;
         static long m_regionsEvicted;
+        static long m_regionsCorrupt;
+
+        /// <summary>[v0.1.136 · CC 审计 P3] 读取失败的坏区域数（读完即从 known 摘掉，不会每 tick 重试）。</summary>
+        public static long RegionsCorrupt => m_regionsCorrupt;
         static string m_regionLastError = "";
         static double m_regionLastTick;
 
@@ -148,7 +152,10 @@ namespace Game {
             writer.Write(cell.LightAir);
             writer.Write(cell.Height2);
             writer.Write(cell.Value2);
-            writer.Write(cell.Light2);
+            // [v0.1.136 · CC 审计 P3] **无第二层时把 Light2 归一为 0**：v1 默认值是 15，
+            // 若原样写进 v2，同一个语义态会有两种字节表示（实测对照格 l2=15 vs 新采格 l2=0）。
+            // `HasSecond=false` 时该字段无意义 ⇒ 统一写 0，让"语义相同 ⇒ 字节相同"成立。
+            writer.Write(cell.HasSecond ? cell.Light2 : (byte)0);
             writer.Write(cell.HasSecond);
         }
 
@@ -257,6 +264,90 @@ namespace Game {
             return true;
         }
 
+        /// <summary>
+        /// [v0.1.136 · CC 审计 P2 整改] 区域单元格式的**内存往返自检**（不需要世界状态、不碰磁盘）。
+        ///
+        /// 为什么需要：CC 指出我原来的"LightAir/第二层表面不再丢"这条主张里，**第二层那半句是空样本**
+        /// —— 世界里当时没有任何 `HasSecond=true` 的单元（`LodSurvey.cellsWithSecond=0`）。
+        /// 这条自检用**合成样本**把两半都补上：4 个单元（含两个 `HasSecond=true`、含负高度/极值），
+        /// 分别走 **v2 写→读** 与 **v1 写→读**（v1 必须回落显式默认），再逐字段断言。
+        /// </summary>
+        public static string RegionCellRoundTripSelfCheck() {
+            Cell[] samples = [
+                new Cell { Height = 70, Value = 3133, Light = 3, LightAir = 14 },
+                new Cell { Height = -928, Value = 2, Light = 15, LightAir = 15,
+                           HasSecond = true, Height2 = -930, Value2 = 7, Light2 = 12 },
+                new Cell { Height = 1023, Value = 65535, Light = 0, LightAir = 0,
+                           HasSecond = true, Height2 = 0, Value2 = 1, Light2 = 0 },
+                new Cell { Height = -1024, Value = 0, Light = 15, LightAir = 0 },
+            ];
+            JsonArray rows = [];
+            bool allOk = true;
+            // ---- v2：完整往返，逐字段必须相等（HasSecond=false 的 Light2 按规范归一为 0）----
+            using (MemoryStream ms = new()) {
+                using (BinaryWriter writer = new(ms, System.Text.Encoding.UTF8, true)) {
+                    foreach (Cell c in samples) {
+                        WriteCell(writer, c);
+                    }
+                }
+                ms.Position = 0;
+                using BinaryReader reader = new(ms);
+                for (int i = 0; i < samples.Length; i++) {
+                    Cell c = samples[i];
+                    Cell r = ReadCell(reader, RegionVersion);
+                    int expectLight2 = c.HasSecond ? c.Light2 : 0;
+                    bool ok = r.Height == c.Height && r.Value == c.Value && r.Light == c.Light
+                              && r.LightAir == c.LightAir && r.HasSecond == c.HasSecond
+                              && r.Height2 == c.Height2 && r.Value2 == c.Value2 && r.Light2 == expectLight2;
+                    allOk &= ok;
+                    rows.Add(new JsonObject {
+                        ["arm"] = "v2", ["index"] = i, ["ok"] = ok,
+                        ["wrote"] = new JsonArray(c.Height, c.Value, c.Light, c.LightAir,
+                                                  c.HasSecond, c.Height2, c.Value2, c.Light2),
+                        ["read"] = new JsonArray(r.Height, r.Value, r.Light, r.LightAir,
+                                                 r.HasSecond, r.Height2, r.Value2, r.Light2),
+                        ["light2Expected"] = expectLight2,
+                    });
+                }
+            }
+            // ---- v1：只写 3 个字段；读回必须等于"显式默认"（lightAir=light、无第二层、light2=15）----
+            using (MemoryStream ms = new()) {
+                using (BinaryWriter writer = new(ms, System.Text.Encoding.UTF8, true)) {
+                    foreach (Cell c in samples) {
+                        writer.Write(c.Height);
+                        writer.Write(c.Value);
+                        writer.Write(c.Light);
+                    }
+                }
+                ms.Position = 0;
+                using BinaryReader reader = new(ms);
+                for (int i = 0; i < samples.Length; i++) {
+                    Cell c = samples[i];
+                    Cell r = ReadCell(reader, 1);
+                    bool ok = r.Height == c.Height && r.Value == c.Value && r.Light == c.Light
+                              && r.LightAir == c.Light && !r.HasSecond
+                              && r.Height2 == 0 && r.Value2 == 0 && r.Light2 == 15;
+                    allOk &= ok;
+                    rows.Add(new JsonObject {
+                        ["arm"] = "v1", ["index"] = i, ["ok"] = ok,
+                        ["wrote"] = new JsonArray(c.Height, c.Value, c.Light),
+                        ["read"] = new JsonArray(r.Height, r.Value, r.Light, r.LightAir,
+                                                 r.HasSecond, r.Height2, r.Value2, r.Light2),
+                        ["expect"] = "lightAir=light、hasSecond=false、height2/value2=0、light2=15",
+                    });
+                }
+            }
+            return new JsonObject {
+                ["ok"] = allOk,
+                ["regionVersion"] = RegionVersion,
+                ["samples"] = samples.Length,
+                ["criterion"] = "v2：8 字段逐项相等（HasSecond=false 时 light2 归一为 0）；"
+                                + "v1：读回等于显式默认（lightAir=light、无第二层、light2=15）",
+                ["why"] = "补上 CC 指出的空样本：原主张的第二层那半句当时世界里没有 HasSecond=true 的单元",
+                ["rows"] = rows
+            }.ToJsonString();
+        }
+
         /// <summary>保存所有脏区域（按区域整块重写）。</summary>
         static void SaveDirtyRegions() {
             if (m_dirtyRegions.Count == 0) {
@@ -323,9 +414,21 @@ namespace Game {
                     if (dcx * dcx + dcz * dcz > keepSq) {
                         continue;
                     }
-                    if (LoadRegion(key)) {
-                        loadedThisTick++;
-                        m_dirty = true;
+                    // [v0.1.136 · CC 审计 P3] **坏区域不能让整条 tick 抛出去**：截断/损坏文件会在
+                    // ReadCell 里抛 EndOfStreamException（响亮崩在区域 tick，而不是"静默误读"）。
+                    // 这里把它降级成"这一块读不了"：记 lastError、打墓碑（从 known 里摘掉，避免每 tick 重试），
+                    // 并计数。存档文件本身不动（人工可事后检查）。
+                    try {
+                        if (LoadRegion(key)) {
+                            loadedThisTick++;
+                            m_dirty = true;
+                        }
+                    }
+                    catch (Exception ex) {
+                        m_regionLastError = $"region {rx},{rz} load failed: {ex.GetType().Name}: {ex.Message}";
+                        m_knownRegions.Remove(key);
+                        m_regionsCorrupt++;
+                        Log.Warning($"SkylineLod: corrupt region {rx},{rz} dropped from known set ({ex.GetType().Name})");
                     }
                 }
             }

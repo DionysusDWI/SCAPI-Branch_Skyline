@@ -7,6 +7,41 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.136] - 2026-09-29
+
+第一百四十二个版本：**按 CC（Claude Code）首份裁定的 7 条 finding 整改**。
+CC 对我第 1 条请求（v0.1.133 整改批次）给出 **verdict = pass**，三条主张全部独立复核成立，
+同时提出 2×P2 + 5×P3。相对 v0.1.135 的变更：
+
+### 1. P2 两条
+
+* **P2-1（工件过期）**：我附的 `skyline-v0130/merge-ladder.json` 是**探针量纲修正之前**的旧文件
+  （内容 ts 14:02:48、`ladder-spatial-coverage` 假 FAIL 3%/2%）。CC 自己在当前构建上复跑得 8/8（38%/178%）。
+  **已用当前构建重新生成**：现为 **136% / 184%**、整体 8/8。来历在 `notes/244 §3` 写清（我把"留证副本"与
+  "新跑结果"两份工件搞混了）。
+* **P2-2（空样本）**："LightAir/第二层表面不再丢"里的**第二层那半句是空样本**（世界 `cellsWithSecond=0`）。
+  新增 **`skyline.RegionCellRoundTripSelfCheck()`**：4 个合成 Cell（含两个 `HasSecond=true`、含负高度/极值），
+  v2 往返逐字段相等（无第二层时 `light2` 归一为 0）、v1 回落显式默认（`lightAir=light`、无第二层、`light2=15`）；
+  已进常驻门禁 `region-cell-roundtrip`（v2 4/4 + v1 4/4）。
+
+### 2. P3 五条
+
+* **P3-1**：`cellCaptureDeferred` 与 `cellCaptureSkippedOverBudget` 原来同分支递增、无独立信息 ⇒ 拆成
+  **四分账**（超预算 = 延期(脏) + 从未采过，走不同分支）；验收脚本改为判"四项都可读"并打印恒等式
+  （实测 30 = 30 + 0）。
+* **P3-2**：`LoadRegion` 调用处加 try/catch —— 截断/损坏区域不再抛穿区域 tick，改为记 `lastError`、
+  从 known 摘掉（逻辑墓碑、不每 tick 重试）、计数 `RegionsCorrupt`、记 Warning。
+* **P3-3**：写盘时 `HasSecond=false ⇒ Light2 写 0`（v1 的默认 15 不再被固化成"同语义两表示"），自检里显式断言。
+* **P3-4**：接受"scope 漏列文件"的批评；本版回执列全 4 个改动文件。
+* **P3-5**：采纳 CC 的补丁：`regression-skyline.py` 的 `chk_shader_quotes` 子进程显式 `encoding="utf-8"`，
+  修掉 GBK 解码导致的 stdout 丢失。
+
+### 3. 验收
+
+门禁 **PASS 21 / FAIL 0 / SKIP 0**（新增 `region-cell-roundtrip`）；`skyline-v0130-merge-ladder.py` **8/8**
+（当前构建、覆盖 136%/184%）；`skyline-v0133-audit-fixes.py` 6/6（四分账 30 = 30 + 0）。
+`notes/244`。
+
 ## [v0.1.135] - 2026-09-29
 
 第一百四十一个版本：**壳层事实更正 + 体素探针 + 编辑失效化壳层（真缺陷修复）**。相对 v0.1.134 的变更：
