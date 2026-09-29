@@ -496,6 +496,58 @@ namespace Game {
         public static long ShellBytes => (long)m_entries.Count * ShellBytesPerCube;
 
         /// <summary>
+        /// [v0.1.152 · CC P3 整改] **只读**：返回**离给定世界坐标最近**、且**确实带壳**的壳立方体坐标。
+        ///
+        /// 为什么要它：门禁项 `shell-mesh-tiers` / `shell-column` 原来只查"玩家所在立方体"，
+        /// 玩家一换地方就 SKIP ⇒ **SKIP 随现场漂移**（CC 点名要求"固定锚点"）。
+        /// 有这条探针，门禁就能锚到**壳仓里真实存在的**立方体（而不是赌玩家脚下正好有壳）。
+        /// 只读：只遍历 `m_entries` 的键做距离比较，不触碰任何缓存。
+        /// </summary>
+        public static string NearestShellCube(int worldX, int worldY, int worldZ) =>
+            NearestShellCubes(worldX, worldY, worldZ, 1);
+
+        /// <summary>[v0.1.152] 最近 **N** 个有壳立方体（距离升序）。给门禁当锚点用：
+        /// `shell-column` 需要"列上确实读得到壳"的那个，所以它会依次试这 N 个候选。</summary>
+        public static string NearestShellCubes(int worldX, int worldY, int worldZ, int count) {
+            count = Math.Clamp(count, 1, 32);
+            var cands = new List<((int Cx, int Cy, int Cz) Cube, long Dist)>();
+            int examined = 0;
+            foreach (KeyValuePair<(int Cx, int Cy, int Cz), Entry> kv in m_entries) {
+                Entry e = kv.Value;
+                if (e?.Shell == null && e?.VoxelShell == null) {
+                    continue;
+                }
+                examined++;
+                (int cx, int cy, int cz) = kv.Key;
+                long dx = cx - worldX, dy = cy - worldY, dz = cz - worldZ;
+                long d = dx * dx + dy * dy + dz * dz;
+                cands.Add((kv.Key, d));
+            }
+            if (examined == 0) {
+                return new JsonObject { ["ok"] = false, ["err"] = "no shelled cube resident",
+                                        ["examined"] = 0, ["cubeCount"] = m_entries.Count }.ToJsonString();
+            }
+            cands.Sort((a, b) => a.Dist.CompareTo(b.Dist));
+            var list = new JsonArray();
+            for (int i = 0; i < cands.Count && i < count; i++) {
+                list.Add(new JsonObject {
+                    ["cube"] = new JsonArray(cands[i].Cube.Cx, cands[i].Cube.Cy, cands[i].Cube.Cz),
+                    ["distanceMetres"] = Math.Round(Math.Sqrt(cands[i].Dist), 1),
+                });
+            }
+            (int Cx, int Cy, int Cz) best = cands[0].Cube;
+            return new JsonObject {
+                ["ok"] = true,
+                ["cube"] = new JsonArray(best.Cx, best.Cy, best.Cz),
+                ["distanceMetres"] = Math.Round(Math.Sqrt(cands[0].Dist), 1),
+                ["candidates"] = list,
+                ["examined"] = examined,
+                ["cubeCount"] = m_entries.Count,
+                ["cubeSize"] = CubeSurface32.Size,
+            }.ToJsonString();
+        }
+
+        /// <summary>
         /// [v0.1.135] **只读**：回读某个壳立方体的**表面体素壳**（B-02 裁定用的第二份事实基础）。
         ///
         /// ⚠️ 口径更正（本探针落地时发现我自己写错了表述）：v0.1.85 之后壳立方体是

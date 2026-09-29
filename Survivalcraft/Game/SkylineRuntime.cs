@@ -337,6 +337,15 @@ namespace Game {
             ["loadedFromDisk"] = TerrainSerializer23.WasLoadedFromDisk(cx, cz),
         }.ToJsonString();
 
+        /// <summary>[v0.1.152 · CC P3] **最近的有壳立方体**（只读）：给门禁的
+        /// `shell-mesh-tiers` / `shell-column` 当**固定锚点**用，避免它们随玩家机位 SKIP。</summary>
+        public static string NearestShellCube(int worldX, int worldY, int worldZ) =>
+            SkylineCubeShellStore.NearestShellCube(worldX, worldY, worldZ);
+
+        /// <summary>[v0.1.152] 最近 N 个有壳立方体（给 `shell-column` 依次试候选用）。</summary>
+        public static string NearestShellCubes(int worldX, int worldY, int worldZ, int count) =>
+            SkylineCubeShellStore.NearestShellCubes(worldX, worldY, worldZ, count);
+
         /// <summary>
         /// [v0.1.149 · **CC 裁定后的默认值**：**默认 true = 开（修法 A 生效）**]。
         ///
