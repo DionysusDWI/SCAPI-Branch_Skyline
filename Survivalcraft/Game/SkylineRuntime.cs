@@ -292,6 +292,10 @@ namespace Game {
         /// <summary>[v0.1.139] 区块**高度图**指纹（只哈希 Top/Bottom/SunlightHeight，不受邻居光照传播影响）。</summary>
         public static string ChunkHeightHash(int cx, int cz) => SkylineChunkDeterminism.ChunkHeightHash(cx, cz);
 
+        /// <summary>[v0.1.140 · 学习待办 #6] **曲线采样探针**（只读）：与 `SweepBezier` 共用同一套
+        /// 解析/建段/弧长等距采样，返回稠密折线 + 站点 + 步距统计，供几何误差核对。</summary>
+        public static string BezierSample(string spec) => SkylineBuilder.CurveSample(spec);
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);

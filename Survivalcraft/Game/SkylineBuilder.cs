@@ -162,6 +162,120 @@ namespace Game {
             return LastResult.Describe();
         }
 
+        /// <summary>
+        /// [v0.1.140 · 学习待办 #6] **曲线采样探针（只读，绝不写世界）**。
+        ///
+        /// 审计口径（`notes/audit-20260929/functional-task-list.md` 第 6 项）要求"Axiom 曲线待办要有
+        /// **小样例、输入参数、预期路径与几何误差记录**"。本探针与 `SweepBezier` **共用同一套**
+        /// `TryParseSpec` → `BuildCubics` → `BuildStations`（不是重写一份），把
+        /// ① 稠密折线（每段 64 细分，用来做"到理想曲线的距离"参照）、② 弧长等距站点（坐标/切线/平行传输坐标系）、
+        /// ③ 步距统计导出成 JSON，供 `heightlab/skyline-v0140-bezier-curve.py` 做几何误差核对。
+        /// </summary>
+        public static string CurveSample(string spec) {
+            var json = new JsonObject();
+            try {
+                if (!TryParseSpec(spec, out List<Vector3> points, out _, out _, out Options options, out string parseError)) {
+                    // **曲线采样不需要 profile/shape** —— 那是"扫掠体积"才需要的。`TryParseSpec` 在最后
+                    // 才检查 profile，所以这条错误出现时 points/step 已经解析完毕；把它放行，
+                    // 其余错误（空 spec / 点数不足 / 坏数字）仍然照常拒绝。
+                    if (parseError == null || !parseError.StartsWith("either profile:")) {
+                        json["ok"] = false;
+                        json["err"] = parseError ?? "bad spec";
+                        return json.ToJsonString();
+                    }
+                }
+                List<Cubic> cubics = BuildCubics(points);
+                if (cubics.Count == 0) {
+                    json["ok"] = false;
+                    json["err"] = "need at least 4 control points (or 3+ for Catmull-Rom)";
+                    return json.ToJsonString();
+                }
+                // ① 稠密折线（与 BuildStations 内部同一套 64 细分口径）
+                const int Subdivisions = 64;
+                var polyline = new List<Vector3>();
+                var lengths = new List<float>();
+                float total = 0f;
+                Vector3 previous = Evaluate(cubics[0], 0f);
+                polyline.Add(previous);
+                lengths.Add(0f);
+                foreach (Cubic cubic in cubics) {
+                    for (int i = 1; i <= Subdivisions; i++) {
+                        Vector3 p = Evaluate(cubic, i / (float)Subdivisions);
+                        total += Vector3.Distance(p, previous);
+                        polyline.Add(p);
+                        lengths.Add(total);
+                        previous = p;
+                    }
+                }
+                // ② 站点（与 SweepBezier 完全同一条路径）
+                List<(Vector3 P, Vector3 T, Vector3 R, Vector3 U)> stations = BuildStations(cubics, options.Step);
+                var stationArray = new JsonArray();
+                var stationDistances = new List<float>();
+                Vector3 lastP = stations.Count > 0 ? stations[0].P : Vector3.Zero;
+                float acc = 0f;
+                for (int i = 0; i < stations.Count; i++) {
+                    (Vector3 p, Vector3 t, Vector3 r, Vector3 u) = stations[i];
+                    float d = i == 0 ? 0f : Vector3.Distance(p, lastP);
+                    if (i > 0) {
+                        stationDistances.Add(d);
+                        acc += d;
+                    }
+                    lastP = p;
+                    if (i < 512) {
+                        stationArray.Add(new JsonObject {
+                            ["i"] = i,
+                            ["s"] = Math.Round(acc, 4),
+                            ["p"] = new JsonArray(Math.Round(p.X, 4), Math.Round(p.Y, 4), Math.Round(p.Z, 4)),
+                            ["t"] = new JsonArray(Math.Round(t.X, 5), Math.Round(t.Y, 5), Math.Round(t.Z, 5)),
+                            ["r"] = new JsonArray(Math.Round(r.X, 5), Math.Round(r.Y, 5), Math.Round(r.Z, 5)),
+                            ["u"] = new JsonArray(Math.Round(u.X, 5), Math.Round(u.Y, 5), Math.Round(u.Z, 5)),
+                        });
+                    }
+                }
+                float minD = float.MaxValue, maxD = float.MinValue, sumD = 0f;
+                foreach (float d in stationDistances) {
+                    minD = MathF.Min(minD, d);
+                    maxD = MathF.Max(maxD, d);
+                    sumD += d;
+                }
+                var polylineArray = new JsonArray();
+                for (int i = 0; i < polyline.Count && i < 4096; i++) {
+                    polylineArray.Add(new JsonArray(Math.Round(polyline[i].X, 4),
+                        Math.Round(polyline[i].Y, 4), Math.Round(polyline[i].Z, 4)));
+                }
+                json["ok"] = true;
+                var controlArray = new JsonArray();
+                foreach (Vector3 cp in points) {
+                    controlArray.Add(new JsonArray(Math.Round(cp.X, 4), Math.Round(cp.Y, 4), Math.Round(cp.Z, 4)));
+                }
+                json["controlPoints"] = controlArray;
+                json["cubicCount"] = cubics.Count;
+                json["stepMetres"] = Math.Round(options.Step, 4);
+                json["polylineLengthMetres"] = Math.Round(total, 4);
+                json["polylineCount"] = polyline.Count;
+                json["stationCount"] = stations.Count;
+                json["stationSpanMetres"] = Math.Round(acc, 4);
+                json["stationStep"] = new JsonObject {
+                    ["count"] = stationDistances.Count,
+                    ["min"] = stationDistances.Count == 0 ? 0.0 : Math.Round(minD, 4),
+                    ["max"] = stationDistances.Count == 0 ? 0.0 : Math.Round(maxD, 4),
+                    ["mean"] = stationDistances.Count == 0 ? 0.0 : Math.Round(sumD / stationDistances.Count, 4),
+                    ["maxDeviationFromRequestedStep"] = stationDistances.Count == 0
+                        ? 0.0
+                        : Math.Round(MathF.Max(MathF.Abs(maxD - options.Step), MathF.Abs(minD - options.Step)), 4),
+                };
+                json["polyline"] = polylineArray;
+                json["stations"] = stationArray;
+                json["note"] = "只读探针：与 SweepBezier 共用 TryParseSpec/BuildCubics/BuildStations，"
+                               + "不写世界、不需要常驻区块";
+            }
+            catch (Exception ex) {
+                json["ok"] = false;
+                json["err"] = ex.Message;
+            }
+            return json.ToJsonString();
+        }
+
         /// <summary>撤销最近一次扫掠（按记录的旧值逐格还原）。</summary>
         public static string Undo() {
             var result = new Result { Op = "Undo" };
