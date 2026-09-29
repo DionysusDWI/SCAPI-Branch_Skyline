@@ -426,6 +426,21 @@ namespace Game {
         public static long ShellOriginMismatch { get; private set; }
         public static int FileRecords => m_fileRecords;
         static long m_compactRewrites;
+
+        // [v0.1.156 · CC P2 `104218Z`] **压实策略的开关与账本**
+        /// <summary>死记录占比达到该值就**全量重写**（默认 0.30，CC 建议值）。</summary>
+        public static double CompactDeadRatio { get; set; } = 0.30;
+        /// <summary>壳仓文件达到该字节数就**全量重写**（默认 512 MiB，兜底；CC 建议值）。</summary>
+        public static long CompactMaxBytes { get; set; } = 512L * 1024 * 1024;
+        static long m_lastLiveRecords;
+        static double m_lastDeadRatio;
+        static bool m_lastCompactByRatio;
+        static bool m_lastCompactBySize;
+        /// <summary>最近一次保存的压实决策（只读，供探针与验收）。</summary>
+        public static long LastLiveRecords => m_lastLiveRecords;
+        public static double LastDeadRatio => m_lastDeadRatio;
+        public static bool LastCompactByRatio => m_lastCompactByRatio;
+        public static bool LastCompactBySize => m_lastCompactBySize;
         public static double LastSaveMs { get; private set; }
         public static double LastLoadMs { get; private set; }
         public static long FileBytes { get; private set; }
@@ -2416,8 +2431,27 @@ namespace Game {
                 m_dirty = false;                       // 没有要写的：别开档
                 return;
             }
+            // [v0.1.156 · CC P2 `104218Z` 整改] **压实触发**。
+            //
+            // 旧口径只看"这次要写的条数相对总条数够不够小"：`pending*2 < max(64, fileRecords)`。
+            // 在 `fileRecords = 370,496` 这种量级下**几乎恒真** ⇒ **永远 append**：墓碑（删除标记）
+            // 与过期记录永不回收，文件只增（实测 1.42 GB / 370,496 条，而活动立方体只有 6.4k~13.6k
+            // —— 按 4108 B/条，活动记录理论上只需 ~26~56 MB）。
+            //
+            // 新口径：**追加只是"优选项"，两个硬条件任一成立就必须全量重写**：
+            //   * `deadRatio = 1 − live/fileRecords ≥ CompactDeadRatio`（默认 0.30）：死记录占比过大；
+            //   * `FileBytes ≥ CompactMaxBytes`（默认 512 MiB）：文件绝对大小上限（兜底）。
+            // 两个阈值都做成可写开关（便于 A/B 与后续裁定）；默认值是 CC 建议值。
+            long liveRecords = m_entries.Count;
+            double deadRatio = m_fileRecords > 0 ? 1.0 - (double)liveRecords / m_fileRecords : 0.0;
+            m_lastLiveRecords = liveRecords;
+            m_lastDeadRatio = deadRatio;
+            m_lastCompactByRatio = m_fileHeaderValid && m_fileRecords > 0
+                && deadRatio >= CompactDeadRatio;
+            m_lastCompactBySize = m_fileHeaderValid && FileBytes >= CompactMaxBytes;
             bool append = m_fileHeaderValid && m_fileRecords > 0
-                && pending * 2 < Math.Max(64, m_fileRecords);
+                && pending * 2 < Math.Max(64, m_fileRecords)
+                && !m_lastCompactByRatio && !m_lastCompactBySize;
             m_appendMode = append;
             m_saveQueue = [];
             if (append) {
@@ -2676,6 +2710,14 @@ namespace Game {
                 ["savedRecordsTotal"] = SavedRecordsTotal,
                 ["loadedRecordsTotal"] = LoadedRecordsTotal,
                 ["fileRecords"] = m_fileRecords,
+                // [v0.1.156 · CC P2 104218Z] 压实策略与其最近一次决策
+                ["compactDeadRatioThreshold"] = CompactDeadRatio,
+                ["compactMaxBytes"] = CompactMaxBytes,
+                ["lastLiveRecords"] = m_lastLiveRecords,
+                ["lastDeadRatio"] = Math.Round(m_lastDeadRatio, 4),
+                ["lastCompactByRatio"] = m_lastCompactByRatio,
+                ["lastCompactBySize"] = m_lastCompactBySize,
+                ["compactRewrites"] = m_compactRewrites,
                 ["shellOriginMismatch"] = ShellOriginMismatch,
                 ["appendedRecordsTotal"] = m_appendedRecords,
                 ["appendedBytes"] = m_appendedBytes,

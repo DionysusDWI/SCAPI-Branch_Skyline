@@ -279,6 +279,20 @@ namespace Game {
             set => SkylineCubeShellStore.RestrictLod = value;
         }
 
+        /// <summary>**[v0.1.156 · CC P2 `104218Z`] 壳仓压实策略（可写）**：
+        /// 死记录占比阈值（默认 0.30）与文件绝对上限（默认 512 MiB）。
+        /// 为什么要它：旧口径 `pending*2 &lt; max(64, fileRecords)` 在 37 万条时恒真 ⇒ 永远 append、
+        /// 墓碑永不回收（实测 1.42 GB vs 活动记录理论 ~26~56 MB）。</summary>
+        public static double CubeShellCompactDeadRatio {
+            get => SkylineCubeShellStore.CompactDeadRatio;
+            set => SkylineCubeShellStore.CompactDeadRatio = Math.Clamp(value, 0.0, 1.0);
+        }
+
+        public static long CubeShellCompactMaxBytes {
+            get => SkylineCubeShellStore.CompactMaxBytes;
+            set => SkylineCubeShellStore.CompactMaxBytes = Math.Max(1024L * 1024, value);
+        }
+
         /// <summary>[v0.1.136 · CC 审计 P2] 区域单元格式的内存往返自检（含 HasSecond=true 合成样本）。</summary>
         public static string RegionCellRoundTripSelfCheck() =>
             SkylineLod.RegionCellRoundTripSelfCheck();
