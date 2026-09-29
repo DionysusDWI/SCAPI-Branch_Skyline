@@ -109,6 +109,35 @@ namespace Game {
             };
 
         /// <summary>
+        /// [v0.1.128] **视距兼容层第一半：MC → 方块/米**。
+        ///
+        /// MC 的"视距"是**半径多少个区块**（`renderDistance` 默认 12，服务端上限 32），
+        /// 一个区块 **16 方块宽** ⇒ 覆盖到的**水平半径** = `chunks × 16` 方块 = 米数。
+        ///
+        /// ⚠️ 只能乘 <see cref="McChunkWidthBlocks"/>（= MC 的区块宽）；乘我们的
+        /// `CubeSize`(16 m 壳立方体)、`32`（32³ 采样/存储块）或 `TerrainChunk.Height` 都是错的。
+        /// </summary>
+        public static int McRenderDistanceToBlocks(int chunks) => Math.Max(0, chunks) * McChunkWidthBlocks;
+
+        /// <summary>[v0.1.128] 同上，直接给米数（本分支 1 方块 = 1 m）。</summary>
+        public static float McRenderDistanceToMetres(int chunks) => McRenderDistanceToBlocks(chunks);
+
+        /// <summary>
+        /// [v0.1.128] **视距兼容层第二半：本分支 → MC 区块数**。
+        ///
+        /// 我们的视距是**方块数**（`SubsystemSky.VisibilityRange`）且加载窗是**球**，
+        /// MC 的是**方块半径**且加载窗是**平面方形** ⇒ 两者只在"半径"这一维上可比：
+        /// * 半径等价：`chunks = ceil(我们的视距 / 16)`；
+        /// * 面积不等：同样半径下**球只覆盖方形的 π/4 ≈ 78.5%**（见 <see cref="SphereSquareRatio"/>），
+        ///   所以"MC 12 区块"与"我们 192 m 球形"**不是**同一个加载集合，不能互相套用。
+        /// </summary>
+        public static int OurViewRangeToMcChunks(float metres) =>
+            (int)MathF.Ceiling(Math.Max(0f, metres) / McChunkWidthBlocks);
+
+        /// <summary>[v0.1.128] 同半径下球窗/方窗的**面积比** = π/4 ≈ 0.7854。</summary>
+        public static float SphereSquareRatio => MathF.PI * 0.25f;
+
+        /// <summary>
         /// DH 的 `calcDetailLevelFromDistance`（`LodQuadTree.java:1265`）：
         /// `detailLevel = floor( log_base( distance / (unit × CHUNK_WIDTH) ) )`，
         /// 夹在 `[0, 5]`（我们的壳最多降到"整块"= 1/32 精度）。
@@ -1241,7 +1270,10 @@ namespace Game {
                 (float quadraticBase, int unit) = DhQualityParams();
                 JsonArray levels = [];
                 for (int level = 0; level <= 5; level++) {
-                    float boundary = unit * CubeSize * MathF.Pow(quadraticBase, level);
+                    // [v0.1.128] 边界的单位是**方块**：`unit × McChunkWidthBlocks(16)`。
+                    // 旧写法用 `CubeSize`（我们的壳立方体边长，也正好 16 m）—— 数值上巧合相等，
+                    // 但语义是错的（用户口径：两套公式不能互相套用）⇒ 一律走 MC 区块宽常数。
+                    float boundary = unit * McChunkWidthBlocks * MathF.Pow(quadraticBase, level);
                     levels.Add(new JsonObject {
                         ["level"] = level,
                         ["step"] = 1 << level,
@@ -1273,6 +1305,28 @@ namespace Game {
         }
 
         /// <summary>
+        /// [v0.1.128] MC 视距（区块半径）⇄ 方块/米 ⇄ 我们的球半径 的**换算表**。
+        /// 表里每一行都能手算核对：`blocks = chunks × 16`；`ourViewRange ≥ blocks` 才覆盖到该半径。
+        /// </summary>
+        public static JsonArray BuildViewDistanceTable(float ourViewRangeMetres) {
+            int[] chunkRadii = [4, 8, 12, 16, 24, 32];
+            JsonArray rows = [];
+            foreach (int chunks in chunkRadii) {
+                int blocks = McRenderDistanceToBlocks(chunks);
+                rows.Add(new JsonObject {
+                    ["mcChunks"] = chunks,
+                    ["mcBlocks"] = blocks,
+                    ["mcMetres"] = blocks,                                  // 1 方块 = 1 m
+                    ["mcChunkColumns"] = (2 * chunks + 1) * (2 * chunks + 1),// 平面方形里的区块格数
+                    ["ourSphereBlocks"] = MathF.Round(SphereSquareRatio * blocks * blocks, 0), // 同半径球 = π r²
+                    ["ourViewRangeCovers"] = ourViewRangeMetres >= blocks,
+                    ["ourViewRangeAsMcChunks"] = OurViewRangeToMcChunks(ourViewRangeMetres),
+                });
+            }
+            return rows;
+        }
+
+        /// <summary>
         /// [v0.1.127] **里程碑 2.4 的兼容换算表**（只读）：把 MC / DH / 本分支三套"距离与粒度"
         /// 的单位摆在同一张表里，并给出**逐条换算规则**。用户口径是"两套公式不能互相套用，需要做兼容"，
         /// 这张表就是那个兼容层的**可核对形式**（每个数字都能对上源码或运行态读数）。
@@ -1298,6 +1352,7 @@ namespace Game {
                 ["ok"] = true,
                 ["mc"] = new JsonObject {
                     ["chunkWidthBlocks"] = McChunkWidthBlocks,
+                    ["chunkWidthVerticalBlocks"] = 16,      // MC 的 section 也是 16（-64..320 共 24 段）
                     ["renderDistanceUnit"] = "区块（半径）",
                     ["window"] = "平面方形（水平）",
                 },
@@ -1310,6 +1365,8 @@ namespace Game {
                 },
                 ["ours"] = new JsonObject {
                     ["terrainChunkWidthBlocks"] = TerrainChunk.Size,          // 本分支 = 16（与 MC 同）
+                    ["terrainChunkHeightBlocks"] = TerrainChunk.Height,       // 本分支 = 2048（MinHeight −1024..1023）
+                    ["verticalBand32"] = 32,                                  // 竖直分配单位 = 32 层（16×16×32 = 32 KiB）
                     ["cubeChunk32Side"] = 32,                                 // 32³ 立方区块原型/存储
                     ["lodCubeMetres"] = CubeSize,                             // 壳立方体 16 m = 1 个地形区块
                     ["lodSamplesPerCube"] = 32,                               // 每立方体 32³ 采样 ⇒ 0.5 m 体素
@@ -1317,12 +1374,23 @@ namespace Game {
                     ["window"] = "球形/椭球（水平半径 = 视距；竖直按 VisibilityRangeYMultiplier）",
                     ["bandOuterMetres"] = MathF.Round(viewRange + BandMetres, 1),
                 },
+                // [v0.1.128] 视距换算的**可核对表**：MC 的区块半径 ⇄ 方块/米 ⇄ 我们的球半径。
+                ["viewDistance"] = new JsonObject {
+                    ["mcToBlocks"] = "半径方块 = MC 区块数 × 16（McChunkWidthBlocks）",
+                    ["oursToMcChunks"] = "MC 区块数 = ceil(我们的视距米数 ÷ 16)",
+                    ["sphereOverSquareAreaRatio"] = MathF.Round(SphereSquareRatio, 4),
+                    ["equivalence"] = "同半径下球只覆盖方形的 " + MathF.Round(SphereSquareRatio * 100f, 1)
+                                      + "% ⇒ 只能对齐**半径**，不能对齐加载集合",
+                    ["table"] = BuildViewDistanceTable(viewRange),
+                },
                 ["conversions"] = new JsonArray(
                     "① 距离：DH 的 `distanceUnitInBlocks × 16` 是**方块数**；本分支 1 方块 = 1 m ⇒ 数值即米数，**不要**乘 16/32 之外的东西",
                     "② 绝不能用本分支的 `CubeSize`(16) 或 32³ 立方块边长去替代 MC 的区块宽 —— 那两个 16/32 与 DH 公式无关",
                     "③ 视距语义：MC/DH 视距是**区块半径**（× 16 得方块），本分支是**方块数**且加载窗是**球** ⇒ DH 的档位边界要按**绝对距离**用，不要按'相对视距'用",
                     "④ 竖直：DH/LOD 只按**水平距离**分级；本分支球形窗会在高空丢掉远处地面列 ⇒ 壳/LOD 的**分级用水平距离**、**覆盖与卸载用球**，两者不混用",
-                    "⑤ 采样率：DH 最细的 LOD 段是 64 方块见方（`SECTION_MINIMUM_DETAIL_LEVEL = 6`）；本分支最细是 16 m 立方体 32³（0.5 m 体素）⇒ 我们更细，档位只需覆盖 DH 的前几级"
+                    "⑤ 采样率：DH 最细的 LOD 段是 64 方块见方（`SECTION_MINIMUM_DETAIL_LEVEL = 6`）；本分支最细是 16 m 立方体 32³（0.5 m 体素）⇒ 我们更细，档位只需覆盖 DH 的前几级",
+                    "⑥ 本分支里的 `32` 有两个，都与 MC 的区块宽无关：地形**竖直分配单位 32 层**（16×16×32 带），以及 **32³ 采样/存储块**；MC 的区块宽恒为 16",
+                    "⑦ 本分支 `TerrainChunk.Size = 16`（水平）与 MC 相同、但 `Height = 2048`（−1024..1023，原版是 0..255）⇒ '区块高' 更不是可比量，跨单位一律走上面三条半径换算"
                 ),
                 ["levelBoundaries"] = levels,
                 ["note"] = "用户口径 2.2/2.4：DH 的水平距离分级即与对应 LOD 区块的最短距离；"

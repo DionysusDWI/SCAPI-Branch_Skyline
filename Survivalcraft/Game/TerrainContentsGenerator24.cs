@@ -249,7 +249,31 @@ namespace Game {
 
         public bool TGCavesAndPockets;
 
-        public virtual int OceanLevel => 64 + m_worldSettings.SeaLevelOffset;
+        // ===== [v0.1.128] 里程碑 5.1：**原生地形的"低基线"模式** =====
+        /// <summary>
+        /// 地形基线（世界 y）。**世界设置里 `TerrainLevel` 为非正数 ⇒ 用那个负数当基线**
+        /// （例如 -940：地形面就从 -940 起算，上方 ~1900 格全是可建造空间）；
+        /// `TerrainLevel > 0`（上游默认 64）时**逐位回到上游行为**（offset = 0）。
+        ///
+        /// 为什么这么定：用户口径 5.1 是"**基岩应该在 -1024 处**，尝试以此高度自然生成原生地形"
+        /// —— 本分支世界是 -1024..1023，而上游这一整套生成器（密度网格、列扫描、雪线/沙滩线）
+        /// 的竖直语义**全部写死在"海平面 64、世界 0..255"**上（`CalculateHeight` 里那句
+        /// `Clamp(64f + num19, 10f, 251f)` 就是证据）。所以这里引入一个统一的 `Offset`：
+        /// **算法继续按"旧语义坐标"算，只在读写方块时映射到世界坐标**（`Wy()`），
+        /// 这样雪线/沙滩线/洞穴这些阈值不用逐个重新标定。
+        /// </summary>
+        public virtual int BaselineY => SkylineTerrainBaseline.Resolve(m_worldSettings);
+
+        /// <summary>世界 y − 旧语义 y（默认 0 = 上游行为）。</summary>
+        public virtual int TerrainOffset => SkylineTerrainBaseline.Offset(m_worldSettings);
+
+        /// <summary>旧语义 y → 世界 y。</summary>
+        public int Wy(int legacyY) => SkylineTerrainBaseline.Wy(m_worldSettings, legacyY);
+
+        /// <summary>[v0.1.128] **世界底层的 8 格密度采样数**（覆盖 `MinHeight..HeightMinusOne`）。</summary>
+        public static int DensitySamplesY => SkylineTerrainBaseline.DensitySamplesY;
+
+        public virtual int OceanLevel => Wy(64) + m_worldSettings.SeaLevelOffset;
 
         public List<ChunkGenerationStep> ChunkGenerationStep1 = [];
         public List<ChunkGenerationStep> ChunkGenerationStep2 = [];
@@ -474,7 +498,9 @@ namespace Game {
             float f3 = TGRiversStrength * num12;
             float num18 = num13 + num14 + num15 + num17 + num16;
             float num19 = MathUtils.Min(MathUtils.Lerp(num18, x2, f3), num18);
-            return Math.Clamp(64f + num19, 10f, 251f);
+            // [v0.1.128] 里程碑 5.1：地形面 = **世界基线** + 原有起伏；钳制范围改成**世界的真实上下界**
+            //   （原来写死 `10..251` 是"世界只有 0..255"时代的产物，会把低基线地形整个夹到 10 格）。
+            return Math.Clamp(BaselineY + num19, TerrainChunk.MinHeight + 8f, TerrainChunk.HeightMinusOne - 4f);
         }
 
         public virtual int CalculateTemperature(float x, float z) => Math.Clamp(
@@ -593,7 +619,10 @@ namespace Game {
                     grid2d2.Set(j, i, CalculateMountainRangeFactor(j + num3, i + num4));
                 }
             }
-            Grid3d grid3d = new(num / 4 + 1, 33, num2 / 4 + 1);
+            // [v0.1.128] 里程碑 5.1：密度网格的**竖直采样数**从写死的 33（= 0..256 格）改成
+            //   **覆盖整个世界**（`DensitySamplesY` = 257，8 格一个采样 ⇒ 2056 格）；
+            //   采样点用 `Wy()` 映射到世界 y（旧语义照旧，噪声/阈值都不用重标）。
+            Grid3d grid3d = new(num / 4 + 1, DensitySamplesY, num2 / 4 + 1);
             for (int k = 0; k < grid3d.SizeX; k++) {
                 for (int l = 0; l < grid3d.SizeZ; l++) {
                     int num5 = k * 4 + num3;
@@ -602,7 +631,8 @@ namespace Game {
                     float v = CalculateMountainRangeFactor(num5, num6);
                     float num8 = MathUtils.Lerp(TGMinTurbulence, 1f, Squish(v, TGTurbulenceZero, 1f));
                     for (int m = 0; m < grid3d.SizeY; m++) {
-                        int num9 = m * 8;
+                        // [v0.1.128] 里程碑 5.1：网格轴从**世界最低点**起（上游 0..256）
+                        int num9 = TerrainChunk.MinHeight + m * 8;      // 世界 y
                         float num10 = TGTurbulenceStrength
                             * num8
                             * MathUtils.Saturate(num7 - num9)
@@ -619,7 +649,7 @@ namespace Game {
                                 - 1f);
                         float num11 = num9 + num10;
                         float num12 = num7 - num11;
-                        num12 += MathUtils.Max(4f * (TGDensityBias - num9), 0f);
+                        num12 += MathUtils.Max(4f * (Wy((int)TGDensityBias) - num9), 0f);
                         grid3d.Set(k, m, l, num12);
                     }
                 }
@@ -671,7 +701,7 @@ namespace Game {
                                 bool flag = (temperatureFast > 8 && humidityFast < 8 && num33 < 0.97f) || (MathF.Abs(x4) < 16f && num33 < 0.97f);
                                 int num36 = TerrainChunk.CalculateCellIndex(x3, 0, z3);
                                 for (int num37 = 0; num37 < 8; num37++) {
-                                    int num38 = num37 + num14 * 8;
+                                    int num38 = TerrainChunk.MinHeight + num37 + num14 * 8;   // 世界 y
                                     int value = 0;
                                     if (num30 < 0f) {
                                         if (num38 <= oceanLevel) {
@@ -705,9 +735,11 @@ namespace Game {
                 for (int j = 0; j < 16; j++) {
                     int num = i + chunk.Origin.X;
                     int num2 = j + chunk.Origin.Y;
-                    int num3 = TerrainChunk.CalculateCellIndex(i, 254, j);
-                    int num4 = 254;
-                    while (num4 >= 0) {
+                    // [v0.1.128] 里程碑 5.1：列扫描从**世界顶部**扫到**世界底部**
+                    //   （上游写死 254..0，是"世界只有 0..255"时代的东西 —— 低基线地形会长在下面，扫不到）。
+                    int num3 = TerrainChunk.CalculateCellIndex(i, TerrainChunk.HeightMinusOne - 1, j);
+                    int num4 = TerrainChunk.HeightMinusOne - 1;
+                    while (num4 >= TerrainChunk.MinHeight) {
                         int cellValue = chunk.GetCellValueFast(num3);
                         int num5 = Terrain.ExtractContents(cellValue);
                         if (!BlocksManager.Blocks[num5].IsTransparent_(cellValue)) {
@@ -720,9 +752,12 @@ namespace Game {
                             }
                             else {
                                 int num8 = temperature / 4;
-                                int num9 = num4 + 1 < 255 ? chunk.GetCellContentsFast(i, num4 + 1, j) : 0;
-                                num7 = num4 > 120 && SubsystemWeather.IsPlaceFrozen(temperature, num4) ? 62 :
-                                    (num4 < 66 || num4 == 84 + num8 || num4 == 103 + num8) && humidity == 9 && temperature % 6 == 1 ? 66 :
+                                int num9 = num4 + 1 < TerrainChunk.HeightMinusOne
+                                    ? chunk.GetCellContentsFast(i, num4 + 1, j) : 0;
+                                // 语义阈值（雪线 120 / 沙滩线 66 / 草线 84、103）都按**旧语义坐标**给 ⇒ 用 Wy 映射
+                                num7 = num4 > Wy(120) && SubsystemWeather.IsPlaceFrozen(temperature, num4) ? 62 :
+                                    (num4 < Wy(66) || num4 == Wy(84 + num8) || num4 == Wy(103 + num8))
+                                        && humidity == 9 && temperature % 6 == 1 ? 66 :
                                     num9 != 18 || humidity <= 8 || humidity % 2 != 0 || temperature % 3 != 0 ? 2 : 72;
                             }
                             int num10;
@@ -730,13 +765,14 @@ namespace Game {
                                 num10 = (int)Math.Clamp(1f * -temperature, 1f, 7f);
                             }
                             else {
-                                float num11 = MathUtils.Saturate((num4 - 100f) * 0.05f);
+                                float num11 = MathUtils.Saturate((num4 - Wy(100)) * 0.05f);
                                 float f = MathUtils.Saturate(
                                     MathUtils.Saturate((num6 - 0.9f) / 0.1f) - MathUtils.Saturate((humidity - 3f) / 12f) + TGSurfaceMultiplier * num11
                                 );
                                 int min = (int)MathUtils.Lerp(4f, 0f, f);
                                 int max = (int)MathUtils.Lerp(7f, 0f, f);
-                                num10 = MathUtils.Min(random.Int(min, max), num4);
+                                // [v0.1.128] 里程碑 5.1：**"最多铺到世界底"**（上游 `Min(层数, y)` 在负 y 世界会退化 ⇒ 表层不铺）
+                                num10 = SkylineTerrainBaseline.LayersAboveBottom(random.Int(min, max), num4);
                             }
                             int num12 = TerrainChunk.CalculateCellIndex(i, num4 + 1, j);
                             for (int k = num12 - num10; k < num12; k++) {
@@ -771,49 +807,49 @@ namespace Game {
                     int num3 = (int)(5f + 3f * num2 * SimplexNoise.OctavedNoise(i, j, 0.33f, 1, 1f, 1f));
                     for (int l = 0; l < num3; l++) {
                         int x2 = i * 16 + random.Int(0, 15);
-                        int y2 = random.Int(5, 200);
+                        int y2 = random.Int(Wy(5), Wy(200));      // [v0.1.128] 5.1：矿脉高度随基线
                         int z = j * 16 + random.Int(0, 15);
                         m_coalBrushes[random.Int(0, m_coalBrushes.Count - 1)].PaintFastSelective(chunk, x2, y2, z, 3);
                     }
                     int num4 = (int)(6f + 2f * num2 * SimplexNoise.OctavedNoise(i + 1211, j + 396, 0.33f, 1, 1f, 1f));
                     for (int m = 0; m < num4; m++) {
                         int x3 = i * 16 + random.Int(0, 15);
-                        int y3 = random.Int(20, 65);
+                        int y3 = random.Int(Wy(20), Wy(65));
                         int z2 = j * 16 + random.Int(0, 15);
                         m_copperBrushes[random.Int(0, m_copperBrushes.Count - 1)].PaintFastSelective(chunk, x3, y3, z2, 3);
                     }
                     int num5 = (int)(5f + 2f * num2 * SimplexNoise.OctavedNoise(i + 713, j + 211, 0.33f, 1, 1f, 1f));
                     for (int n = 0; n < num5; n++) {
                         int x4 = i * 16 + random.Int(0, 15);
-                        int y4 = random.Int(2, 40);
+                        int y4 = random.Int(Wy(2), Wy(40));
                         int z3 = j * 16 + random.Int(0, 15);
                         m_ironBrushes[random.Int(0, m_ironBrushes.Count - 1)].PaintFastSelective(chunk, x4, y4, z3, 67);
                     }
                     int num6 = (int)(3f + 3f * num2 * SimplexNoise.OctavedNoise(i + 915, j + 272, 0.33f, 1, 1f, 1f));
                     for (int num7 = 0; num7 < num6; num7++) {
                         int x5 = i * 16 + random.Int(0, 15);
-                        int y5 = random.Int(50, 90);
+                        int y5 = random.Int(Wy(50), Wy(90));
                         int z4 = j * 16 + random.Int(0, 15);
                         m_saltpeterBrushes[random.Int(0, m_saltpeterBrushes.Count - 1)].PaintFastSelective(chunk, x5, y5, z4, 4);
                     }
                     int num8 = (int)(3f + 2f * num2 * SimplexNoise.OctavedNoise(i + 711, j + 1194, 0.33f, 1, 1f, 1f));
                     for (int num9 = 0; num9 < num8; num9++) {
                         int x6 = i * 16 + random.Int(0, 15);
-                        int y6 = random.Int(2, 40);
+                        int y6 = random.Int(Wy(2), Wy(40));
                         int z5 = j * 16 + random.Int(0, 15);
                         m_sulphurBrushes[random.Int(0, m_sulphurBrushes.Count - 1)].PaintFastSelective(chunk, x6, y6, z5, 67);
                     }
                     int num10 = (int)(0.5f + 2f * num2 * SimplexNoise.OctavedNoise(i + 432, j + 907, 0.33f, 1, 1f, 1f));
                     for (int num11 = 0; num11 < num10; num11++) {
                         int x7 = i * 16 + random.Int(0, 15);
-                        int y7 = random.Int(2, 15);
+                        int y7 = random.Int(Wy(2), Wy(15));
                         int z6 = j * 16 + random.Int(0, 15);
                         m_diamondBrushes[random.Int(0, m_diamondBrushes.Count - 1)].PaintFastSelective(chunk, x7, y7, z6, 67);
                     }
                     int num12 = (int)(3f + 2f * num2 * SimplexNoise.OctavedNoise(i + 799, j + 131, 0.33f, 1, 1f, 1f));
                     for (int num13 = 0; num13 < num12; num13++) {
                         int x8 = i * 16 + random.Int(0, 15);
-                        int y8 = random.Int(2, 50);
+                        int y8 = random.Int(Wy(2), Wy(50));
                         int z7 = j * 16 + random.Int(0, 15);
                         m_germaniumBrushes[random.Int(0, m_germaniumBrushes.Count - 1)].PaintFastSelective(chunk, x8, y8, z7, 67);
                     }
@@ -837,61 +873,61 @@ namespace Game {
                     float num4 = CalculateMountainRangeFactor(num * 16, num2 * 16);
                     for (int l = 0; l < 5; l++) {
                         int x = num * 16 + random.Int(0, 15);
-                        int y = random.Int(50, 150);
+                        int y = random.Int(Wy(50), Wy(150));      // [v0.1.128] 5.1：土穴高度随基线
                         int z = num2 * 16 + random.Int(0, 15);
                         m_dirtPocketBrushes[random.Int(0, m_dirtPocketBrushes.Count - 1)].PaintFastSelective(chunk, x, y, z, 3);
                     }
                     for (int m = 0; m < 20; m++) {
                         int x2 = num * 16 + random.Int(0, 15);
-                        int y2 = random.Int(20, 120);
+                        int y2 = random.Int(Wy(20), Wy(120));
                         int z2 = num2 * 16 + random.Int(0, 15);
                         m_gravelPocketBrushes[random.Int(0, m_gravelPocketBrushes.Count - 1)].PaintFastSelective(chunk, x2, y2, z2, 3);
                     }
                     for (int n = 0; n < 5; n++) {
                         int x3 = num * 16 + random.Int(0, 15);
-                        int y3 = random.Int(10, 200);
+                        int y3 = random.Int(Wy(10), Wy(200));
                         int z3 = num2 * 16 + random.Int(0, 15);
                         m_limestonePocketBrushes[random.Int(0, m_limestonePocketBrushes.Count - 1)].PaintFastSelective(chunk, x3, y3, z3, 3);
                     }
                     for (int num5 = 0; num5 < 1; num5++) {
                         int x4 = num * 16 + random.Int(0, 15);
-                        int y4 = random.Int(50, 70);
+                        int y4 = random.Int(Wy(50), Wy(70));
                         int z4 = num2 * 16 + random.Int(0, 15);
                         m_clayPocketBrushes[random.Int(0, m_clayPocketBrushes.Count - 1)].PaintFastSelective(chunk, x4, y4, z4, 3);
                     }
                     for (int num6 = 0; num6 < 20; num6++) {
                         int x5 = num * 16 + random.Int(0, 15);
-                        int y5 = random.Int(20, 120);
+                        int y5 = random.Int(Wy(20), Wy(120));
                         int z5 = num2 * 16 + random.Int(0, 15);
                         m_sandPocketBrushes[random.Int(0, m_sandPocketBrushes.Count - 1)].PaintFastSelective(chunk, x5, y5, z5, 4);
                     }
                     for (int num7 = 0; num7 < 4; num7++) {
                         int x6 = num * 16 + random.Int(0, 15);
-                        int y6 = random.Int(40, 60);
+                        int y6 = random.Int(Wy(40), Wy(60));
                         int z6 = num2 * 16 + random.Int(0, 15);
                         m_basaltPocketBrushes[random.Int(0, m_basaltPocketBrushes.Count - 1)].PaintFastSelective(chunk, x6, y6, z6, 4);
                     }
                     for (int num8 = 0; num8 < 3; num8++) {
                         int x7 = num * 16 + random.Int(0, 15);
-                        int y7 = random.Int(20, 40);
+                        int y7 = random.Int(Wy(20), Wy(40));
                         int z7 = num2 * 16 + random.Int(0, 15);
                         m_basaltPocketBrushes[random.Int(0, m_basaltPocketBrushes.Count - 1)].PaintFastSelective(chunk, x7, y7, z7, 3);
                     }
                     for (int num9 = 0; num9 < 6; num9++) {
                         int x8 = num * 16 + random.Int(0, 15);
-                        int y8 = random.Int(4, 50);
+                        int y8 = random.Int(Wy(4), Wy(50));
                         int z8 = num2 * 16 + random.Int(0, 15);
                         m_granitePocketBrushes[random.Int(0, m_granitePocketBrushes.Count - 1)].PaintFastSelective(chunk, x8, y8, z8, 67);
                     }
                     for (int num10 = 0; num10 < 20; num10++) {
                         int x9 = num * 16 + random.Int(0, 15);
-                        int y9 = random.Int(4, 120);
+                        int y9 = random.Int(Wy(4), Wy(120));
                         int z9 = num2 * 16 + random.Int(0, 15);
                         m_gravelPocketBrushes[random.Int(0, m_gravelPocketBrushes.Count - 1)].PaintFastSelective(chunk, x9, y9, z9, 67);
                     }
                     if (random.Bool(0.02f + 0.01f * num4)) {
                         int num11 = num * 16;
-                        int num12 = random.Int(40, 60);
+                        int num12 = random.Int(Wy(40), Wy(60));   // **地下湖**高度
                         int num13 = num2 * 16;
                         int num14 = random.Int(1, 3);
                         for (int num15 = 0; num15 < num14; num15++) {
@@ -905,7 +941,7 @@ namespace Game {
                     }
                     if (random.Bool(0.06f + 0.05f * num4)) {
                         int num19 = num * 16;
-                        int num20 = random.Int(15, 42);
+                        int num20 = random.Int(Wy(15), Wy(42));   // 岩浆池高度
                         int num21 = num2 * 16;
                         int num22 = random.Int(1, 2);
                         for (int num23 = 0; num23 < num22; num23++) {
@@ -997,7 +1033,7 @@ namespace Game {
                             cavePoint.Direction.Z = 0f;
                         }
                         if (cavePoint.StepsTaken > 30
-                            && cavePoint.Position.Y < 30f
+                                && cavePoint.Position.Y < Wy(30)      // [v0.1.128] 5.1：洞穴高度随基线
                             && random.Bool(0.02f)) {
                             cavePoint.Direction.X = 0f;
                             cavePoint.Direction.Y = 1f;
@@ -1009,7 +1045,7 @@ namespace Game {
                         if (random.Bool(0.06f)
                             && list.Count < 12
                             && cavePoint.StepsTaken > 20
-                            && cavePoint.Position.Y < 58f) {
+                            && cavePoint.Position.Y < Wy(58)) {
                             list.Add(
                                 new CavePoint {
                                     Position = cavePoint.Position,
@@ -1022,8 +1058,8 @@ namespace Game {
                         if (cavePoint.StepsTaken >= cavePoint.Length
                             || MathF.Abs(num9) > 34f
                             || MathF.Abs(num10) > 34f
-                            || cavePoint.Position.Y < 5f
-                            || cavePoint.Position.Y > 246f) {
+                            || cavePoint.Position.Y < Wy(5)
+                            || cavePoint.Position.Y > Wy(246)) {
                             num8++;
                         }
                         else if (cavePoint.StepsTaken % 20 == 0) {
@@ -1204,7 +1240,7 @@ namespace Game {
                         int num5 = i * 16 + random.Int(2, 13);
                         int num6 = j * 16 + random.Int(2, 13);
                         int num7 = terrain.CalculateTopmostCellHeight(num5, num6);
-                        if (num7 < 66) {
+                        if (num7 < Wy(66)) {      // [v0.1.128] 5.1：树只长在海平面以上
                             continue;
                         }
                         int cellContentsFast = terrain.GetCellContentsFast(num5, num7, num6);
@@ -1243,10 +1279,15 @@ namespace Game {
                     int num = i + chunk.Origin.X;
                     int num2 = j + chunk.Origin.Y;
                     float num3 = 2 + (int)(4f * SimplexNoise.OctavedNoise(num, num2, 0.1f, 1, 1f, 1f));
-                    for (int k = 0; k < num3; k++) {
+                    // [v0.1.128] 里程碑 5.1：**基岩层挪到世界最低点**（`MinHeight = -1024`）。
+                    //   上游这里写的是 `k = 0..num3`（世界只有 0..255 时代）。
+                    //   在 -1024..1023 的分支里，那 0..6 的"基岩塞子"下面还有 1000 多格**空洞**，
+                    //   玩家挖穿 y≈0..6 就会掉进去（也挡住了"往下建地下空间"）——
+                    //   用户口径就是"基岩应该在 -1024 处"。
+                    for (int k = TerrainChunk.MinHeight; k < TerrainChunk.MinHeight + num3; k++) {
                         chunk.SetCellValueFast(i, k, j, value);
                     }
-                    chunk.SetCellValueFast(i, 255, j, 0);
+                    chunk.SetCellValueFast(i, TerrainChunk.HeightMinusOne, j, 0);
                 }
             }
         }
@@ -1258,7 +1299,8 @@ namespace Game {
             Random random = new(m_seed + chunk.Coords.X + 3943 * chunk.Coords.Y);
             for (int i = 0; i < 16; i++) {
                 for (int j = 0; j < 16; j++) {
-                    for (int num = 254; num >= 0; num--) {
+                    // [v0.1.128] 列扫描覆盖整个世界（低基线时地表在世界下部）
+                    for (int num = TerrainChunk.HeightMinusOne - 1; num >= TerrainChunk.MinHeight; num--) {
                         int cellValueFast = chunk.GetCellValueFast(i, num, j);
                         int num2 = Terrain.ExtractContents(cellValueFast);
                         if (num2 != 0) {
@@ -1297,15 +1339,15 @@ namespace Game {
                         continue;
                     }
                     int num3 = 0;
-                    for (int num4 = 254; num4 >= 0; num4--) {
+                    for (int num4 = TerrainChunk.HeightMinusOne - 1; num4 >= TerrainChunk.MinHeight; num4--) {
                         if (Terrain.ExtractContents(chunk.GetCellValueFast(i, num4, j)) == 18) {
                             num3++;
                             int face = random.Int(0, 5);
                             Point3 point = CellFace.FaceToPoint3(face);
                             if (i + point.X >= 0
                                 && i + point.X < 16
-                                && num4 + point.Y >= 0
-                                && num4 + point.Y < 254
+                                && num4 + point.Y >= TerrainChunk.MinHeight
+                                && num4 + point.Y < TerrainChunk.HeightMinusOne
                                 && j + point.Z >= 0
                                 && j + point.Z < 16) {
                                 int cellValueFast = chunk.GetCellValueFast(i + point.X, num4 + point.Y, j + point.Z);
@@ -1326,7 +1368,7 @@ namespace Game {
                                     if (num3 < 4) {
                                         num7 *= 0.5f;
                                     }
-                                    if (num4 < 45) {
+                                    if (num4 < Wy(45)) {      // [v0.1.128] 5.1：深水阈值随基线
                                         num6 *= 0.1f;
                                         num7 *= 0.1f;
                                     }
@@ -1380,7 +1422,7 @@ namespace Game {
                 for (int j = 0; j < 8; j++) {
                     int num4 = num2 + random.Int(-2, 2);
                     int num5 = num3 + random.Int(-2, 2);
-                    for (int num6 = 251; num6 >= 0; num6--) {
+                    for (int num6 = TerrainChunk.HeightMinusOne - 4; num6 >= TerrainChunk.MinHeight; num6--) {
                         switch (Terrain.ExtractContents(chunk.GetCellValueFast(num4, num6, num5))) {
                             case 7: {
                                 for (int k = num6 + 1;
@@ -1425,7 +1467,7 @@ namespace Game {
                 for (int j = 0; j < 5; j++) {
                     int x2 = num2 + random.Int(-1, 1);
                     int z = num3 + random.Int(-1, 1);
-                    for (int num4 = 254; num4 >= 0; num4--) {
+                    for (int num4 = TerrainChunk.HeightMinusOne - 1; num4 >= TerrainChunk.MinHeight; num4--) {
                         switch (Terrain.ExtractContents(chunk.GetCellValueFast(x2, num4, z))) {
                             case 8:
                                 chunk.SetCellValueFast(
@@ -1485,7 +1527,7 @@ namespace Game {
                     int x2 = num5 + random.Int(-2, 2);
                     int z = num6 + random.Int(-2, 2);
                     int num11 = 0;
-                    for (int num12 = 254; num12 >= 0; num12--) {
+                    for (int num12 = TerrainChunk.HeightMinusOne - 1; num12 >= TerrainChunk.MinHeight; num12--) {
                         int num13 = Terrain.ExtractContents(chunk.GetCellValueFast(x2, num12, z));
                         Block block = BlocksManager.Blocks[num13];
                         if (num13 != 0) {
@@ -1527,7 +1569,7 @@ namespace Game {
                     int x2 = num + random.Int(-1, 1);
                     int z = num2 + random.Int(-1, 1);
                     int num6 = 0;
-                    for (int num7 = 254; num7 >= 0; num7--) {
+                    for (int num7 = TerrainChunk.HeightMinusOne - 1; num7 >= TerrainChunk.MinHeight; num7--) {
                         int num8 = Terrain.ExtractContents(chunk.GetCellValueFast(x2, num7, z));
                         switch (num8) {
                             case 18:
@@ -1572,7 +1614,8 @@ namespace Game {
                 int num4 = chunk.CalculateTopmostCellHeight(num2, num3);
                 for (int j = 0; j < 100; j++) {
                     int num5 = num2 + random.Int(-3, 3);
-                    int num6 = Math.Clamp(num4 + random.Int(-12, 1), 1, 255);
+                    int num6 = Math.Clamp(num4 + random.Int(-12, 1),
+                                          TerrainChunk.MinHeight + 1, TerrainChunk.HeightMinusOne);
                     int num7 = num3 + random.Int(-3, 3);
                     switch (Terrain.ExtractContents(chunk.GetCellValueFast(num5, num6, num7))) {
                         case 2:
@@ -1704,8 +1747,8 @@ namespace Game {
                     int num5 = num2 + random.Int(-4, 4);
                     int num6 = num3 + random.Int(-4, 4);
                     int num7 = chunk.CalculateTopmostCellHeight(num5, num6);
-                    if (num7 < 10
-                        || num7 > 246) {
+                    if (num7 < Wy(10)         // [v0.1.128] 5.1：坟墓高度带随基线
+                        || num7 > Wy(246)) {
                         continue;
                     }
                     int num8 = random.Int(0, 3);
@@ -1884,12 +1927,12 @@ namespace Game {
                     }
                 }
             }
-            if (num >= 190 /*&& num <= 255 */
+            if (num >= Wy(190) /*&& num <= 255 */
                 && point.X >= 1
                 && point.X < 15
                 && point.Y >= 1
                 && point.Y < 15) {
-                int data = Math.Clamp((int)(4f * MathUtils.LinearStep(190f, 256f, num)), 0, 3);
+                int data = Math.Clamp((int)(4f * MathUtils.LinearStep(Wy(190), Wy(256), num)), 0, 3);
                 chunk.SetCellValueFast(point.X, num, point.Y, Terrain.MakeBlockValue(258, 0, data));
             }
         }
@@ -1899,7 +1942,7 @@ namespace Game {
                 for (int j = 0; j < 16; j++) {
                     int num = i + chunk.Origin.X;
                     int num2 = j + chunk.Origin.Y;
-                    for (int num3 = 254; num3 >= 0; num3--) {
+                    for (int num3 = TerrainChunk.HeightMinusOne - 1; num3 >= TerrainChunk.MinHeight; num3--) {
                         int cellValueFast = chunk.GetCellValueFast(i, num3, j);
                         int num4 = Terrain.ExtractContents(cellValueFast);
                         if (num4 != 0) {
@@ -1938,10 +1981,10 @@ namespace Game {
         public virtual void PropagateFluidsDownwards(TerrainChunk chunk) {
             for (int i = 0; i < 16; i++) {
                 for (int j = 0; j < 16; j++) {
-                    int num = TerrainChunk.CalculateCellIndex(i, 255, j);
+                    int num = TerrainChunk.CalculateCellIndex(i, TerrainChunk.HeightMinusOne, j);
                     int num2 = 0;
-                    int num3 = 255;
-                    while (num3 >= 0) {
+                    int num3 = TerrainChunk.HeightMinusOne;
+                    while (num3 >= TerrainChunk.MinHeight) {
                         int num4 = Terrain.ExtractContents(chunk.GetCellValueFast(num));
                         if (num4 == 0
                             && num2 != 0
@@ -1960,10 +2003,10 @@ namespace Game {
         public virtual void UpdateFluidIsTop(TerrainChunk chunk) {
             for (int i = 0; i < 16; i++) {
                 for (int j = 0; j < 16; j++) {
-                    int num = TerrainChunk.CalculateCellIndex(i, 255, j);
+                    int num = TerrainChunk.CalculateCellIndex(i, TerrainChunk.HeightMinusOne, j);
                     int num2 = 0;
-                    int num3 = 255;
-                    while (num3 >= 0) {
+                    int num3 = TerrainChunk.HeightMinusOne;
+                    while (num3 >= TerrainChunk.MinHeight) {
                         int cellValueFast = chunk.GetCellValueFast(num);
                         int num4 = Terrain.ExtractContents(cellValueFast);
                         if (num4 != num2

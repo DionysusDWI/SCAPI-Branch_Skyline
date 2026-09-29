@@ -1220,10 +1220,11 @@ namespace Game {
                     int num = i + chunk.Origin.X;
                     int num2 = j + chunk.Origin.Y;
                     float num3 = 2 + (int)(4f * SimplexNoise.OctavedNoise(num, num2, 0.1f, 1, 1f, 1f));
-                    for (int k = 0; k < num3; k++) {
+                    // [v0.1.128] 基岩跟着世界最低层走（原版写死 0..6，本分支 MinHeight = −1024）。
+                    for (int k = TerrainChunk.MinHeight; k < TerrainChunk.MinHeight + num3; k++) {
                         chunk.SetCellValueFast(i, k, j, value);
                     }
-                    chunk.SetCellValueFast(i, 255, j, 0);
+                    chunk.SetCellValueFast(i, TerrainChunk.HeightMinusOne, j, 0);
                 }
             }
         }

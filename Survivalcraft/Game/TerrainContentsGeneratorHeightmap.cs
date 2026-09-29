@@ -105,7 +105,8 @@ namespace Game {
                     int cellIndex = TerrainChunk.CalculateCellIndex(i, 0, j);
                     for (int k = 0; k <= TerrainChunk.HeightMinusOne; k++) {
                         int value = Terrain.MakeBlockValue(0);
-                        if (k < 2 && m_worldSettings.TerrainLevel > 0) {
+                        // [v0.1.128] 里程碑 5.1：基岩层挪到**世界最低点**（与原生生成器同一口径）
+                        if (k < TerrainChunk.MinHeight + 2) {
                             value = Terrain.MakeBlockValue(1);                       // 基岩层
                         }
                         else if (k < surface) {

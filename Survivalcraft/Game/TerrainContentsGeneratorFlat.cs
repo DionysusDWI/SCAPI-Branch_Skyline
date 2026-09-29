@@ -70,8 +70,8 @@ namespace Game {
             for (int k = 0; k <= TerrainChunk.HeightMinusOne; k++) {   // [负高度实验] Height 现在是层数，不能再当最大 y
                         int value = Terrain.MakeBlockValue(0);
                         if (flag) {
-                            if (k < 2
-                                && m_worldSettings.TerrainLevel > 0) {
+                            // [v0.1.128] 里程碑 5.1：基岩层挪到**世界最低点**（上游这里是 y=0..1）
+                            if (k < TerrainChunk.MinHeight + 2) {
                                 value = Terrain.MakeBlockValue(1);
                             }
                             else if (k < m_worldSettings.TerrainLevel) {
@@ -84,8 +84,7 @@ namespace Game {
                                 value = Terrain.MakeBlockValue(m_worldSettings.TerrainOceanBlockIndex);
                             }
                         }
-                        else if (k < 2
-                            && m_worldSettings.TerrainLevel > 0) {
+                        else if (k < TerrainChunk.MinHeight + 2) {
                             value = Terrain.MakeBlockValue(1);
                         }
                         else if (k <= OceanLevel) {

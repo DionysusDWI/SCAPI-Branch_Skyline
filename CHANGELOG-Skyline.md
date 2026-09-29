@@ -7,6 +7,52 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.128] - 2026-09-29
+
+第一百三十五个版本：**里程碑 5.1（基岩下移到 −1024 + 原生地形按低基线生成）+ 里程碑 2.4 的
+视距单位兼容收口**。相对 v0.1.127 的变更：
+
+### 1. 基岩落到世界最低点（5.1）
+
+上游 `TerrainContentsGenerator21/22/23/24` 的竖直语义写死在"海平面 64、世界 0..255"：
+基岩写 **y=0..6**（下面 1000 多格是空洞）、`CalculateHeight` 夹 10..251、
+密度网格 33 层、列扫描 `254..0`。新增 `SkylineTerrainBaseline` 做统一换算
+（`Resolve = TerrainLevel ≤ 0 ? TerrainLevel : 64`，`Wy(legacyY) = legacyY + Offset`，
+`DensitySamplesY = 257`），21/24 全链路改成世界全高：基岩 `MinHeight..MinHeight+6`、
+密度网格轴 `MinHeight + m*8`、列扫描 `HeightMinusOne−1..MinHeight`、
+雪/沙/草阈值走 `Wy(...)`、流体传播也走全高；Flat/Heightmap 基岩 `MinHeight+2`；
+22/23 只对齐基岩位置（低基线生成对它们不适用，如实记录）。
+
+新世界 `BaseLab5` 验收 **7/7 PASS**：基岩 −1024/−1023 = 1/1、基岩→地表每 64 格 0 空洞、
+地表 66（基线 64）、`TerrainLevel=-940` 档地表 −928、还原 64。
+`heightlab/skyline-v0128-bedrock-baseline.py`、`notes/227`。
+
+### 1b. 非石质层与地下湖跟着基线走（用户第二轮反馈，同版修掉）
+
+用户现场反馈："没有对非石质方块、地下湖做适配，生成的地形是**裸露的岩石**"。根因是表层那行
+`MathUtils.Min(random(4..7), 地表 y)`：它表示"最多铺到 y=0"，而世界底已是 −1024 ⇒ 地表 y 为负时
+`Min(6, −938) = −938` ⇒ 表层循环 `k = num11 − num7; k &lt; num11` **一次都不跑** ⇒
+露出体材料 Granite/Sandstone/Basalt。修法：`SkylineTerrainBaseline.LayersAboveBottom()`。
+同一批漏改的旧高度常数一并换算（`Wy`）：`GenerateMinerals` 7 处、`GeneratePockets` 8 处 + **地下湖**
+水袋 + 岩浆池、`GenerateCaves` 4 处终止/分枝高度、树木"海平面以上"、坟墓高度带、海床附着物边界、
+出生点评分的高度带；24 号生成器同类位置一并改（22/23 仍只对齐基岩）。
+验收 `heightlab/skyline-v0128-surface-materials.py`（新世界 `SurfLab2`）**11/11 PASS**：
+默认基线土/沙顶 9/9、地下穴块 4/9、地下水 2/9；低基线土/沙顶 9/9、土层深度 9/9、穴块 2/9；
+并留一条算术断言证明旧钳位在负 y 下必然塌成 0 次循环。
+
+### 2. 视距单位兼容收口（2.4）
+
+用户口径："MC 区块 16、视距是**半径多少个区块**；SC 视距是**方块数量**，两者公式不能互相套用。"
+查证：本分支 `TerrainChunk.Size = 16`（水平，与 MC 同）、`Height = 2048`（原版 0..255）；
+用户说的"32"对应**竖直分配单位 32 层**（`16×16×32`）与 **32³ 采样/存储块**，**不是**区块宽。
+新增 `McRenderDistanceToBlocks/ToMetres`（`chunks × 16`）、`OurViewRangeToMcChunks`
+（`ceil(视距 / 16)`）、`SphereSquareRatio`（π/4 ≈ 0.7854）与 6 行换算表，
+`skyline.CubeShellDhCompat()` 规则 **5 → 7 条**；`DhTierTable()` 里
+"`unit × CubeSize`"的**巧合正确、语义错误**写法改成显式 `McChunkWidthBlocks`。
+
+可证伪对照：若误把 **32** 当 MC 区块宽，MEDIUM 的 L0 会算成 **384 m**（正确 **192 m**）。
+验收 `heightlab/skyline-v0128-unit-bridge.py` **10/10 PASS**；`notes/228`。
+
 ## [v0.1.127] - 2026-09-29
 
 第一百三十四个版本：**里程碑 2.2 —— 完整方块侧的 LOD 分级改成"以 Distant Horizons 源码经验为主"**，
