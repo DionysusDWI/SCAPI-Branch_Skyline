@@ -76,8 +76,12 @@ namespace Game {
             float corners = (RadiusChunks + 1) * TerrainChunk.Size * MathF.Sqrt(2f);
             float visibility = visibilityBlocks > 0f ? MathF.Max(visibilityBlocks, corners) : corners;
             try {
+                // [v0.1.137 修正] **用 2D 重载**：带 y 的那个重载会把 `SphereWindow` 置真（受
+                // `SkylineRuntime.SphereLoadingEnabled` 影响），而虚拟预加载点的 y 没有意义 ⇒
+                // 球窗的竖直判据会把大部分目标区块挡在"内容范围"外（实测只有 15/81 到 Valid）。
+                // 2D 重载显式 `SphereWindow=false`，与 `PlayerData` 给待出生点下发的方式一致。
                 updater.SetUpdateLocation(VirtualLocationIndex,
-                    new Vector3(centerX, 0f, centerZ), visibility, visibility * 0.5f);
+                    new Vector2(centerX, centerZ), visibility, visibility);
             }
             catch (Exception e) {
                 m_lastError = $"SetUpdateLocation: {e.Message}";

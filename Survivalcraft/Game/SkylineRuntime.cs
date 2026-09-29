@@ -281,6 +281,18 @@ namespace Game {
         /// <summary>释放预加载（已完成时用；未完成则等同取消）。</summary>
         public static string ChunkPreloadRelease() => SkylineChunkPreloader.Release();
 
+        /// <summary>[v0.1.138] 更新器逐 pass 耗时账本（只读，决定"并行哪一段"）。</summary>
+        public static string TerrainUpdateStats() =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeStatistics()
+            ?? "{\"err\":\"no updater\"}";
+
+        /// <summary>[v0.1.138] 区块内容指纹（FNV-1a 64 over all cell values）。</summary>
+        public static string ChunkContentHash(int cx, int cz) => SkylineChunkDeterminism.ChunkHash(cx, cz);
+
+        /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
+        public static string ChunkForceRegenerate(int cx, int cz) =>
+            SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);
+
         /// <summary>[v0.1.136] 体素壳刷新票的账本（编辑失效化后恢复体素壳用）。</summary>
         public static string VoxelRefreshTickets() => new JsonObject {
             ["pending"] = SkylineCubeShellStore.VoxelRefreshTicketsPending,

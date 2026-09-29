@@ -7,6 +7,53 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.138] - 2026-09-29
+
+第一百四十四版：**里程碑 5.2 第二段的前置** —— 在谈 C2ME 式并行之前，先把"该并行哪一段"的账本
+和"同样输入必须同样输出"的证据补齐。相对 v0.1.137 的变更：
+
+### 1. `TerrainUpdater.DescribeStatistics()`（新，只读）
+
+把引擎自己的 `UpdateStatistics` 导出成 JSON（**毫秒**）：`loading` 937 ms / `contents1..4` 34/20/43/156 ms /
+**`light` 5705 ms** / `vertices` 1372 ms / `budget` 10 ms（同一轮 `findBestChunk` 4035 次、9.7 ms）。
+**本探针不打印、不重置**，与既有的日志路径解耦，桥：`skyline.TerrainUpdateStats()`。
+结论（决定第二段往哪打）：**光照是绝对大头**（约占逐 pass 累计的 6 成），顶点重建次之；
+"并行哪一段"不再靠猜。
+
+### 2. `SkylineChunkDeterminism`（新，只读/受控）
+
+* `skyline.ChunkContentHash(cx,cz)` —— **FNV-1a 64** 哈希该区块全部格子的 `value`（含光照位），
+  附非空格数、最高非空 y、线程状态；非 `Valid` 时返回 `ok:false`（不猜）。
+* `skyline.ChunkForceRegenerate(cx,cz)` —— **仅当 `ModificationCounter == 0`**（纯生成、无玩家改动）
+  才 `FreeChunk` 让引擎按同一坐标重生成；否则**拒绝**（保护玩家数据）。
+
+### 3. 预加载点改用 2D 重载（一处真缺陷，由本轮验收揪出）
+
+v0.1.137 的虚拟加载点用带 y 的 `Vector3` 重载 ⇒ 引擎把 `SphereWindow` 置真，球窗的竖直判据
+把大部分目标区块挡在"内容范围"外（实测只有 **15/81** 到 `Valid`，进度假停）。
+改用 2D 重载（显式 `SphereWindow=false`，与引擎给待出生点下发的方式一致）后：
+r=4（**81 区块**）**2.07 s** 内 **81/81 `Valid`**，`avgFrameMs 33.4 / maxFrameMs 48.38`。
+
+### 4. 确定性验收（4/4 PASS，`heightlab/skyline-v0138-chunk-determinism.py`）
+
+「预加载 → `ChunkPreloadRelease()` → 引擎确认卸载 **3/3** → 再预加载」后，逐区块内容哈希**逐位相同**：
+`78aca8026d90d13c`、`c6b436069909a6aa`、`ad42561ac973dc66`；`ModificationCounter` 全程 **0**。
+证据 `data/sessions/skyline-v0138/chunk-determinism.json`。
+
+### 5. 线程模型分析（`notes/246`）
+
+把"哪些 pass 天生可并行、哪些有跨区块写"的静态清点列成清单：`light`（光源列表 + 传播）与
+`vertices`（纯几何重建，读已完成的内容）是首选的并行候选；生成器里的**洞穴/矿脉/树的跨区块写**
+必须先清点干净才能谈并行 —— 这正是下一步。
+
+### 如实边界（必须说清）
+
+* 本版**没有做任何并行**：三个探针只增加**可测性**，性能与行为默认值一概未变。
+* 哈希覆盖 `value`（材质 + 光照位），**不含实体/NPC**；"生成器跨区块写"的静态清点**尚未完成**。
+* 门禁 `heightlab/regression-skyline.py`：**PASS 19 / FAIL 0 / SKIP 2**（两项 SKIP 是
+  `shell-mesh-tiers` / `shell-column`，取决于当前机位附近有没有已加载壳层，脚本明确记为"不是通过"）。
+* 本版同时按用户口径精简 README（移掉上游模板里本分支**不推进**的"网页版"一节），当前 **9753** 字符。
+
 ## [v0.1.137] - 2026-09-29
 
 第一百四十三个版本：**里程碑 5.2 第一段 —— Chunky 式区块预加载**（+ 两处自测出的设计错误 + 体素壳刷新票）。

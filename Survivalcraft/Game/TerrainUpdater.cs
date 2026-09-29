@@ -195,6 +195,41 @@ namespace Game {
 
         public UpdateStatistics m_statistics = new();
 
+        /// <summary>
+        /// [v0.1.138 · 里程碑 5.2 第二段前置] **只读**：把逐 pass 的耗时/次数账本导出成 JSON
+        /// （不打印、不重置 —— 与 `LogTerrainUpdateStats` 那条日志路径解耦，供 5.2 的
+        /// "该并行哪一段"做决策）。字段名与 `UpdateStatistics` 一致，单位统一成**毫秒**。
+        /// </summary>
+        public virtual string DescribeStatistics() {
+            UpdateStatistics s = m_statistics;
+            return new System.Text.Json.Nodes.JsonObject {
+                ["findBestChunkMs"] = Math.Round(s.FindBestChunkTime * 1000.0, 2),
+                ["findBestChunkCount"] = s.FindBestChunkCount,
+                ["loadingMs"] = Math.Round(s.LoadingTime * 1000.0, 2),
+                ["loadingCount"] = s.LoadingCount,
+                ["contents1Ms"] = Math.Round(s.ContentsTime1 * 1000.0, 2),
+                ["contents1Count"] = s.ContentsCount1,
+                ["contents2Ms"] = Math.Round(s.ContentsTime2 * 1000.0, 2),
+                ["contents2Count"] = s.ContentsCount2,
+                ["contents3Ms"] = Math.Round(s.ContentsTime3 * 1000.0, 2),
+                ["contents3Count"] = s.ContentsCount3,
+                ["contents4Ms"] = Math.Round(s.ContentsTime4 * 1000.0, 2),
+                ["contents4Count"] = s.ContentsCount4,
+                ["lightMs"] = Math.Round(s.LightTime * 1000.0, 2),
+                ["lightCount"] = s.LightCount,
+                ["lightSourcesMs"] = Math.Round(s.LightSourcesTime * 1000.0, 2),
+                ["lightSourcesCount"] = s.LightSourcesCount,
+                ["lightPropagateMs"] = Math.Round(s.LightPropagateTime * 1000.0, 2),
+                ["lightPropagateCount"] = s.LightPropagateCount,
+                ["vertices1Ms"] = Math.Round(s.VerticesTime1 * 1000.0, 2),
+                ["vertices1Count"] = s.VerticesCount1,
+                ["vertices2Ms"] = Math.Round(s.VerticesTime2 * 1000.0, 2),
+                ["vertices2Count"] = s.VerticesCount2,
+                ["budgetMs"] = SkylineRuntime.TerrainUpdateBudgetMs,
+                ["note"] = "自上次 LogTerrainUpdateStats 重置以来的累计；本探针不重置、不打日志"
+            }.ToJsonString();
+        }
+
         public Task m_task;
 
         public AutoResetEvent m_updateEvent = new(true);

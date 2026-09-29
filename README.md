@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.137**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.138**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -26,15 +26,19 @@
 * **[v0.1.137] 区块预加载（里程碑 5.2 第一段，Chunky 式）**：`skyline.ChunkPreloadStart(x,z,r)`
   用**虚拟加载点**把目标区域交给引擎既有加载线程（只做排队/进度·ETA/帧开销/可取消），
   实测 r=6（**169 区块**）4.1 s 全部到 `Valid`、目标列真地形 y=64、可取消；C2ME 式的多线程加速是下一段。
+* **[v0.1.138] 5.2 第二段前置（让"并行哪一段"有依据）**：逐 pass 耗时账本
+  （`skyline.TerrainUpdateStats()`，**light 5705 ms 是绝对大头**）、区块内容指纹
+  `ChunkContentHash` / `ChunkForceRegenerate`，以及**确定性验收**——预加载→释放→引擎确认卸载 3/3→
+  再预加载后哈希**逐位相同**（`data/sessions/skyline-v0138/`）；顺带修掉预加载点的球窗判据
+  （改 2D 重载后 81/81 `Valid`）。**本版不做并行**，只补可测性。
 * 建筑工具：区域复制 / 镜像 / 旋转、蓝图导入导出、笔画式构建；
   `SkylineBuilder` 剖面扫掠——支持**三次贝塞尔曲线**（弧长等距）。
 * 大规模建筑压力测试：单区块 4096 件高复杂度家具；家具**逐级降分辨率 LOD**（`d_box(E)` 占替距）、
   几何预算与方盒占位、高复杂度家具安全阀。
-  **[v0.1.125] 标定完成（里程碑 2.2）**：修掉"打开开关当下不生效"的真缺陷；量出**出厂分界站得住**
-  （L1=47.4 m 处掩膜内 **0 px**，提前到 ≤30 m 立刻可见），**第二模型 qwen 独立复核一致**。
-* **[v0.1.123] 外部高度场驱动地形（5 清管线风险）**：测试类 `TerrainContentsGeneratorHeightmap`
-  （默认不生效，经 `skyline.TerrainDiffusionInstall` 装上）证明 SC 管线能吃外部高度图（27/27 点 `|Δ| ≤ 1`）；
-  且换生成器**往回追溯** ⇒ 真接扩散模型需"区域提交"。
+  **[v0.1.125] 标定完成（2.2）**：修掉"开关当下不生效"的真缺陷；出厂分界站得住
+  （L1=47.4 m 掩膜内 **0 px**），qwen 第二模型独立复核一致。
+* **[v0.1.123] 外部高度场驱动地形（5 清管线风险）**：`TerrainContentsGeneratorHeightmap`
+  （默认不生效）证明管线能吃外部高度图（27/27 点 `|Δ| ≤ 1`）；换生成器**往回追溯** ⇒ 真接扩散模型需"区域提交"。
 
 **超视距 LOD（里程碑 2；当前参考 Distant Horizons）**
 
@@ -51,9 +55,8 @@
   **[v0.1.128] 视距换算收口（2.4）**：`McRenderDistanceToBlocks/ToMetres`、`OurViewRangeToMcChunks`
   （`ceil(视距/16)`）、球/方面积比 π/4 与 6 行换算表，规则 5 → **7 条**；档位表不再借 `CubeSize`；
   可证伪对照：误把 32 当区块宽 ⇒ L0 由 192 m 变 384 m。验收 **10/10 PASS**。
-* **[v0.1.129] 里程碑 3.2 收口**：脏队列此前被两类"永远取不到"的单元占住（区块已卸载/不在窗口），
-  实测静止两分钟 `dirty` 恒挂 921~1055；现在取不到即销账 + 卸载预扫补采（128 个/次、0.1 ms）
-  ⇒ 静止与走 1.44 km 后 `dirty` 都回 **0**，手动全量 **452/452**。
+* **[v0.1.129] 里程碑 3.2 收口**：脏队列曾被"永远取不到"的单元占住（实测静止两分钟恒挂 921~1055）；
+  现在取不到即销账 + 卸载预扫补采（128 个/次、0.1 ms）⇒ 静止与走 1.44 km 后 `dirty` 都回 **0**。
 * **[v0.1.130/134] 里程碑 2.6 合并阶梯**：按 DH 档位公式分 **32 / 64 / 128 m** 三档
   （边界 384 / 768 m，合并 2³/4³/8³ 个 16 m 单元 ⇒ 等效精度 1/2/4 m）；半径 2048 m 时外环用
   14 个 128 m 块（等精度 32 m 块要 224 个，**省 16×**）；默认**关**。
@@ -163,13 +166,6 @@ powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
     * 在第 1 步解压出来的目录运行`dotnet Survivalcraft.dll`
     * 同样在解压出来的目录，先运行`chmod +x Survivalcraft`来添加可执行权限（只需要一次），再双击`Survivalcraft`即可
 
-### 网页版看这里
-> 需要支持 SharedArrayBuffer、OffscreenCanvas、Origin Private File System 等现代浏览器特性的浏览器，推荐使用最新版的 Chrome 浏览器。
-
-1. 打开 [https://scapiweb.netlify.app/](https://scapiweb.netlify.app/) 即可游玩
-
-说明：完全不支持模组和运行 Javascript
-
 ### 常见问题
 
 * 如果游戏打开后语言不是您希望的语言，请点击左下角第二个图标，即可切换语言
@@ -181,8 +177,6 @@ powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
 * 安装模组后打不开游戏，或者运行遇到任何错误，请先向模组作者反馈问题，如有必要再由模组作者向本仓库反馈问题
 * 如果 Windows 系统上游戏帧数不低但鼠标调整视角感觉卡顿，关闭系统设置-鼠标设置-增强指针精度，即可解决
 * 要取消 Windows 系统上的文件关联，游戏设置-设备兼容和日志-文件关联，禁用即可
-* 网页版打不开？请尝试更换更好的网络，如果还是不行，请打开 [https://scapiweb.netlify.app/dashboard.html](https://scapiweb.netlify.app/dashboard.html)，检测你的浏览器是否支持网页版所需的功能。这里推荐使用最新版的 Chrome 浏览器。
-* 网页版键盘操作没反应？请将输入法切换成英文模式
 
 ## 模组开发者引用、仓库构建说明等
 
