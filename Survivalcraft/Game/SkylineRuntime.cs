@@ -306,6 +306,13 @@ namespace Game {
         public static string GeneratorCtorProbe(int count) =>
             SkylineChunkDeterminism.GeneratorCtorProbe(count);
 
+        /// <summary>[v0.1.150 · CC P3] **日照 pass 的同轮次幂等性探针**（受控：会重跑该 pass 并把状态
+        /// 退回 `InvalidLight` 让引擎重走完整光照）。见 `notes/261 §5`。</summary>
+        public static string SunLightReplay(int cx, int cz, bool restore = true) =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater
+                ?.SunLightReplay(cx, cz, restore)
+            ?? "{\"ok\":false,\"err\":\"no updater\"}";
+
         /// <summary>[v0.1.146 · 审计验收用] **区块读盘失败注入**的账本（默认开关 -1 = 关）。</summary>
         public static string ChunkReadFailureInjection() => new JsonObject {
             ["injectAt"] = TerrainSerializer23.InjectChunkReadFailure,

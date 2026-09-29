@@ -1112,6 +1112,74 @@ namespace Game {
             return n;
         }
 
+        /// <summary>
+        /// [v0.1.150 · CC P3「日照位比对」] **日照/高度 pass 的同轮次幂等性探针**。
+        ///
+        /// 为什么要它：v0.1.139 的验收只比**高度图指纹**，而同一次 `GenerateChunkSunLightAndHeight`
+        /// 还会写**光照位**；跨轮比对含光内容哈希会因**邻居传播**漂移（`notes/248 §4-1`）。
+        /// 本探针直接测"这一段是区块自身的确定函数"：
+        ///   ① 算一次**列内光照摘要**（FNV over `Terrain.ExtractLight`，覆盖整列全高）；
+        ///   ② **再跑一次同一个 pass**（与并行路径调用的是**同一个函数**）；
+        ///   ③ 再算摘要比较 —— 相等 ⇒ 同输入同输出，且不受中间传播影响。
+        ///
+        /// ⚠️ 副作用与还原：重跑会把该区块光照位改写成"只按日照/衰减"的值（点光源的传播光会被抹掉）。
+        /// `restore=true`（默认）时比较完把它标成 `InvalidLight`，让引擎下一轮**自己重走完整光照**
+        /// （含光源扫描与传播）。**建议只在没有点光源的测试区使用。**
+        /// </summary>
+        public virtual string SunLightReplay(int cx, int cz, bool restore = true) {
+            TerrainChunk chunk = m_terrain?.GetChunkAtCoords(cx, cz);
+            if (chunk == null) {
+                return new JsonObject { ["ok"] = false, ["err"] = "chunk not allocated" }.ToJsonString();
+            }
+            if (chunk.ThreadState < TerrainChunkState.Valid) {
+                return new JsonObject {
+                    ["ok"] = false, ["err"] = "chunk not valid",
+                    ["state"] = chunk.ThreadState.ToString()
+                }.ToJsonString();
+            }
+            ulong digestBefore = LightDigest(chunk);
+            GenerateChunkSunLightAndHeight(chunk, m_subsystemSky.SkyLightValue);
+            ulong digestFirst = LightDigest(chunk);
+            // **幂等的正确形式是 f(f(x)) == f(x)**：第一次重跑会把该区块的**传播光**抹掉
+            // （它只按日照/衰减写），所以 `digestBefore != digestFirst` 是正常的、不是缺陷；
+            // 真正要证明的是"**再跑一次，结果不再变**"——这才说明这一段是区块自身的确定函数。
+            GenerateChunkSunLightAndHeight(chunk, m_subsystemSky.SkyLightValue);
+            ulong digestSecond = LightDigest(chunk);
+            if (restore) {
+                // 让引擎自己重走完整光照（含光源扫描 + 传播），从而把"只按日照"的重跑结果覆盖回正确值。
+                chunk.ThreadState = TerrainChunkState.InvalidLight;
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["chunk"] = new JsonArray(cx, cz),
+                ["lightDigestBefore"] = digestBefore.ToString("x16"),
+                ["lightDigestAfterFirstReplay"] = digestFirst.ToString("x16"),
+                ["lightDigestAfterSecondReplay"] = digestSecond.ToString("x16"),
+                ["idempotent"] = digestFirst == digestSecond,
+                ["changedByFirstReplay"] = digestBefore != digestFirst,
+                ["restoredByInvalidLight"] = restore,
+                ["stateAfter"] = chunk.ThreadState.ToString(),
+                ["modificationCounter"] = chunk.ModificationCounter,
+                ["note"] = "同轮次幂等性：重跑同一个 GenerateChunkSunLightAndHeight 后列内光照摘要必须相等；"
+                           + "restore=true 会把该区块标成 InvalidLight，让引擎重走完整光照（含传播）"
+            }.ToJsonString();
+        }
+
+        /// <summary>[v0.1.150] 列内光照摘要（FNV-1a 64，覆盖整列全高，只读）。</summary>
+        static ulong LightDigest(TerrainChunk chunk) {
+            ulong hash = 14695981039346656037UL;
+            for (int x = 0; x < TerrainChunk.Size; x++) {
+                for (int z = 0; z < TerrainChunk.Size; z++) {
+                    int index = TerrainChunk.CalculateCellIndex(x, TerrainChunk.MinHeight, z);
+                    for (int y = TerrainChunk.MinHeight; y <= TerrainChunk.HeightMinusOne; y++, index++) {
+                        hash ^= (byte)Terrain.ExtractLight(chunk.GetCellValueFast(index));
+                        hash *= 1099511628211UL;
+                    }
+                }
+            }
+            return hash;
+        }
+
         /// <summary>[v0.1.139] 并行日照 pass 的只读账本（桥：`skyline.ParallelSunLightStats()`）。</summary>
         public virtual string DescribeParallelSunLight() => new JsonObject {
             ["workers"] = SkylineRuntime.ParallelSunLightWorkers,

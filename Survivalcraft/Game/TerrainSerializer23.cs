@@ -637,6 +637,8 @@ namespace Game {
                     ["ioFailures"] = m_chunkLoadIoFailures,
                     ["nonIoFailures"] = m_chunkLoadNonIoFailures,
                     ["acceptedAfterFailure"] = m_chunkLoadAcceptedAfterFailure,
+                    // [v0.1.149 · CC P3] 让门禁能断言"修法 A 的默认值没被改回去"
+                    ["regenerateCorruptChunkDefault"] = RegenerateCorruptChunk,
                     ["recentFailures"] = recent,
                     ["maxRecentKept"] = MaxRecentFailures,
                     ["note"] = "acceptedAfterFailure>0 表示『坏档被当成已加载』真实发生过"
