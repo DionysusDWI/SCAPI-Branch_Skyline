@@ -229,22 +229,48 @@ namespace Game {
         public static int TierForCentreDistance(float distanceMetres) =>
             Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(distanceMetres) + 1, 1, 3);
 
-        /// <summary>[v0.1.158e] **现行口径（默认）**：入参是"到该 LOD 区块的**最短**水平距离"，
-        /// 解不动点得到档位；关掉开关即退回 `TierForCentreDistance`。</summary>
+        /// <summary>
+        /// [v0.1.158e] **现行口径（默认）**：入参 `d` 是"到该 LOD 区块**中心**的水平距离"，
+        /// 档位按"**到该区块的最短距离**"确定（用户口径 2.2/2.4）。
+        ///
+        /// ⚠️ **为什么不能写成"迭代到不动点"**（第一版就是这么写的，被合并阶梯的判据当场抓出）：
+        /// 迭代式 `t ← f(d − s(t)/2)` 在边界附近**会振荡**（实测：`d=400` 时 f(400)=2、扣掉半块后又回到 1 …），
+        /// 而"迭代 4 次就停"会让结果**取决于迭代次数的奇偶** ⇒ 档位随距离**非单调**，这在 LOD 里是硬伤。
+        ///
+        /// 正确写法是把它写成**规格**而不是迭代：块边长 `s(t) = CellSize·2^t`，要求
+        /// `t` 是**满足 `f(d − s(t)/2) ≤ t` 的最小档**（`f` = 旧的"按距离给档"函数）。
+        /// 含义：**用最短距离算出来的档，不能比我选的更粗**；在满足它的档里取**最细**的那个。
+        /// 该判据对 `d` **单调**（d 变大 ⇒ 条件更难满足 ⇒ 选出的 t 只会变大或不变），且**无振荡**。
+        /// 效果 = 边界整体外推半个（更细那一档的）块边长：384 m 处的边界 → **400 m**。
+        /// 关掉开关即退回 `TierForCentreDistance`。
+        /// </summary>
         public static int TierForDistance(float distanceMetres) {
             if (!LodTierUsesShortestDistance) {
                 return TierForCentreDistance(distanceMetres);
             }
-            int tier = TierForCentreDistance(distanceMetres);
-            for (int k = 0; k < 4; k++) {
+            for (int tier = 1; tier <= 3; tier++) {
                 float side = CellSize << tier;
-                int next = TierForCentreDistance(MathF.Max(0f, distanceMetres - side * 0.5f));
-                if (next == tier) {
-                    break;                      // 不动点
+                float shortest = MathF.Max(0f, distanceMetres - side * 0.5f);
+                if (TierForCentreDistance(shortest) <= tier) {
+                    return tier;
                 }
-                tier = next;
             }
-            return tier;
+            return 3;
+        }
+
+        /// <summary>[v0.1.158e] **规格**：上面那段判据的独立表达（探针按它逐行核对实现）。
+        /// 返回 `(tier, ok)`，`ok=false` 表示**没有任何档满足规格**（理论上不会发生，出现了就是真 bug）。</summary>
+        public static (int Tier, bool Ok) TierForDistanceSpec(float distanceMetres) {
+            if (!LodTierUsesShortestDistance) {
+                return (TierForCentreDistance(distanceMetres), true);
+            }
+            for (int tier = 1; tier <= 3; tier++) {
+                float side = CellSize << tier;
+                if (TierForCentreDistance(MathF.Max(0f, distanceMetres - side * 0.5f)) <= tier) {
+                    return (tier, true);
+                }
+            }
+            return (3, false);
         }
 
         /// <summary>
@@ -267,6 +293,7 @@ namespace Game {
             float firstFlip = -1f, lastFlip = -1f, maxOutwardShift = 0f;
             int contractMismatches = 0;
             float firstContractMismatch = -1f;
+            int specUnsolvable = 0;
             int prevCentre = -1, prevShort = -1, prevFixed = -1;
             bool centreMonotone = true, shortMonotone = true, fixedMonotone = true;
             for (int i = 0; i < steps; i++) {
@@ -280,6 +307,16 @@ namespace Game {
                 float shortestNaive = MathF.Max(0f, d - sideOfCentreTier * 0.5f);
                 int tierShort = TierForCentreDistance(shortestNaive);
                 int tierImplemented = TierForDistance(d);
+                (int tierSpec, bool specOk) = TierForDistanceSpec(d);
+                if (!specOk) {
+                    specUnsolvable++;
+                }
+                if (tierImplemented != tierSpec) {
+                    contractMismatches++;
+                    if (firstContractMismatch < 0f) {
+                        firstContractMismatch = d;
+                    }
+                }
                 // 自洽解：块边长本身由"最短距离档"决定，迭代到不动点（最多 4 次，必然稳定）
                 int tierFixed = tierCentre;
                 for (int k = 0; k < 4; k++) {
@@ -289,12 +326,6 @@ namespace Game {
                         break;
                     }
                     tierFixed = next;
-                }
-                if (tierImplemented != tierFixed) {
-                    contractMismatches++;
-                    if (firstContractMismatch < 0f) {
-                        firstContractMismatch = d;
-                    }
                 }
                 bool differ = tierCentre != tierShort || tierCentre != tierFixed;
                 if (differ) {
@@ -360,6 +391,7 @@ namespace Game {
                 ["maxHalfBlockShiftMetres"] = Math.Round(maxOutwardShift, 2),
                 ["tierUsesShortestDistance"] = LodTierUsesShortestDistance,
                 ["contractMismatches"] = contractMismatches,
+                ["contractSpecUnsolvable"] = specUnsolvable,
                 ["firstContractMismatchMetres"] = firstContractMismatch < 0f
                     ? null : Math.Round(firstContractMismatch, 2),
                 ["mergeLadderEnabled"] = MergeLadderEnabled,
