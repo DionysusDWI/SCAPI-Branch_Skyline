@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.146**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.147**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -33,6 +33,7 @@
   `lightSources/propagate` 必须串行；新区域生成时 **contents 占 ≈50%** 且只写本区块 ⇒ 下一段目标。
 * **[v0.1.144/146] 失败路径验收**：取消/异常/坏档都不掉 tick 且可定位；重开后内容一致。
   **上报**行为发现：非 IO 异常后引擎 `return true`（`TerrainSerializer23.cs:626-630`）⇒ 坏档被当成"已加载"。
+  **[v0.1.147]** 先做零风险处置：坏档账本 `skyline.ChunkLoadFailures()`（数"被当成已加载"的次数），已进门禁。
 * 建筑工具：区域复制 / 镜像 / 旋转、蓝图导入导出、笔画式构建；
   `SkylineBuilder` 剖面扫掠——**三次贝塞尔曲线**（弧长等距）。
   **[v0.1.140] 曲线几何误差已量化**：只读探针 `skyline.BezierSample(spec)` 与扫掠共用同一套采样；

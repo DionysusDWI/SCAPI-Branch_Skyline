@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Text.Json.Nodes;
 using Engine;
 
 namespace Game {
@@ -609,6 +610,54 @@ namespace Game {
         /// <summary>[v0.1.146] 注入实际抛出的次数（验收用）。</summary>
         public static long InjectedChunkReadFailures => m_injectedChunkReadFailures;
 
+        // ===== [v0.1.147 · notes/257 的"方案 C"] 坏档账本（**只加可观测性，不改语义**）=====
+        // 为什么需要：`LoadChunkData` 在非 IO 异常后 `Log.Error(...)` 然后 **return true**（`:626-630`）
+        // ⇒ 坏档会被当成"已加载"。修法 A/B 会改变世界演化、要等裁定；在此之前先把**这类失败变成可数的**，
+        // 免得将来再遇到"地图上一片空洞"却查无实据。计数与最近若干条记录都放在**静态**字段上（跨区块）。
+        static long m_chunkLoadIoFailures;        // 走 catch (IOException)：弹窗 + DisposeProject 那条重分支
+        static long m_chunkLoadNonIoFailures;     // 走 catch (Exception)：**只记日志然后 return true**
+        static long m_chunkLoadAcceptedAfterFailure;  // 其中"被当成加载成功"的次数（= 上面那条）
+        static readonly object m_chunkLoadLedgerLock = new();
+        static readonly List<string> m_chunkLoadLedger = [];
+
+        /// <summary>[v0.1.147] 坏档账本（只读探针）：计数 + 最近若干条失败的坐标/异常/线程。</summary>
+        public static string DescribeChunkLoadFailures() {
+            lock (m_chunkLoadLedgerLock) {
+                var recent = new JsonArray();
+                foreach (string row in m_chunkLoadLedger) {
+                    recent.Add(row);
+                }
+                return new JsonObject {
+                    ["ioFailures"] = m_chunkLoadIoFailures,
+                    ["nonIoFailures"] = m_chunkLoadNonIoFailures,
+                    ["acceptedAfterFailure"] = m_chunkLoadAcceptedAfterFailure,
+                    ["recentFailures"] = recent,
+                    ["maxRecentKept"] = MaxRecentFailures,
+                    ["note"] = "acceptedAfterFailure>0 表示『坏档被当成已加载』真实发生过"
+                               + "（见 notes/257；修法 A/B 待裁定，本类只做可观测）"
+                }.ToJsonString();
+            }
+        }
+
+        const int MaxRecentFailures = 8;
+
+        static void RecordChunkLoadFailure(TerrainChunk chunk, string kind, Exception e, bool accepted) {
+            string row = new JsonObject {
+                ["chunk"] = new JsonArray(chunk.Coords.X, chunk.Coords.Y),
+                ["kind"] = kind,
+                ["exception"] = e?.GetType().Name ?? "n/a",
+                ["message"] = (e?.Message ?? "").Length > 120 ? e.Message[..120] : (e?.Message ?? ""),
+                ["acceptedAsLoaded"] = accepted,
+                ["ticksUtc"] = DateTime.UtcNow.ToString("o"),
+            }.ToJsonString();
+            lock (m_chunkLoadLedgerLock) {
+                m_chunkLoadLedger.Add(row);
+                if (m_chunkLoadLedger.Count > MaxRecentFailures) {
+                    m_chunkLoadLedger.RemoveAt(0);
+                }
+            }
+        }
+
         public virtual bool LoadChunk(TerrainChunk chunk) => LoadChunkData(chunk);
 
         public virtual void SaveChunk(TerrainChunk chunk) {
@@ -638,6 +687,8 @@ namespace Game {
                     DecompressChunkData(chunk, m_storageBuffer, num);
                 }
                 catch (IOException) {
+                    m_chunkLoadIoFailures++;
+                    RecordChunkLoadFailure(chunk, "io", null, false);
                     Dispatcher.Dispatch(() => {
                             if (m_ioExceptionDealt) {
                                 return;
@@ -654,6 +705,11 @@ namespace Game {
                 }
                 catch (Exception e) {
                     Log.Error(ExceptionManager.MakeFullErrorMessage($"Error loading chunk ({chunk.Coords.X},{chunk.Coords.Y}).", e));
+                    // [v0.1.147 · notes/257 方案 C] 记进账本：这一支**会落到下面的 return true**
+                    // ⇒ 调用方以为加载成功，但格子从未被填充。`acceptedAfterFailure` 就是这个次数。
+                    m_chunkLoadNonIoFailures++;
+                    m_chunkLoadAcceptedAfterFailure++;
+                    RecordChunkLoadFailure(chunk, "non-io", e, true);
                 }
                 _ = Time.RealTime;
                 return true;

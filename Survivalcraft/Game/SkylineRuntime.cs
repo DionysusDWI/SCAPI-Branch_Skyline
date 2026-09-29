@@ -320,6 +320,10 @@ namespace Game {
             set => TerrainSerializer23.InjectChunkReadFailure = value;
         }
 
+        /// <summary>[v0.1.147 · notes/257 方案 C] **坏档账本**（只读）：区块读盘失败的计数与最近几条记录。
+        /// `acceptedAfterFailure>0` = "坏档被当成已加载"真实发生过。</summary>
+        public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);

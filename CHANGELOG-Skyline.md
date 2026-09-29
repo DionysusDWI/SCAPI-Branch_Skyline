@@ -7,6 +7,38 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.147] - 2026-09-29
+
+第一百五十一版：`notes/257` 那条发现的**零风险处置（"方案 C"）** —— 把"坏档被当成已加载"变成**可数可查**。
+相对 v0.1.146 的变更：
+
+### 1. 坏档账本（**只加可观测性，不改任何语义**）
+
+`TerrainSerializer23` 新增三个静态计数与一个**有界**最近失败记录（8 条）：
+`ioFailures`（走 `catch (IOException)`：弹窗 + `DisposeProject` 那条重分支）、
+`nonIoFailures`（走 `catch (Exception)`：**只记日志然后 `return true`**）、
+**`acceptedAfterFailure`**（其中"被当成加载成功"的次数 —— 也就是 `notes/257` 那条发现的计量）。
+只读探针：`skyline.ChunkLoadFailures()`。
+
+### 2. 验收 3/3 PASS（`heightlab/skyline-v0147-chunk-load-ledger.py`）
+
+| 判据 | 实测 |
+|---|---|
+| `ledger-counts-failure` | 造一次坏档后 `nonIoFailures` **+1**、`acceptedAfterFailure` **+1** |
+| `ledger-keeps-coordinates` | 最近记录含坐标 `(4854,3760)`、异常类型 `InvalidDataException`、注入消息 |
+| `ledger-read-only-invariant` | 再读一次计数不变（证明它只是账本、不改行为） |
+
+### 3. 门禁新增 `chunk-load-ledger`
+
+断言账本可读、三个计数都是整数、保留上限与最近记录结构在 ⇒ 这份可观测性不会被后续改动弄丢。
+门禁现在 **PASS 22 / FAIL 0 / SKIP 2**。
+
+### 如实边界
+
+* **修法 A/B（非 IO 也 `return false` / 先清零）仍未做**：它们会改变"坏档时的世界演化"，属引擎语义变更，
+  已在 `notes/257 §4` 列出并交审计裁定。
+* 账本记录**只保留最近 8 条**（有界）；没有做持久化（重启即清零）。
+
 ## [v0.1.146] - 2026-09-29
 
 第一百五十版：**区块读盘失败（坏档）的注入验收** —— 补上审计点名的"真实磁盘/序列化失败路径"，
