@@ -656,6 +656,42 @@ namespace Game {
             ?? "{\"err\":\"no updater\"}";
 
         /// <summary>
+        /// [v0.1.157 · CC `121304Z` 裁定④] **单分量的批内上限 M**（默认 **4**，范围 1~64）：
+        /// 一个连通分量一次最多做 M 块，多出来的留到下一批。它是**单分量尾长**旋钮，
+        /// 与 `ParallelLockstepWorkers`（并行宽度）**正交**；用 **P95 分量大小 ÷ M** 判断是否要加大。
+        /// </summary>
+        public static int ParallelLockstepComponentMax {
+            get => TerrainUpdater.ParallelLockstepComponentMax;
+            set => TerrainUpdater.ParallelLockstepComponentMax = Math.Clamp(value, 1, 64);
+        }
+
+        /// <summary>
+        /// [v0.1.157] **分量组批（I2'）开关**（默认 **true**）：`false` 退回旧的 I2 贪心挑选。
+        /// 留这个开关是为了**同一份二进制**里跑"只换调度"的 A/B 对照（CC 裁定③：先跑改前基线）。
+        /// </summary>
+        public static bool ParallelLockstepComponentBatching {
+            get => TerrainUpdater.ParallelLockstepComponentBatching;
+            set => TerrainUpdater.ParallelLockstepComponentBatching = value;
+        }
+
+        /// <summary>
+        /// [v0.1.157] **批调度算法**（0/1/2，默认 1）：`0` 旧 I2 贪心、`1` I2' 连通分量（CC `121304Z` 批准）、
+        /// `2` **按 worker 装箱**（跨 worker 两两 ≥ gap、列内按全局距离序串行）——**待 CC 审**。
+        /// </summary>
+        public static int ParallelLockstepScheduling {
+            get => TerrainUpdater.ParallelLockstepScheduling;
+            set => TerrainUpdater.ParallelLockstepScheduling = Math.Clamp(value, 0, 2);
+        }
+
+        /// <summary>
+        /// [v0.1.157 · CC 条件 5/6 的可调证据] **只读分量探针**：报出当前候选的连通分量、
+        /// "相邻块是否全部同分量"、"分量间写邻域是否两两不相交"。不推进状态、不写账本。
+        /// </summary>
+        public static string ParallelLockstepComponents() =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeLockstepComponents()
+            ?? "{\"err\":\"no updater\"}";
+
+        /// <summary>
         /// [v0.1.16] 球形加载窗的**内容距离**（米）：0 = 沿用调用方的默认（64，即 content = max(64, visibility)）。
         /// 调大（例如 256）会让超视距 LOD 的**细环**也能被采到——LOD 只能采样"已加载"的区块，
         /// 而引擎默认的 content=64/视距=128 意味着 136~256 m 的细环平时根本没加载过，
