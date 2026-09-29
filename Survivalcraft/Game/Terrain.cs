@@ -10,6 +10,15 @@ namespace Game {
 
             public const int CapacityMinusOne = 65535;
 
+            /// <summary>
+            /// ⚠️ **[v0.1.158 · CC `130316Z` P3#3] 遍历期间禁止删除**：本表从 v0.1.158 起用
+            /// **回移删除**（`RemoveWithBackwardShift`），它会**移动遍历位置前后的条目**
+            /// ⇒ 任何"边遍历 `m_array` 边 `Remove`"的写法都会漏读/重复读。
+            /// 现状没有这种用法（释放循环走的是 `m_allocatedChunks` 的**快照**
+            /// `m_allocatedChunksArray`，且变更单线程于主更新流；外部只持对象引用、不持槽位）——
+            /// 但**新代码不许破坏它**。要删就先收集 key，遍历结束后再删；
+            /// 一致性检查（`Diagnose`）只读，可以安全遍历。
+            /// </summary>
             public TerrainChunk[] m_array = new TerrainChunk[Capacity];
 
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -95,12 +104,20 @@ namespace Game {
                 }
                 num = (num + 1) & CapacityMinusOne;
             }
+            if (m_array[(num + 1) & CapacityMinusOne] != null) {
+                ChainBreakingRemoves++;      // 旧语义下这里就是"确定性制造一个缺陷"的那一步
+            }
             m_array[num] = null;
             LegacyNullRemoves++;
         }
 
         /// <summary>[v0.1.157b] 回移删除的核心：把 `hole` 处的洞顺着探测簇往后推。</summary>
         void RemoveWithBackwardShift(int hole) {
+            // [v0.1.158 · CC P3#2] "簇中删除"计数：下一个槽非空 = 这次删除**在簇中间留洞**，
+            // 在旧语义下必然切断别人的探测链（新语义把它填回来，但这个计数仍然是"缺陷生成率"的度量）
+            if (m_array[(hole + 1) & CapacityMinusOne] != null) {
+                ChainBreakingRemoves++;
+            }
             m_array[hole] = null;
             int i = hole;
             int j = i;
@@ -130,6 +147,16 @@ namespace Game {
         public long LegacyNullRemoves;
         /// <summary>删除调用的总次数（两条策略都计）——**用它才能区分"没有删除"与"删除但没发生回移"**。</summary>
         public long RemoveCalls;
+
+        /// <summary>
+        /// [v0.1.158 · CC `130316Z` P3#2] **"簇中删除"计数**：删除那一刻，被删槽的**下一个槽非空**
+        /// ⇒ 这次删除在**簇中间**留了洞 ⇒ 在旧语义（直接置空）下**必然**切断某个 key 的探测链。
+        /// 为什么必须单独计它：等"症状"（`arrayNonEmpty > allocated` 或重复分配）是**概率事件**，
+        /// 在低装载率下可能要跑几小时才出现（本轮 3,100 次删除、`shiftMoves=0` 就说明
+        /// **删除大多落在簇尾** ⇒ 症状型测量天然测不到）。这个计数器把"缺陷生成"变成**确定性可数**的：
+        /// 浸泡时直接读"每千次删除的簇中删除数"。
+        /// </summary>
+        public long ChainBreakingRemoves;
 
         /// <summary>
         /// [v0.1.74] **诊断**：开地址表的一致性。
@@ -166,7 +193,8 @@ namespace Game {
                 //    那会让严格解析（python `json.loads`）直接失败（本轮踩到）。
                 + $"\"backwardShiftRemove\":{(Terrain.ChunkTableBackwardShiftRemove ? "true" : "false")},"
                 + $"\"removeCalls\":{RemoveCalls},\"shiftMoves\":{BackwardShiftMoves},"
-                + $"\"legacyNullRemoves\":{LegacyNullRemoves}}}";
+                + $"\"legacyNullRemoves\":{LegacyNullRemoves},"
+                + $"\"chainBreakingRemoves\":{ChainBreakingRemoves}}}";
         }
         }
 

@@ -848,6 +848,143 @@ namespace Game {
             }.ToJsonString();
         }
 
+        /// <summary>
+        /// [v0.1.158 · CC `130316Z` **P2 绑定项**] **随机化对拍**（固定种子、默认 2 万次操作）。
+        ///
+        /// 为什么必须有它：`ChunkTableRemoveProbe` 的三条用例都是**定向形状**（短例 / 单簇 / 字面回卷簇），
+        /// 覆盖不到"任意插删序列"下的边界 —— CC 明确要求把"默认开 = 验收完成"绑到这条上。
+        ///
+        /// 口径（照抄 CC 给的，不是我自己发明的）：
+        ///   * **语义对照**：一张**阴影 `Dictionary`**（key → 区块）作为参考语义，
+        ///     每一步之后检查"在册 ⇒ `Get` 必须返回**同一个对象**；不在册 ⇒ `Get` 必须为 null"；
+        ///     ⚠️ **不是**"逐槽对照参考实现"（布局逐槽相等只对同历史同算法成立 ⇒ 循环论证）；
+        ///   * **可达性不变量**：表里每个非空条目，从它的 home 槽沿线性探测必然**不经过空槽**就能取到；
+        ///   * **无孤儿**：表里非空槽数必须 == 阴影字典的条目数；
+        ///   * **`duplicates == 0`**：同一坐标不得被放进表里两次。
+        ///
+        /// 键域专门挑**最难**的两族：全部 `home = 65535`（探测**跨表尾回卷**到 0/1/2…）
+        /// 与全部 `home = 0`（**不**回卷），各 32 个 key ⇒ 强碰撞 + 两个分支都被大量踩到。
+        /// 每 256 步做一次全量校验并记录**前 8 条**不一致（便于事后定位）。
+        /// </summary>
+        public static string ChunkTableRandomizedSelfCheck(int seed = 20260929, int ops = 20000) {
+            ops = Math.Clamp(ops, 256, 400000);
+            Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+            if (terrain == null) {
+                return "{\"ok\":false,\"err\":\"no terrain\"}";
+            }
+            const int perCluster = 32;
+            var keys = new Point2[perCluster * 2];
+            var chunks = new TerrainChunk[perCluster * 2];
+            var shadow = new System.Collections.Generic.Dictionary<long, TerrainChunk>();
+            for (int i = 0; i < perCluster * 2; i++) {
+                // 前一半 home=65535（`x = 65535 + 65536k` ⇒ 探测跨表尾回卷），后一半 home=0
+                int x = i < perCluster ? 65535 + 65536 * i : 65536 * (i - perCluster);
+                keys[i] = new Point2(x, 0);
+                chunks[i] = new TerrainChunk(terrain, x, 0);
+            }
+            Terrain.ChunksStorage table = new();
+            uint rng = (uint)seed;
+            long inserts = 0, removes = 0, mismatches = 0, unreadable = 0;
+            int maxLive = 0;
+            var firstProblems = new JsonArray();
+            for (int step = 0; step < ops; step++) {
+                rng = rng * 1664525u + 1013904223u;                    // LCG：跨运行可复现
+                int pick = (int)(rng % (uint)(perCluster * 2));
+                long key = KeyOf(keys[pick]);
+                if (shadow.ContainsKey(key)) {
+                    table.Remove(keys[pick].X, keys[pick].Y);
+                    shadow.Remove(key);
+                    removes++;
+                }
+                else {
+                    table.Add(keys[pick].X, keys[pick].Y, chunks[pick]);
+                    shadow[key] = chunks[pick];
+                    inserts++;
+                }
+                maxLive = Math.Max(maxLive, shadow.Count);
+                if (step % 256 != 0 && step != ops - 1) {
+                    continue;
+                }
+                // ---- 全量校验：语义 + 可达性 + 无孤儿 + 无重复 ----
+                int nonEmpty = 0;
+                var seen = new System.Collections.Generic.HashSet<long>();
+                for (int s = 0; s < Terrain.ChunksStorage.Capacity; s++) {
+                    TerrainChunk c = table.m_array[s];
+                    if (c == null) {
+                        continue;
+                    }
+                    nonEmpty++;
+                    long k = KeyOf(c.Coords);
+                    if (!seen.Add(k)) {
+                        mismatches++;
+                        AddProblem(firstProblems, $"step{step}: 表里出现重复坐标 {c.Coords.X},{c.Coords.Y}");
+                    }
+                    // 可达性：从 home 出发必须能取到**同一个对象**
+                    TerrainChunk viaGet = table.Get(c.Coords.X, c.Coords.Y);
+                    if (!ReferenceEquals(viaGet, c)) {
+                        unreadable++;
+                        AddProblem(firstProblems, $"step{step}: 槽 {s} 的条目不可达（Get 返回 "
+                            + (viaGet == null ? "null" : "别的对象") + "）");
+                    }
+                }
+                if (nonEmpty != shadow.Count) {
+                    mismatches++;
+                    AddProblem(firstProblems, $"step{step}: 表内非空 {nonEmpty} ≠ 阴影 {shadow.Count}（孤儿/缺失）");
+                }
+                foreach (var kv in shadow) {
+                    TerrainChunk got = table.Get((int)(kv.Key >> 32), (int)(kv.Key & 0xFFFFFFFF));
+                    if (!ReferenceEquals(got, kv.Value)) {
+                        mismatches++;
+                        AddProblem(firstProblems, $"step{step}: 在册 key 取不回原对象");
+                    }
+                }
+                for (int i = 0; i < keys.Length; i++) {
+                    long k = KeyOf(keys[i]);
+                    TerrainChunk got = table.Get(keys[i].X, keys[i].Y);
+                    if (shadow.ContainsKey(k)) {
+                        if (!ReferenceEquals(got, chunks[i])) {
+                            mismatches++;
+                            AddProblem(firstProblems, $"step{step}: key {keys[i].X} 应变在册但取到别的/空");
+                        }
+                    }
+                    else if (got != null) {
+                        mismatches++;
+                        AddProblem(firstProblems, $"step{step}: key {keys[i].X} 已删除却仍能取到");
+                    }
+                }
+            }
+            foreach (TerrainChunk c in chunks) {
+                c.DisposeForProbe();
+            }
+            int finalLive = shadow.Count;
+            return new JsonObject {
+                ["ok"] = mismatches == 0 && unreadable == 0,
+                ["probe"] = "chunk-table-randomized-differential",
+                ["seed"] = seed, ["ops"] = ops,
+                ["keyDomain"] = new JsonArray(perCluster * 2, "home=65535（回卷）+ home=0（不回卷）各 32"),
+                ["inserts"] = inserts, ["removes"] = removes, ["liveAtEnd"] = finalLive, ["maxLive"] = maxLive,
+                ["mismatches"] = mismatches, ["unreachableEntries"] = unreadable,
+                // ⚠️ 计数必须来自**这张临时表**：世界表的计数在这里恒为 0（本轮踩到过 ——
+                //    脚本读 `TerrainStorage` 的增量，读到的是世界表 ⇒ 误判"计数器没在效"）。
+                ["tableCounters"] = new JsonObject {
+                    ["removeCalls"] = table.RemoveCalls,
+                    ["chainBreakingRemoves"] = table.ChainBreakingRemoves,
+                    ["shiftMoves"] = table.BackwardShiftMoves,
+                },
+                ["firstProblems"] = firstProblems,
+                ["note"] = "阴影 Dictionary 是**语义**参考（不是逐槽对照）；校验四项：语义相等、"
+                           + "每个非空条目可达、非空槽数 == 阴影条目数、无重复坐标"
+            }.ToJsonString();
+        }
+
+        static long KeyOf(Point2 p) => ((long)p.X << 32) ^ (uint)p.Y;
+
+        static void AddProblem(JsonArray into, string text) {
+            if (into.Count < 8) {
+                into.Add(JsonValue.Create(text));
+            }
+        }
+
         /// <summary>[v0.1.157b] 探针的分支实现：建临时表 → 插 3 个同簇区块 → 删第一个 → 数还能找到几个。</summary>
         static (JsonObject Json, int ReachableAfter) RunChunkTableRemoveBranch(
             Terrain terrain, int[][] coords, bool legacy, int removeIndex = 0) {
