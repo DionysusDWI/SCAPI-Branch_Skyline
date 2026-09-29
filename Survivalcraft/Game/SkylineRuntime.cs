@@ -368,6 +368,141 @@ namespace Game {
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
         /// <summary>
+        /// [v0.1.158c · 里程碑 3.2 前置] **只读**：一个 region 文件里"到底有多少区块数据、都多大、读多快"。
+        ///
+        /// 为什么需要它（`notes/287` 把里程碑 3.2 的卡口定在**数据来源**上）：
+        /// 我们的 LOD 目前只认识"被加载过"的地形（卸载时采集，覆盖 ≈ 已加载面积 ×78%，`notes/272`），
+        /// 而目标"**两万格内全部 LOD**"要求数据来自**存档**（DH 的做法就是直接读 region 文件，
+        /// 见本地源码 `ChunkFileReader.java:178/198`）。所以第一个要量的问题很朴素：
+        /// **存档给得了多少、读一遍要多久** —— 量出来才知道"20 km 靠读存档"是否可行。
+        ///
+        /// 口径（与 `TerrainSerializer23.RegionFileStorage` 逐条对齐，引用行号）：头 4 B = 魔数 `RGN1`（`:306/564`）；
+        /// 目录从偏移 **4** 起、**256** 项 × **8 B**（Offset, Size），索引 = `(cx&amp;15) + 16*(cz&amp;15)`（`:502-505`）；
+        /// `Offset &gt; 0 &amp;&amp; 0 &lt; Size ≤ 1 MiB` 视为该区块**有数据**（上界照抄 `:495-497` 的一致性检查）。
+        ///
+        /// **只读、独立流、不改世界**：不建 `TerrainChunk`、不进 updater 队列、不碰地形线程的读写流。
+        /// 另抽最多 8 个有数据的区块**整块读**一遍，报"每区块字节 / 每区块毫秒 / MB/s"（裸 I/O，不含解压解码）。
+        ///
+        /// ⚠️ **单位**（`notes/289` 正名）：这里的"区块"是**存档/引擎层的 16×16 方块区块**
+        /// （`TerrainChunk.Size = 16`）⇒ region = 16×16 区块 = **256 方块**。
+        /// 这与 **Skyline 的 16 m 立方体 / 32³ 体素网格 / 球形加载 / LOD 分级**是**两个层次**
+        /// （本分支里两者恰好 1:1）。**本探针只读存档层，不触碰立方体/球形加载/LOD 的任何机制。**
+        /// </summary>
+        public static string RegionFileProbe(int regionX, int regionZ) {
+            TerrainSerializer23 ser = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)
+                ?.TerrainSerializer as TerrainSerializer23;
+            string dir = ser?.RegionsDirectoryPath;
+            if (string.IsNullOrEmpty(dir)) {
+                return "{\"ok\":false,\"err\":\"no terrain serializer / regions dir\"}";
+            }
+            const int directoryOffset = 4;                 // RegionFileStorage.RegionDirectoryOffset
+            const int directoryEntrySize = 8;              // RegionFileStorage.RegionDirectoryEntrySize
+            const int directoryBytes = 4 + 256 * 8;        // = RegionDataOffset 2052
+            string path = Storage.CombinePaths(dir, $"Region {regionX},{regionZ}.dat");
+            if (!Storage.FileExists(path)) {
+                return new JsonObject {
+                    ["ok"] = true, ["exists"] = false, ["path"] = path, ["regionsDir"] = dir
+                }.ToJsonString();
+            }
+            long fileBytes = Storage.GetFileSize(path);
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            byte[] header = new byte[directoryBytes];
+            int got = 0;
+            Stream opened = null;
+            try {
+                opened = Storage.OpenFile(path, OpenFileMode.Read);
+            }
+            catch (Exception e) {
+                // ⚠️ 引擎**自己**持有该 region 的读写流（`RegionFileStorage.StreamsByRegion`），
+                //    而且开的时候不带共享读 ⇒ 从别的线程再开一个只读流会拿到
+                //    "The process cannot access the file ... being used by another process"。
+                //    这不是探针的错，而是**一等信息**：这个 region 正被引擎占着（= 近处/活跃区）。
+                //    所以如实回报，让调用方把"被占用"和"不存在"分开统计。
+                return new JsonObject {
+                    ["ok"] = true, ["exists"] = true, ["locked"] = true,
+                    ["path"] = path, ["fileBytes"] = fileBytes,
+                    ["lockError"] = e.GetType().Name,
+                    ["note"] = "文件存在但被引擎持有的流占用（近处活跃 region 的正常状态）"
+                }.ToJsonString();
+            }
+            using (Stream s = opened) {
+                while (got < header.Length) {
+                    int n = s.Read(header, got, header.Length - got);
+                    if (n <= 0) {
+                        break;
+                    }
+                    got += n;
+                }
+                if (got < 4) {
+                    return $"{{\"ok\":false,\"err\":\"header too short ({got} B)\"}}";
+                }
+                bool magicOk = header[0] == (byte)'R' && header[1] == (byte)'G'
+                    && header[2] == (byte)'N' && header[3] == (byte)'1';
+                var presentOffsets = new List<(int Offset, int Size)>();
+                int present = 0;
+                long bytesSum = 0;
+                int maxSize = 0;
+                for (int i = 0; i < 256; i++) {
+                    int off = directoryOffset + i * directoryEntrySize;
+                    if (off + 8 > got) {
+                        break;
+                    }
+                    int chunkOffset = BitConverter.ToInt32(header, off);
+                    int size = BitConverter.ToInt32(header, off + 4);
+                    if (chunkOffset > 0 && size > 0 && size <= 1048576) {
+                        present++;
+                        bytesSum += size;
+                        maxSize = Math.Max(maxSize, size);
+                        if (presentOffsets.Count < 8) {
+                            presentOffsets.Add((chunkOffset, size));
+                        }
+                    }
+                }
+                double headerMs = sw.Elapsed.TotalMilliseconds;
+                byte[] buf = new byte[1048576];
+                long sampleBytes = 0;
+                long sampleTicks = System.Diagnostics.Stopwatch.GetTimestamp();
+                foreach ((int chunkOffset, int size) in presentOffsets) {
+                    s.Position = chunkOffset;
+                    int read = 0;
+                    while (read < size) {
+                        int n = s.Read(buf, read, size - read);
+                        if (n <= 0) {
+                            break;
+                        }
+                        read += n;
+                    }
+                    sampleBytes += read;
+                }
+                double sampleMs = (System.Diagnostics.Stopwatch.GetTimestamp() - sampleTicks) * 1000.0
+                    / System.Diagnostics.Stopwatch.Frequency;
+                return new JsonObject {
+                    ["ok"] = true, ["exists"] = true, ["path"] = path,
+                    ["region"] = new JsonArray(regionX, regionZ),
+                    ["magicOk"] = magicOk,
+                    ["fileBytes"] = fileBytes,
+                    ["headerBytes"] = got,
+                    ["headerMs"] = Math.Round(headerMs, 3),
+                    ["chunksPresent"] = present,
+                    ["chunksTotal"] = 256,
+                    ["presentRatio"] = Math.Round(present / 256.0, 4),
+                    ["chunkBytesTotal"] = bytesSum,
+                    ["chunkBytesMean"] = present > 0 ? Math.Round((double)bytesSum / present, 1) : 0.0,
+                    ["chunkBytesMax"] = maxSize,
+                    ["chunkBytesOverFile"] = fileBytes > 0 ? Math.Round((double)bytesSum / fileBytes, 4) : 0.0,
+                    ["sampleChunks"] = presentOffsets.Count,
+                    ["sampleReadBytes"] = sampleBytes,
+                    ["sampleReadMs"] = Math.Round(sampleMs, 3),
+                    ["sampleMbPerSecond"] = sampleMs > 0
+                        ? Math.Round(sampleBytes / 1048576.0 / (sampleMs / 1000.0), 1) : 0.0,
+                    ["regionsDir"] = dir,
+                    ["note"] = "只读探针：目录 2 KB 就能判断一个 region 的 256 个区块**哪些有数据**；"
+                               + "整块读的吞吐是**裸 I/O**（不含解压/解码）"
+                }.ToJsonString();
+            }
+        }
+
+        /// <summary>
         /// **[v0.1.156 · CC `074658Z` Q2 裁定] 只读**：把"逐 pass 之外"的两大块成本量出来 ——
         /// **区块分配/释放**（`Terrain.AllocateChunk/FreeChunk`）与**存盘**（`TerrainSerializer23.SaveChunkData`）。
         ///

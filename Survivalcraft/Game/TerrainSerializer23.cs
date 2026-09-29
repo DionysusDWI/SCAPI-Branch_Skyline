@@ -576,6 +576,15 @@ namespace Game {
 
         IStorage m_storage;
 
+        /// <summary>
+        /// [v0.1.158c · 里程碑 3.2 前置] **只读**：region 文件所在目录（`.../Regions`）。
+        /// 给"存档里到底有多少地形数据"这类**只读**探针用（`SkylineRuntime.RegionFileProbe`）——
+        /// 探针**自己开只读流**解析目录，不碰 `m_storage` 的读写流（那套流由地形线程持有，
+        /// 从别的线程去 seek/read 会和存盘打架）。
+        /// </summary>
+        public virtual string RegionsDirectoryPath =>
+            (m_storage as RegionFileStorage)?.RegionsDirectoryName;
+
         byte[] m_storageBuffer = new byte[WorstCaseChunkDataSize];
 
         byte[] m_compressBuffer = new byte[WorstCaseChunkDataSize];
