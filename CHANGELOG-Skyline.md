@@ -7,6 +7,44 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.144] - 2026-09-29
+
+第一百四十九版：**审计第 4 项的异常注入验收** —— 证明"未提交结果不污染世界"与"异常可定位"。
+相对 v0.1.143 的变更：
+
+> 注：**v0.1.143 未发版**——它是**工具侧**批次（`notes/253` 的"保存并重开"与"取消不污染"两个注入验收），
+> **没有游戏源码改动**，按"每个 Release 对应一个里程碑实现"的口径不值得单独发版；编号因此直接跳到 v0.1.144。
+
+### 1. 新增**验收用**、**默认关**的一次性注入开关
+
+`skyline.ParallelSunLightInjectFailure`（默认 **-1 = 关**）：`>= 0` 时并行批内第 N 个 worker 抛
+`InvalidOperationException`，**抛出后自动复位**。为什么必须一次性：否则每个批都会失败 ⇒
+该状态永远推进不了 ⇒ 预加载永远走不完（第一版验收就这样卡满 300 s 超时）。
+
+### 2. 异常发生在**状态推进之前** ⇒ 本批**整体不提交**
+
+`TryParallelSunLightStep` 里 `Parallel.For` 只做重活，`ThreadState` 的推进在 **join 之后**；
+异常从 `Parallel.For` 抛出 ⇒ 推进段根本不执行。异常再沿 `SynchronousUpdateFunction` 抛到
+`ThreadUpdateFunction` 的 `catch (Exception e) { Log.Error(e.ToString()); }`（`TerrainUpdater.cs:956-958`）
+⇒ 游戏不崩、日志留痕。
+
+### 3. 验收 5/5 PASS（`heightlab/skyline-v0144-injection-join.py`）
+
+| 判据 | 实测 |
+|---|---|
+| 注入真的抛了 | **1 次**（一次性语义生效） |
+| 游戏没崩 | 注入后桥仍可用、仍在 `GameScreen` |
+| **异常可定位** | 日志出现 `AggregateException … (skyline: injected parallel-batch failure (worker 0/2, …))` + `---> InvalidOperationException: …` |
+| **未提交不污染** | 关掉注入再跑满（81/81）后，**9 个样板区块高度图指纹与基线逐位相同** |
+| 释放无悬挂 | 三次释放后确认卸载 **9/9 / 9/9 / 9/9** |
+
+### 如实边界
+
+* 注入开关是**验收工具**，默认关；本版**不改变**任何正常路径行为。
+* 只覆盖 `InvalidLight` 段（`contents` 并行尚未实装）。
+* "异常时等待在途任务全部收束"的**强 join 语义**只由 `AggregateException` 的存在**间接推断**，
+  没有线程计数断言（已如实记入 `notes/255 §5`）。
+
 ## [v0.1.142] - 2026-09-29
 
 第一百四十八版：**5.2 第二段的并行前置补齐** —— "每 worker 一份生成器"到底贵不贵，量出来。

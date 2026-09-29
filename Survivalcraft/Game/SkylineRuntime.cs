@@ -445,6 +445,23 @@ namespace Game {
 
         static int m_parallelSunLightWorkers;
 
+        /// <summary>
+        /// [v0.1.144 · 审计验收用] **异常注入**：`>= 0` 时，并行批内**第 N 个** worker 会抛一个
+        /// `InvalidOperationException`（默认 **-1 = 关**）。用途是**可判定地**验收审计的两条停止条件：
+        ///   * "取消/异常后**未提交结果不污染世界**"——异常在 `Parallel.For` 里抛出 ⇒ 状态推进那一段
+        ///     不会被执行 ⇒ 本批**整体不提交**；
+        ///   * "**异常可定位**"——异常沿 `SynchronousUpdateFunction` 抛到 `ThreadUpdateFunction` 的
+        ///     `catch (Exception e) { Log.Error(...) }`（`TerrainUpdater.cs:956-958`）⇒ 游戏日志里能看到。
+        /// 只有在 `ParallelSunLightWorkers >= 2` 时才有意义。**一次性**：抛出后自动复位成 -1
+        /// （否则每个批都失败 ⇒ 该状态永远推进不了 ⇒ 预加载永远走不完）。
+        /// </summary>
+        public static int ParallelSunLightInjectFailure {
+            get => m_parallelSunLightInjectFailure;
+            set => m_parallelSunLightInjectFailure = Math.Clamp(value, -1, 64);
+        }
+
+        static int m_parallelSunLightInjectFailure = -1;
+
         /// <summary>[v0.1.139] 并行日照 pass 的账本（batches/chunks/回退），用于验收与回归。</summary>
         public static string ParallelSunLightStats() =>
             GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeParallelSunLight()

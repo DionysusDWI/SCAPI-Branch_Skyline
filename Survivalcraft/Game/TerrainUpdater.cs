@@ -202,6 +202,7 @@ namespace Game {
         int m_parallelSunLightLastBatch;
         int m_parallelSunLightMaxBatch;
         int m_parallelSunLightWorkerCeiling;      // 用过的最大并发度（bounded 判定要用它，不是当前设置）
+        long m_parallelSunLightInjectedFailures;  // [v0.1.144] 注入异常实际抛出的次数（验收用）
         TerrainChunk[] m_parallelPicks;
         float[] m_parallelPickDist;
 
@@ -1075,6 +1076,19 @@ namespace Game {
             int skyLightValue = m_subsystemSky.SkyLightValue;
             double t0 = Time.RealTime;
             Parallel.For(0, n, new ParallelOptions { MaxDegreeOfParallelism = maxWorkers }, k => {
+                // [v0.1.144 · 审计验收] 异常注入（默认 -1 = 关）：见 SkylineRuntime.ParallelSunLightInjectFailure。
+                // 抛在 Parallel.For 内部 ⇒ 状态推进段不会执行 ⇒ **本批整体不提交**（这正是要证明的性质）。
+                if (SkylineRuntime.ParallelSunLightInjectFailure >= 0
+                    && k == SkylineRuntime.ParallelSunLightInjectFailure) {
+                    m_parallelSunLightInjectedFailures++;
+                    // **一次性**：抛一次后自动关掉。否则每个批都会失败 ⇒ 该状态永远推进不了 ⇒
+                    // 预加载永远走不完（验收会卡满 300 s 超时）。一次性既能证明"整批不提交"，
+                    // 又能让后续批次把世界推进到可比对的状态。
+                    SkylineRuntime.ParallelSunLightInjectFailure = -1;
+                    throw new InvalidOperationException(
+                        $"skyline: injected parallel-batch failure (worker {k}/{n}, "
+                        + "skyline.ParallelSunLightInjectFailure)");
+                }
                 GenerateChunkSunLightAndHeight(m_parallelPicks[k], skyLightValue);
             });
             // 状态推进留在工作线程：worker 只做重活，状态机推进仍然串行且按 picks 顺序。
@@ -1107,6 +1121,8 @@ namespace Game {
             ["maxBatch"] = m_parallelSunLightMaxBatch,
             ["workerCeiling"] = m_parallelSunLightWorkerCeiling,
             ["bounded"] = m_parallelSunLightMaxBatch <= Math.Max(1, m_parallelSunLightWorkerCeiling),
+            ["injectFailureAt"] = SkylineRuntime.ParallelSunLightInjectFailure,
+            ["injectedFailures"] = m_parallelSunLightInjectedFailures,
             ["note"] = "只覆盖 InvalidLight（日照/高度）pass；lightSources/propagate 因共享 m_lightSources "
                        + "与跨区块写而保持串行（见 notes/248）"
         }.ToJsonString();
