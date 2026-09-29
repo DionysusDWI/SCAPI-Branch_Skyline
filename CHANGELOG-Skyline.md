@@ -7,6 +7,38 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.135] - 2026-09-29
+
+第一百四十一个版本：**壳层事实更正 + 体素探针 + 编辑失效化壳层（真缺陷修复）**。相对 v0.1.134 的变更：
+
+### 1. 事实更正（我自己写错的表述）
+
+我此前多份材料写"壳层 16 m 立方体 × **32³** = **0.5 m** 体素"——**错**。代码事实（v0.1.85 起）：
+`CubeSurface32.Size = 16`、`SurfaceVoxelShell32.Size = 16` ⇒ 每面 16×16、**格距 1 m**；
+类名里的 "32" 是 v0.1.85 之前的历史名。`LodBlockProvenance` 的字段已改名 `whereAreTheSurfaceVoxels` 并写明 1 m。
+对 B-02 的意义：基档分辨率上壳层（16 m/16³ = 1 m）与目标"32 m 块/32³ = 1 m"**同分辨率**，
+差别在参数化与覆盖距离（壳层只管近带，外环没有 32³ 语义的采样）。
+
+### 2. 新增只读探针 `skyline.ShellVoxelProbe(cx,cy,cz)`
+
+回读壳立方体：常驻/有无体素壳、`gridPerAxis`/`cellMetres`、世界最小角、`voxelCount`、`degraded`/
+`droppedVoxels`/`unknownNeighbors`、**`solidVoxels` 与逐 y 层占用**、**裸露体素材质直方图**。
+实测 `(3095,21,1999)`：`solidVoxels=1092`、逐层 `[182×6,0…]`、`voxelCount=312`、
+材质 `FurnitureBlock 260 + BasaltFenceBlock 52`。（探针自身先修了一个解码错：`MaterialAt` 返回的是
+**打包值**（contents|light<<10），须先取 contents，否则方块名全落到 `AirBlock`。）
+
+### 3. 真缺陷修复：**编辑现在会失效化壳层**
+
+壳是**快照**；`ChangeCell` 只标脏 LOD 单元，没有任何东西让壳失效，而"离开范围采集"对已有壳的立方体
+`SkippedDuplicate` 跳过 ⇒ **改过的地形在远处仍按旧壳渲染**（对"造房子"尤其显眼；取证：已清空的 fixture
+仍被探针读出 1092 实心体素与旧材质）。新增 `SkylineCubeShellStore.NotifyCellEdited(x,y,z)`
+（由 `SubsystemTerrain.ChangeCell` 调用）：丢掉编辑落点所在立方体**与其正上方**立方体的缓存（含网格与体素壳）
+并写存档墓碑，重采交给既有的带内补采/离开采集路径。开关 `skyline.ShellInvalidateOnEdit`（默认开）、
+计数 `skyline.ShellInvalidatedByEdit`（实测 562 → 563）。
+
+**如实边界**：重采不保证恢复**体素壳**——`SurfaceVoxelMaxCubes = 512` 的上限在吃紧（早前普查 `voxel=512/198`），
+额度满时只回落列顶壳。修复保证的是"不拿旧快照冒充"，不是"编辑后立刻恢复最细壳"。`notes/243`。
+
 ## [v0.1.134] - 2026-09-29
 
 第一百四十个版本：**B-02 的事实基础探针 + 3.1/3.3 的合并测量工具**。相对 v0.1.133 的变更：

@@ -385,6 +385,9 @@ namespace Game {
                 MaintainColumnTopHeight(x, y, z, value);
                 // [v0.1.8] 超视距 LOD：把这一格所在的 16 m 单元标脏，远景低模才会跟着改（见 notes/75）
                 SkylineLod.NotifyCellChanged(x, z);
+                // [v0.1.135] 壳是**快照**：编辑必须让它失效，否则改过的地形在远处仍按旧壳渲染
+                //（实测：清空 fixture 后 `ShellVoxelProbe` 仍报 1092 个实心体素 / 旧材质直方图）。
+                SkylineCubeShellStore.NotifyCellEdited(x, y, z);
                 // [v0.1.22] 记下"刚被编辑的区块"，等它回到 Valid 时结算几何追平时延（见 notes/92）
                 TerrainUpdater?.NotifyChunkEdited(x, z);
                 // [v0.1.24] 批量写入（阈值以上）时把光照降级去抖：先攒着，等写完统一降级一次。

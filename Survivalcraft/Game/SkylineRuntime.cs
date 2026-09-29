@@ -248,6 +248,18 @@ namespace Game {
         public static string LodBlockProvenance(int worldX, int worldZ) =>
             SkylineLod.LodBlockProvenance(worldX, worldZ);
 
+        /// <summary>[v0.1.135] 壳层立方体的**表面体素壳**只读回读（B-02 第二份事实基础）。</summary>
+        public static string ShellVoxelProbe(int cx, int cy, int cz) =>
+            SkylineCubeShellStore.ShellVoxelProbe(cx, cy, cz);
+
+        /// <summary>[v0.1.135] 编辑失效化壳层的开关与计数（A/B + 代价观察）。</summary>
+        public static bool ShellInvalidateOnEdit {
+            get => SkylineCubeShellStore.InvalidateOnEdit;
+            set => SkylineCubeShellStore.InvalidateOnEdit = value;
+        }
+
+        public static long ShellInvalidatedByEdit => SkylineCubeShellStore.InvalidatedByEdit;
+
         /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），

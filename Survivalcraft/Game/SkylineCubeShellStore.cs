@@ -494,6 +494,86 @@ namespace Game {
         // ---- 统计（判据都从这里出） ----
         public static int CubeCount => m_entries.Count;
         public static long ShellBytes => (long)m_entries.Count * ShellBytesPerCube;
+
+        /// <summary>
+        /// [v0.1.135] **只读**：回读某个壳立方体的**表面体素壳**（B-02 裁定用的第二份事实基础）。
+        ///
+        /// ⚠️ 口径更正（本探针落地时发现我自己写错了表述）：v0.1.85 之后壳立方体是
+        /// **16 m 边长 + 每面 16×16 网格**（`CubeSurface32.Size = 16`），体素壳也是
+        /// `SurfaceVoxelShell32.Size = 16` ⇒ **格距 1 m，不是"32³ = 0.5 m"**。
+        /// 类名里的 "32" 是 v0.1.85 之前的历史名字。本探针把真实分辨率与占用一起报出来。
+        /// </summary>
+        public static string ShellVoxelProbe(int cx, int cy, int cz) {
+            bool present = m_entries.TryGetValue((cx, cy, cz), out Entry e);
+            JsonObject o = new() {
+                ["cube"] = new JsonArray(cx, cy, cz),
+                ["present"] = present,
+                ["cubeMetres"] = CubeSize,
+                ["gridPerAxis"] = SurfaceVoxelShell32.Size,
+                ["cellMetres"] = CubeSize / (float)SurfaceVoxelShell32.Size,
+                ["worldMin"] = new JsonArray(cx * CubeSize, cy * CubeSize, cz * CubeSize),
+                ["resolutionNote"] = $"每立方体 {SurfaceVoxelShell32.Size}³ 网格 ⇒ 格距 "
+                                     + $"{CubeSize / (float)SurfaceVoxelShell32.Size:0.##} m（不是 32³/0.5 m；"
+                                     + "类名里的 32 是 v0.1.85 之前的历史名）",
+            };
+            if (!present) {
+                o["err"] = "no shell at this cube";
+                return o.ToJsonString();
+            }
+            SurfaceVoxelShell32 vs = e.VoxelShell;
+            o["hasVoxelShell"] = vs != null;
+            o["hasHeightFieldShell"] = e.Shell != null;
+            o["meshStep"] = e.MeshStep;
+            o["meshIsVoxel"] = e.MeshIsVoxel;
+            if (vs == null) {
+                o["note"] = "这一块只有列顶高度场壳（VoxelShell 为空：体素壳只在最近档采）";
+                return o.ToJsonString();
+            }
+            o["voxelCount"] = vs.VoxelCount;
+            o["degraded"] = vs.Degraded;
+            o["droppedVoxels"] = vs.DroppedVoxels;
+            o["unknownNeighbors"] = vs.UnknownNeighbors;
+            // 占用：位图里 solid 的格数 + 每个 y 层的占用（体素壳里 y 是立方体内的层号）
+            int solid = 0;
+            JsonArray perLayer = [];
+            for (int y = 0; y < SurfaceVoxelShell32.Size; y++) {
+                int row = 0;
+                for (int z = 0; z < SurfaceVoxelShell32.Size; z++) {
+                    for (int x = 0; x < SurfaceVoxelShell32.Size; x++) {
+                        if (vs.IsSolid(x, y, z)) {
+                            row++;
+                        }
+                    }
+                }
+                solid += row;
+                perLayer.Add(row);
+            }
+            o["solidVoxels"] = solid;
+            o["solidPerLayerY"] = perLayer;
+            // 材质直方图（只统计**裸露**的稀疏表，即它真正要画的那批）
+            Dictionary<int, int> hist = [];
+            for (int slot = 0; slot < vs.VoxelCount; slot++) {
+                // `MaterialAt` 返回的是**打包值**（contents | light<<10，见 `SurfaceVoxelShell32` 的写法），
+                // 第一版直接拿它当 contents 去查方块名 ⇒ 全部落到 "AirBlock"（越界被 clamp）。
+                int value = vs.MaterialAt(slot);
+                int contents = Terrain.ExtractContents(value);
+                hist.TryGetValue(contents, out int c);
+                hist[contents] = c + 1;
+            }
+            JsonArray mats = [];
+            foreach (KeyValuePair<int, int> kv in hist.OrderByDescending(p => p.Value)) {
+                mats.Add(new JsonObject {
+                    ["contents"] = kv.Key,
+                    ["block"] = BlocksManager.Blocks[Math.Clamp(kv.Key, 0, BlocksManager.Blocks.Length - 1)]?.GetType().Name,
+                    ["exposedVoxels"] = kv.Value
+                });
+                if (mats.Count >= 12) {
+                    break;
+                }
+            }
+            o["exposedMaterialHistogram"] = mats;
+            return o.ToJsonString();
+        }
         public static long MeshVertexBytes { get; private set; }
         public static long HarvestedTotal { get; private set; }
         public static long SkippedNotReady { get; private set; }
@@ -543,6 +623,43 @@ namespace Game {
             ?? SettingsManager.VisibilityRange;
 
         /// <summary>[v0.1.60] 释放一个条目的**两类网格**（体素网格与高度场网格互斥，释放时都清掉最省心）。</summary>
+        /// <summary>
+        /// [v0.1.135] **编辑落点会失效化哪些壳**（默认开；关掉 = 逐位回到旧行为，A/B 用）。
+        ///
+        /// 缺陷（本会话用 `ShellVoxelProbe` 抓到的）：壳是**快照**——`CubeSurface32`/`SurfaceVoxelShell32`
+        /// 在采集那一刻把该立方体的外观抄下来；而写入路径只调 `SkylineLod.NotifyCellChanged`（把 LOD 单元
+        /// 标脏），**没有任何东西**让壳失效；离开范围时的采集又对"已有壳"的立方体 `SkippedDuplicate` 跳过
+        /// ⇒ **改过的地形在远处仍按旧壳渲染**（对"造房子"这个分支尤其显眼）。
+        /// 实测取证：把混合负载 fixture 写回空气后（census 已核对 +0/+0），`ShellVoxelProbe(3095,21,1999)`
+        /// 仍报 `solidVoxels=1092`、材质直方图仍是 FurnitureBlock 260 + BasaltFenceBlock 52。
+        ///
+        /// 修法（最小）：编辑落在哪个立方体，就把**它**与**它正上方那个**立方体的缓存丢掉
+        /// （上方那块也可能因为顶面高度/材质变化而失真），并写一条存档墓碑，避免旧壳从盘上复活。
+        /// 重新采集仍走既有的"带内补采 / 离开范围采集"路径 —— 本修复只保证**不拿旧快照冒充**。
+        /// </summary>
+        public static bool InvalidateOnEdit { get; set; } = true;
+        public static long InvalidatedByEdit { get; private set; }
+
+        internal static void NotifyCellEdited(int worldX, int worldY, int worldZ) {
+            if (!Enabled || !InvalidateOnEdit) {
+                return;
+            }
+            int cx = worldX >> CubeShift;
+            int cy = worldY >> CubeShift;
+            int cz = worldZ >> CubeShift;
+            for (int dy = 0; dy <= 1; dy++) {
+                (int Cx, int Cy, int Cz) key = (cx, cy + dy, cz);
+                if (!m_entries.TryGetValue(key, out Entry entry)) {
+                    continue;
+                }
+                DisposeMeshes(entry);
+                ReleaseEntry(entry);
+                m_entries.Remove(key);
+                MarkCubeRemoved(key);
+                InvalidatedByEdit++;
+            }
+        }
+
         static void DisposeMeshes(Entry entry) {
             entry.Mesh?.Dispose();
             entry.Mesh = null;

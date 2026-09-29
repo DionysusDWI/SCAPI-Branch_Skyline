@@ -1826,9 +1826,12 @@ namespace Game {
                 ["distinctMaterials"] = materials.Count,
                 ["cellsWithSecond"] = second,
                 ["has3DVoxels"] = false,
-                ["whereAreThe32CubedSamples"] =
-                    "壳层 `SkylineCubeShellStore`（16 m 立方体 × 32³ = 0.5 m 体素，只出外表面的体素壳）；"
+                ["whereAreTheSurfaceVoxels"] =
+                    "壳层 `SkylineCubeShellStore`：**16 m 立方体 + 每面 16×16 网格 ⇒ 格距 1 m**"
+                    + "（`SurfaceVoxelShell32.Size = 16`；类名里的 32 是 v0.1.85 之前的历史名，"
+                    + "**不是** 32³/0.5 m —— 这条表述由 `ShellVoxelProbe` 落地时更正）；"
                     + "LOD 层这里只有 2.5D 高度场（每 16 m 源格一个 Cell）",
+                ["surfaceVoxelProbe"] = "skyline.ShellVoxelProbe(cx,cy,cz) 可回读该立方体的占用/材质/降级状态",
                 ["sources"] = new JsonArray([.. sources]),
                 ["note"] = "B-02 的裁定依据：本探针把'块内是什么数据'列成清单；"
                            + "`has3DVoxels=false` 是**事实声明**，不是缺陷判定"
