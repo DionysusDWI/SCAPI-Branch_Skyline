@@ -260,6 +260,25 @@ namespace Game {
 
         public static long ShellInvalidatedByEdit => SkylineCubeShellStore.InvalidatedByEdit;
 
+        /// <summary>
+        /// **[v0.1.156] 把"壳接管后 LOD 让位"暴露成可写**（桥侧原先是只读的
+        /// `CubeShellSurvey.restrictLod`）。
+        ///
+        /// 为什么要它：`LodSurvey` 报的 `uniformCells`（统一档**表**里的格数）与
+        /// `uniformCellsInMesh`（真正**进网格**的格数）长期对不上（实测快照 347/2039、723/3072、1437/2680）。
+        /// 读代码后把范围收敛到"**表 → 网格**"这一步：`RebuildMeshCore` 里有一条默认开启的规则 ——
+        /// **`RestrictLod` 与 `SkylineCubeShellStore.HasShellInBand(...)` 同时成立就 `continue`**
+        /// （即"壳接管了，LOD 让位"）。
+        /// 但原先**没有写入口**（`set RestrictLod` 报 "not a writable property/field"），
+        /// 于是这条"是不是壳让位造成的"**做不了 A/B**（`notes/272 §8.3`）。
+        /// 本属性就是那个入口：`skyline.RestrictLod = false` → LOD 不再让位（两层叠着画，
+        /// 观感上会发花，但**记账口径**立刻可比）。默认值不变（`true`）。
+        /// </summary>
+        public static bool RestrictLod {
+            get => SkylineCubeShellStore.RestrictLod;
+            set => SkylineCubeShellStore.RestrictLod = value;
+        }
+
         /// <summary>[v0.1.136 · CC 审计 P2] 区域单元格式的内存往返自检（含 HasSecond=true 合成样本）。</summary>
         public static string RegionCellRoundTripSelfCheck() =>
             SkylineLod.RegionCellRoundTripSelfCheck();
