@@ -322,6 +322,59 @@ namespace Game {
             return Describe();
         }
 
+        // ============================================================================================
+        // [v0.1.131] 里程碑 2.5：**游戏原生气氛渲染可选择性移除**
+        // ============================================================================================
+        //
+        // 用户口径（目标 2.5）："游戏原生气氛渲染（如黄昏、日出、降雨、起雾）可以选择性移除，
+        // 以便于后续移植光影时的替代性开发，以及提高 Distant Horizons 在交接带处的视觉融合效果。"
+        //
+        // 本分支已有的"关雾"（v0.1.93 的 `FogAll`）覆盖了**起雾**这一项；本块补上另外两项：
+        //   * `NeutralSkyTintRemoved`：把原版 `CalculateSkyColor`（朝霞/晚霞红橙 + 霾染色）
+        //     换成**中性昼光渐变**（只保留太阳高度给的亮度）⇒ 黄昏/日出的染色可以被"移除"；
+        //   * `VanillaPrecipitationEnabled=false`：把雨雪粒子（`PrecipitationShaftParticleSystem`）移除。
+        // 两项都可逐位还原（开关关掉即回到原版），并各自带计数器以便验收时确认**路径真的被执行过**。
+
+        /// <summary>[v0.1.131] 原版雨雪粒子开关（默认 **开** = 原版行为）。关掉即移除降水渲染。</summary>
+        public static bool VanillaPrecipitationEnabled { get; set; } = true;
+
+        /// <summary>[v0.1.131] 把原版天空染色换成**中性昼光渐变**（默认 **关** = 原版朝霞/晚霞/霾染色）。</summary>
+        public static bool NeutralSkyTintRemoved { get; set; }
+
+        public static long SkyTintCalls { get; private set; }
+        public static long SkyTintReplaced { get; private set; }
+        public static long PrecipitationCalls { get; private set; }
+        public static long PrecipitationStrips { get; private set; }
+
+        internal static void NoteSkyTintCall() => SkyTintCalls++;
+        internal static void NoteSkyTintReplaced() => SkyTintReplaced++;
+        internal static void NotePrecipitationCall() => PrecipitationCalls++;
+        internal static void NotePrecipitationStrip() => PrecipitationStrips++;
+
+        /// <summary>
+        /// 中性天空色：天顶偏蓝、地平偏灰白，**不含**朝霞/晚霞的橙红项，也不含霾的抬白项；
+        /// 亮度仍由 `intensity`（= 原版 `CalculateLightIntensity`）给出 ⇒ 夜里照样是暗的。
+        /// </summary>
+        public static Color NeutralSkyColor(Vector3 direction, float intensity) {
+            Vector3 d = Vector3.Normalize(direction);
+            float up = MathUtils.Saturate((d.Y + 1f) * 0.5f);
+            Vector3 zenith = new(0.15f, 0.30f, 0.56f);
+            Vector3 horizon = new(0.79f, 0.83f, 0.88f);
+            Vector3 c = Vector3.Lerp(horizon, zenith, up) * MathUtils.Saturate(intensity);
+            return new Color(c);
+        }
+
+        /// <summary>[v0.1.131] 里程碑 2.5 的账本：两个开关的调用/替换计数。</summary>
+        public static string AmbienceStatus() => new JsonObject {
+            ["neutralSkyTintRemoved"] = NeutralSkyTintRemoved,
+            ["vanillaPrecipitationEnabled"] = VanillaPrecipitationEnabled,
+            ["skyTintCalls"] = SkyTintCalls,
+            ["skyTintReplaced"] = SkyTintReplaced,
+            ["precipitationCalls"] = PrecipitationCalls,
+            ["precipitationStrips"] = PrecipitationStrips,
+            ["note"] = "起雾一项由 v0.1.93 的 FogAll 覆盖；本账本只记天空染色与降水两项"
+        }.ToJsonString();
+
         /// <summary>恢复原版口径并关闭总开关。</summary>
         public static string Reset() {
             m_enabled = false;

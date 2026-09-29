@@ -213,6 +213,21 @@ namespace Game {
         /// <summary>[v0.1.130] 里程碑 2.6 只读表：三档的边长/边界/单元数/网格量。</summary>
         public static string LodMergeTable() => SkylineLod.LodMergeTable();
 
+        /// <summary>[v0.1.131] 里程碑 2.5：原版**天空染色**（朝霞/晚霞/霾）替换成中性昼光渐变。</summary>
+        public static bool AmbienceNeutralSky {
+            get => SkylineAtmosphere.NeutralSkyTintRemoved;
+            set => SkylineAtmosphere.NeutralSkyTintRemoved = value;
+        }
+
+        /// <summary>[v0.1.131] 里程碑 2.5：原版**降水粒子**（雨/雪柱）开关。</summary>
+        public static bool AmbiencePrecipitation {
+            get => SkylineAtmosphere.VanillaPrecipitationEnabled;
+            set => SkylineAtmosphere.VanillaPrecipitationEnabled = value;
+        }
+
+        /// <summary>[v0.1.131] 里程碑 2.5 账本：两项移除的调用/替换计数。</summary>
+        public static string AmbienceStatus() => SkylineAtmosphere.AmbienceStatus();
+
         /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），

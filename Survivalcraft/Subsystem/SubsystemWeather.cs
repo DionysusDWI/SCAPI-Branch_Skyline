@@ -170,6 +170,20 @@ namespace Game {
         }
 
         public virtual void Draw(Camera camera, int drawOrder) {
+            // [v0.1.131] 里程碑 2.5：**降水可视化可移除**（默认开 = 原版）。
+            // 关掉时把该 widget 已有的雨雪柱移除并直接返回 ⇒ 不再新建，也不需要其它 pass 配合。
+            if (!SkylineAtmosphere.VanillaPrecipitationEnabled) {
+                Dictionary<Point2, PrecipitationShaftParticleSystem> strips = GetActiveShafts(camera.GameWidget);
+                foreach (PrecipitationShaftParticleSystem ps in strips.Values) {
+                    if (m_subsystemParticles.ContainsParticleSystem(ps)) {
+                        m_subsystemParticles.RemoveParticleSystem(ps);
+                    }
+                }
+                strips.Clear();
+                SkylineAtmosphere.NotePrecipitationStrip();
+                return;
+            }
+            SkylineAtmosphere.NotePrecipitationCall();
             int num = SettingsManager.VisibilityRange > 128 ? 9 :
                 SettingsManager.VisibilityRange <= 64 ? 7 : 8;
             int num2 = num * num;

@@ -996,6 +996,13 @@ namespace Game {
 
         public virtual Color CalculateSkyColorSurvivalcraft(Vector3 direction, int temperature) {
             float timeOfDay = m_subsystemTimeOfDay.TimeOfDay;
+            // [v0.1.131] 里程碑 2.5：**原生气氛可选择性移除** —— 开了就把朝霞/晚霞/霾的染色
+            // 换成中性昼光渐变（亮度仍按太阳高度），供后续移植光影时替换。默认关 = 逐位原版。
+            if (SkylineAtmosphere.NeutralSkyTintRemoved) {
+                SkylineAtmosphere.NoteSkyTintReplaced();
+                return SkylineAtmosphere.NeutralSkyColor(direction, CalculateLightIntensity(timeOfDay));
+            }
+            SkylineAtmosphere.NoteSkyTintCall();
             float f = CalculateHazeFactor();
             direction = Vector3.Normalize(direction);
             Vector2 vector = Vector2.Normalize(new Vector2(direction.X, direction.Z));
