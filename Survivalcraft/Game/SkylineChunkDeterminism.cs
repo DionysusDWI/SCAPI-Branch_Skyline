@@ -72,7 +72,19 @@ namespace Game {
         /// （v0.1.139 实测：同一模式的两趟之间也会差 1 个区块）。高度图**只由本 pass 写**，
         /// 所以它是"这个 pass 输出一致"的稳定判据，用于 `skyline-v0139-parallel-sunlight.py`。
         /// </summary>
-        public static string ChunkHeightHash(int cx, int cz) {
+        public static string ChunkHeightHash(int cx, int cz) => ChunkHeightHashCore(cx, cz, true);
+
+        /// <summary>
+        /// [v0.1.153] **地形形状指纹**（只哈希 `Top/Bottom`，**不含 `SunlightHeight`**）。
+        ///
+        /// 为什么要单独一条：`SunlightHeight` 由 `GenerateChunkSunLightAndHeight` 按**当时的日照值**
+        /// （`m_subsystemSky.SkyLightValue`）推出 ⇒ **会随时间/天气变化**。
+        /// 所以跨轮比对"邻居有没有被污染"时，必须用**不含日照高度**的形状指纹，
+        /// 否则白天/黄昏切换会让判据假 FAIL（v0.1.153 实测：4 个邻块里恰好 1 个）。
+        /// </summary>
+        public static string ChunkShapeHash(int cx, int cz) => ChunkHeightHashCore(cx, cz, false);
+
+        static string ChunkHeightHashCore(int cx, int cz, bool includeSunlight) {
             Terrain terrain = Terrain;
             TerrainChunk chunk = terrain?.GetChunkAtCoords(cx, cz);
             if (chunk == null) {
@@ -95,7 +107,9 @@ namespace Game {
                     int sun = chunk.GetSunlightHeightFast(x, z);
                     hash = Mix(hash, top);
                     hash = Mix(hash, bottom);
-                    hash = Mix(hash, sun);
+                    if (includeSunlight) {
+                        hash = Mix(hash, sun);
+                    }
                     minTop = Math.Min(minTop, top);
                     maxTop = Math.Max(maxTop, top);
                     minBottom = Math.Min(minBottom, bottom);
@@ -107,6 +121,7 @@ namespace Game {
                 ["ok"] = true,
                 ["chunk"] = new JsonArray(cx, cz),
                 ["heightHash"] = hash.ToString("x16"),
+                ["includesSunlightHeight"] = includeSunlight,
                 ["minTopHeight"] = minTop == int.MaxValue ? 0 : minTop,
                 ["maxTopHeight"] = maxTop == int.MinValue ? 0 : maxTop,
                 ["minBottomHeight"] = minBottom == int.MaxValue ? 0 : minBottom,
