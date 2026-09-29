@@ -642,6 +642,14 @@ namespace Game {
 
         static int m_parallelLockstepInjectFailure = -1;
 
+        /// <summary>**[v0.1.156] lockstep 的候选窗口系数**（默认 12）：
+        /// `scanCap = max(workers × 系数, 48)`。调大能看见更多候选（可能凑出更大的批），
+        /// 代价是每次调用多扫一点 —— `notes/278 §8.2` 指出的"候选可用性"杠杆的旋钮。</summary>
+        public static int ParallelLockstepScanFactor {
+            get => TerrainUpdater.ParallelLockstepScanFactor;
+            set => TerrainUpdater.ParallelLockstepScanFactor = Math.Clamp(value, 2, 128);
+        }
+
         /// <summary>lockstep 批推进的账本（只读探针）：批数/区块数/最大批/并发度上限/I2 拒绝数/各段计数/注入次数。</summary>
         public static string ParallelLockstepStats() =>
             GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeParallelLockstep()

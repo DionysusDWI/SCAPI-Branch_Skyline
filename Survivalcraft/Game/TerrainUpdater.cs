@@ -220,6 +220,15 @@ namespace Game {
         long m_lockstepContents3;
         long m_lockstepContents4;
         long m_lockstepLight;
+        // [v0.1.156 · 候选可用性账本] 回答"为什么凑不齐批"（`notes/278 §8.2` 指向的下一步杠杆）：
+        //   调用次数 / 回退次数 / 候选数累计与峰值 / 被扫描上限截断的次数 / 候选的段分布。
+        long m_lockstepCalls;
+        long m_lockstepFallbacks;
+        long m_lockstepCandidatesTotal;
+        int m_lockstepCandidatesMax;
+        long m_lockstepTruncated;
+        long m_lockstepCandContents;
+        long m_lockstepCandLight;
         TerrainChunk[] m_lockstepCandidates;   // 按距离升序的候选缓冲（比 picks 长，供 I2 挑）
         float[] m_lockstepCandidateDist;
         TerrainChunk[] m_lockstepPicks;        // I2 之后真正并行执行的批
@@ -1236,6 +1245,14 @@ namespace Game {
         /// </summary>
         public const int LockstepMinChunkGap = 3;
 
+        /// <summary>
+        /// [v0.1.156] **候选窗口系数**（默认 12）：`scanCap = max(workers × 系数, 48)`。
+        /// 为什么做成可写：`notes/278 §8.2` 把"改进被压在天花板下"归因到**候选可用性**
+        /// （`rejectedAdjacent` 常上千、部分轮次完全凑不齐批），这条系数就是那条杠杆的旋钮——
+        /// 调大能看见更多候选，代价是每次调用多扫一点（O(chunks) 的纯读比较，可测）。
+        /// </summary>
+        public static int ParallelLockstepScanFactor { get; set; } = 12;
+
         static bool IsLockstepWhitelisted(TerrainChunkState st) =>
             st == TerrainChunkState.InvalidContents1 || st == TerrainChunkState.InvalidContents2
             || st == TerrainChunkState.InvalidContents3 || st == TerrainChunkState.InvalidContents4
@@ -1256,7 +1273,10 @@ namespace Game {
             if (locations.Length == 0) {
                 return 0;
             }
-            int scanCap = Math.Max(maxWorkers * 12, 48);   // 候选窗口要够 I2 挑出 maxWorkers 个
+            m_lockstepCalls++;
+            // 候选窗口：`maxWorkers × 系数`。系数可写（`ParallelLockstepScanFactor`，默认 12）——
+            // 它直接决定"能看见多少候选"，是 `notes/278 §8.2` 指出的那条杠杆的旋钮。
+            int scanCap = Math.Max(maxWorkers * ParallelLockstepScanFactor, 48);
             if (m_lockstepCandidates == null || m_lockstepCandidates.Length < scanCap) {
                 m_lockstepCandidates = new TerrainChunk[scanCap];
                 m_lockstepCandidateDist = new float[scanCap];
@@ -1298,6 +1318,19 @@ namespace Game {
                     if (nCand < scanCap) {
                         nCand++;
                     }
+                    else {
+                        m_lockstepTruncated++;   // 候选多于扫描上限：这一格是被"截断"丢的
+                    }
+                }
+            }
+            m_lockstepCandidatesTotal += nCand;
+            m_lockstepCandidatesMax = Math.Max(m_lockstepCandidatesMax, nCand);
+            for (int i = 0; i < nCand; i++) {
+                if (m_lockstepCandidates[i].ThreadState == TerrainChunkState.InvalidLight) {
+                    m_lockstepCandLight++;
+                }
+                else {
+                    m_lockstepCandContents++;
                 }
             }
             // ---- I2：按距离顺序贪心挑选，批内两两 Chebyshev ≥ LockstepMinChunkGap ----
@@ -1320,6 +1353,7 @@ namespace Game {
                 m_lockstepPicks[n++] = cand;
             }
             if (n < 2) {
+                m_lockstepFallbacks++;              // 凑不齐批 ⇒ 回退串行（改进被天花板压住的地方）
                 for (int k = 0; k < n; k++) {
                     m_lockstepPicks[k] = null;      // 只有一个候选 ⇒ 不起并行开销，回退串行
                 }
@@ -1422,6 +1456,19 @@ namespace Game {
             ["workerCeiling"] = m_lockstepWorkerCeiling,
             ["bounded"] = m_lockstepMaxBatch <= Math.Max(1, m_lockstepWorkerCeiling),
             ["rejectedAdjacent"] = m_lockstepRejectedAdjacent,
+            // [v0.1.156 · 候选可用性账本] 回答"为什么凑不齐批"
+            ["scanFactor"] = ParallelLockstepScanFactor,
+            ["calls"] = m_lockstepCalls,
+            ["fallbacks"] = m_lockstepFallbacks,
+            ["fallbackRate"] = m_lockstepCalls > 0
+                ? Math.Round((double)m_lockstepFallbacks / m_lockstepCalls, 4) : 0.0,
+            ["candidatesTotal"] = m_lockstepCandidatesTotal,
+            ["candidatesPerCall"] = m_lockstepCalls > 0
+                ? Math.Round((double)m_lockstepCandidatesTotal / m_lockstepCalls, 3) : 0.0,
+            ["candidatesMax"] = m_lockstepCandidatesMax,
+            ["truncatedByScanCap"] = m_lockstepTruncated,
+            ["candidatesContents"] = m_lockstepCandContents,
+            ["candidatesLight"] = m_lockstepCandLight,
             ["contents1"] = m_lockstepContents1,
             ["contents2"] = m_lockstepContents2,
             ["contents3"] = m_lockstepContents3,
