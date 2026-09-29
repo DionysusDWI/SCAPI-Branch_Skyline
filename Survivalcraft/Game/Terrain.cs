@@ -301,9 +301,34 @@ namespace Game {
 
         public virtual int GetCellLightFast(Point3 p) => ExtractLight(GetCellValueFast(p));
 
-        public virtual void SetCellValueFast(int x, int y, int z, int value) => GetChunkAtCell(x, z)?.SetCellValueFast(x & 0xF, y, z & 0xF, value);
+        // [v0.1.156 · CC `075119Z` P3] **让"静默丢弃"可观测**（只加计数，不改行为）：
+        //   `?.` 在邻居区块**未分配**时把这次写入**静默丢掉**，于是"跨轮逐位比对"会随
+        //   "那一刻邻居在不在场"而漂移（已有确定性缺口，非并行引入）。审计要求：要么在文档里
+        //   固定"邻居在场"前置，要么给丢弃加显式计数器。这里两件都做 —— 计数器 + 探针。
+        public long DroppedNeighborWrites;
+        public long BoundaryWrites;
 
-        public virtual void SetCellValueFast(Point3 p, int value) => GetChunkAtCell(p.X, p.Z)?.SetCellValueFast(p.X & 0xF, p.Y, p.Z & 0xF, value);
+        public virtual void SetCellValueFast(int x, int y, int z, int value) {
+            TerrainChunk chunkAtCell = GetChunkAtCell(x, z);
+            if (chunkAtCell != null) {
+                BoundaryWrites++;
+                chunkAtCell.SetCellValueFast(x & 0xF, y, z & 0xF, value);
+            }
+            else {
+                DroppedNeighborWrites++;
+            }
+        }
+
+        public virtual void SetCellValueFast(Point3 p, int value) {
+            TerrainChunk chunkAtCell = GetChunkAtCell(p.X, p.Z);
+            if (chunkAtCell != null) {
+                BoundaryWrites++;
+                chunkAtCell.SetCellValueFast(p.X & 0xF, p.Y, p.Z & 0xF, value);
+            }
+            else {
+                DroppedNeighborWrites++;
+            }
+        }
 
         public virtual int CalculateTopmostCellHeight(int x, int z) => GetChunkAtCell(x, z)?.CalculateTopmostCellHeight(x & 0xF, z & 0xF) ?? 0;
 

@@ -372,7 +372,12 @@ namespace Game {
                 ["freeMs"] = Math.Round(terrain?.FreeMs ?? -1, 1),
                 ["saveChunkCount"] = ser?.SaveChunkCount ?? -1,
                 ["saveChunkMs"] = Math.Round(ser?.SaveChunkMs ?? -1, 1),
+                // [v0.1.156 · CC 075119Z P3] `SetCellValueFast` 的**跨块写**与**静默丢弃**计数。
+                // 跨轮逐位比对的前置条件就是"那一刻邻居在场"；这两条计数把它变成可观测事实。
+                ["boundaryWrites"] = terrain?.BoundaryWrites ?? -1,
+                ["droppedNeighborWrites"] = terrain?.DroppedNeighborWrites ?? -1,
                 ["note"] = "累计只读账本：分配/释放来自 Terrain，存盘来自 TerrainSerializer23；"
+                           + "boundaryWrites/droppedNeighborWrites 是 SetCellValueFast 的跨块写与静默丢弃；"
                            + "配合 TerrainUpdateStats 的逐 pass 分账，用来把未归因时间压到 10% 以内"
             }.ToJsonString();
         }
