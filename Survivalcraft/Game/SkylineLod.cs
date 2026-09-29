@@ -620,6 +620,8 @@ namespace Game {
                 SkylineCubeShellStore.Tick();
                 // [v0.1.60] 手动生成 LOD：分帧推进任务表（默认没有任务时是空操作）
                 SkylineLodManualBuild.Tick();
+                // [v0.1.137] 里程碑 5.2：Chunky 式预加载的记账/完成判定（没有任务时是空操作）
+                SkylineChunkPreloader.Tick();
                 // [v0.1.73] 里程碑 2.2 收官：区域仓每 0.5 s 做一次"按需回读 + 超出半径的写盘移除"
                 RegionStoreTick();
                 // [v0.1.75] 采样戳按距离裁剪（`m_stamps` 是"按走过的地方"增长的表）——

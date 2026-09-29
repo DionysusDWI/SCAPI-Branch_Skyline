@@ -7,6 +7,43 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.137] - 2026-09-29
+
+第一百四十三个版本：**里程碑 5.2 第一段 —— Chunky 式区块预加载**（+ 两处自测出的设计错误 + 体素壳刷新票）。
+相对 v0.1.136 的变更：
+
+### 1. `SkylineChunkPreloader`（新）
+
+目标 5.2 要"迁移 Chunky（预加载）与 C2ME（多线程）"。本段先做 **Chunky 那一半**，口径是**虚拟加载点**：
+`TerrainUpdater.SetUpdateLocation(9001, center, visibility, content)` 把目标区域当成临时玩家位置交给既有
+加载线程与状态机，我们只做**排队、进度/ETA、帧开销记账、可取消/可释放**。
+桥：`skyline.ChunkPreloadStart(x,z,r)` / `ChunkPreloadStatus()` / `ChunkPreloadCancel()` / `ChunkPreloadRelease()`。
+
+验收 `heightlab/skyline-v0137-chunky-preload.py` **4/4 PASS**：r=6（**169 区块**）4.1 s 内全部到 `Valid`；
+目标列有真地形（y=64）；第二次预加载可取消（`cancelledTotal=1`）；整机内存 27.5 → 28.2 GB。
+
+### 2. 两条被实测揪出的设计错误（都已修，如实记录）
+
+* **方形目标 vs 圆形判据**：`IsChunkInRange` 是圆形 ⇒ 只传 `r×16` 时方形四角落在圆外，
+  Valid 永远停在 **113/169 = 66.9%**；改为默认可见距离 `(r+1)×16×√2`（外接圆+一格余量）。
+* **完成即摘点 ⇒ 目标立刻被卸载**：改为**完成不摘点**（`completed=true` 且保持挂载），
+  由 `ChunkPreloadRelease()`/`Cancel()` 显式收尾；否则"预加载完再查目标列"永远查不到（假 FAIL）。
+* 顺带修 `CompletedTotal` 每帧 +1（一跑变 26）——只在"未完成→完成"跃变上计一次。
+
+### 3. 体素壳**刷新票**（补 v0.1.135 自留的边界）
+
+v0.1.135 的编辑失效化能保证"不拿旧快照冒充"，但重采受 `SurfaceVoxelMaxCubes=512` 额度限制、
+可能回落列顶壳。现在给"编辑前**本来有**体素壳"的立方体发一张**刷新票**，重采时凭票**绕过额度一次**
+（票据有界，`issued/used` 计数，探针 `skyline.VoxelRefreshTickets()`）。
+实测：在带壳立方体顶部放一块**砖块** → 重采后的体素壳材质直方图**出现 BricksBlock 1**，
+且 `voxelShellCount=547 > cap=512`（正是凭票绕过）。
+
+### 4. 门禁与证据
+
+门禁 **PASS 21 / FAIL 0 / SKIP 0**；`notes/245`（5.2 第一段）、`notes/244`（CC 裁定整改）。
+**下一步**：5.2 第二段按"先正确性、后性能"：先摸清 `TerrainUpdater` 的线程所有权与提交边界，
+再决定把哪些纯计算移到 worker，并先过"同 seed 串行 vs 并行结果一致 / 取消不污染世界"两条判据。
+
 ## [v0.1.136] - 2026-09-29
 
 第一百四十二个版本：**按 CC（Claude Code）首份裁定的 7 条 finding 整改**。

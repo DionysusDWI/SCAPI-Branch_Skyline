@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.136**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.137**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -23,6 +23,9 @@
   穴块、**地下湖**、洞穴、树、坟的高度全部按世界全高换算（`SkylineTerrainBaseline`），并支持
   **低基线自然生成**（`TerrainLevel` 取负即基线）；新世界基岩 **7/7**、地表材质 **11/11**
   （修掉负 y 下表层不铺导致的**裸岩**）；22/23 老存档格式只对齐基岩（如实记录）。
+* **[v0.1.137] 区块预加载（里程碑 5.2 第一段，Chunky 式）**：`skyline.ChunkPreloadStart(x,z,r)`
+  用**虚拟加载点**把目标区域交给引擎既有加载线程（只做排队/进度·ETA/帧开销/可取消），
+  实测 r=6（**169 区块**）4.1 s 全部到 `Valid`、目标列真地形 y=64、可取消；C2ME 式的多线程加速是下一段。
 * 建筑工具：区域复制 / 镜像 / 旋转、蓝图导入导出、笔画式构建；
   `SkylineBuilder` 剖面扫掠——支持**三次贝塞尔曲线**（弧长等距）。
 * 大规模建筑压力测试：单区块 4096 件高复杂度家具；家具**逐级降分辨率 LOD**（`d_box(E)` 占替距）、
@@ -30,21 +33,19 @@
   **[v0.1.125] 标定完成（里程碑 2.2）**：修掉"打开开关当下不生效"的真缺陷；量出**出厂分界站得住**
   （L1=47.4 m 处掩膜内 **0 px**，提前到 ≤30 m 立刻可见），**第二模型 qwen 独立复核一致**。
 * **[v0.1.123] 外部高度场驱动地形（5 清管线风险）**：测试类 `TerrainContentsGeneratorHeightmap`
-  （默认不生效，只能经 `skyline.TerrainDiffusionInstall` 装上）证明 SC 管线能吃外部高度图
-  （27/27 点 `|Δ| ≤ 1`、`r = 0.9999`）；且换生成器是**往回追溯**的 ⇒ 真接扩散模型需"区域提交"。
+  （默认不生效，经 `skyline.TerrainDiffusionInstall` 装上）证明 SC 管线能吃外部高度图（27/27 点 `|Δ| ≤ 1`）；
+  且换生成器**往回追溯** ⇒ 真接扩散模型需"区域提交"。
 
 **超视距 LOD（里程碑 2；当前参考 Distant Horizons）**
 
 * 加载距离之外的远景统一 **32³** 采样并持久化，1024 m 低模渲染 + 双面裙边；
 * 与真地形**共用同一条雾曲线**；`ShellHoleFill` 让"地形已卸载但壳还在"的近处不留洞；
-* **按 DH 规格的两项观感**（`SkylineLodLook`，默认全开）：**抖动淡出**（按屏幕空间抖动概率丢弃片元，
-  用 Iris 的 IGN 而非 4×4 Bayer —— GLES 不接受 const 数组）与**噪声补细节**（参数照 DH 默认
-  `steps=4 / intensity=5 / dropoff=1024`）；
+* **按 DH 规格的两项观感**（`SkylineLodLook`，默认全开）：**抖动淡出**（用 Iris 的 IGN 而非 4×4 Bayer，
+  GLES 不接受 const 数组）与**噪声补细节**（照 DH 默认 `steps=4 / intensity=5 / dropoff=1024`）；
 * 分级边界按**屏幕像素**核算（`CubeShellTierPixelTable`），开关 `CubeShellPixelTiers`（默认关）。
-* **[v0.1.127] LOD 分级改成"以 Distant Horizons 源码经验为主"**：档位由 DH 的
-  `level = floor(log_base(d / (unit×16)))` 给出（预设 LOWEST…EXTREME，默认 **MEDIUM**：
-  边界 **192 / 384 / 768 m** 的绝对距离），带内三级 = **0.5 / 1 / 2 m 体素**（旧阶梯在 384 m
-  就用 4 m 体素，正是"分级过于明显"的根因）。
+* **[v0.1.127] LOD 分级以 DH 源码经验为主**：档位由 `level = floor(log_base(d / (unit×16)))` 给出
+  （预设 LOWEST…EXTREME，默认 **MEDIUM**：边界 **192/384/768 m** 绝对距离），带内三级 = **0.5/1/2 m 体素**
+  （旧阶梯在 384 m 就用 4 m 体素，正是"分级过于明显"的根因）。
   同时新增**单位兼容层**（`skyline.CubeShellDhCompat()`）：MC 区块 16/视距按区块半径/平面窗、
   本分支区块 16（另有 32³ 立方块原型）/视距按方块数/球形窗 —— 逐条写明，禁止公式互相套用。
   **[v0.1.128] 视距换算收口（2.4）**：`McRenderDistanceToBlocks/ToMetres`、`OurViewRangeToMcChunks`
@@ -69,21 +70,18 @@
   **[v0.1.122] Iris「镜像螺旋核」**（`GpuShadowKernel=3`）直边严格无偏但各向异性更差 ⇒ 默认 ring16。
 * **远处阴影距离淡出**（Iris 的 `smoothstep(far*0.4, far*0.9, dist)`），
   消掉阴影图边界硬切（`GpuShadowFadeScale=0` 可回退）；
-* **体积云 / 体积雾 / 体积神光**：雾里逐步做太阳遮挡判定 × 前向散射，**同时覆盖远景 LOD 层**；
-  **[v0.1.119] 神光跟随昼光**；**[v0.1.118] 体积雾基础密度** `FogBaseDensity=0.10`（覆盖 0.19% → **71%**）；
-* **固定光源**：复用引擎扫描建立光源列表、逐帧取 K 近邻做距离衰减
-  （`skyline.PointLights(true)`，默认关、关闭时**零代价**）；
-* **相机空间深度预通道**（`SkylineScreenDepth`）：半分辨率、16 bit 线性视距、只画 112 m 内真地形
-  （屏幕空间体积光 / SSAO / TAA 的前置，默认关）；
-* **屏幕空间体积光**（Iris `volumetricLight.glsl` 的迁移）：全屏**加法** pass、12 步 `pow(t,2)` + IGN 抖动、
-  每步查太阳阴影图，**天空片元也走满 256 m**；默认关、强度 **0.22**，代价 **0.138 ms**（实测）。
-* **屏幕空间 AO**（`SkylineScreenAo`，深度预通道的第一个消费者）：horizon-based、法线由深度重建、
-  8 方向 × 3 步、旋转用**屏幕像素 IGN**（v0.1.116 修掉世界坐标哈希留在曲面上的同心环）+ 24~56 m 淡出；
+* **体积云 / 体积雾 / 体积神光**：雾里逐步做太阳遮挡 × 前向散射，**同时覆盖远景 LOD 层**；
+  **[v0.1.119] 神光跟随昼光**；**[v0.1.118] 体积雾基础密度** `FogBaseDensity=0.10`（0.19% → **71%**）；
+* **固定光源**：复用引擎扫描建光源列表、逐帧取 K 近邻做距离衰减（`skyline.PointLights(true)`，默认关、零代价）；
+* **相机空间深度预通道**（`SkylineScreenDepth`）：半分辨率、16 bit 线性视距、只画 112 m 内真地形（默认关）；
+* **屏幕空间体积光**（Iris `volumetricLight.glsl` 迁移）：全屏**加法** pass、12 步 + IGN 抖动、每步查阴影图，
+  **天空片元也走满 256 m**；默认关、强度 **0.22**、代价 **0.138 ms**（实测）。
+* **屏幕空间 AO**（`SkylineScreenAo`）：horizon-based、法线由深度重建、8 方向 × 3 步、旋转用**屏幕像素 IGN**
+  （v0.1.116 修掉同心环）+ 24~56 m 淡出；
   实测默认档只影响 **0.95%** 帧面积，多机位 0.83%~9.05% 全 ≤10%，代价在噪声内；
   `skyline.ScreenAoEnabled=true` 一条打开（默认关）。
 * LOD 参与云层阴影（烘进顶点色）与固定光源亮斑（顶面取**上方空气格**的光）。
-* **LOD 体素参与光影**（里程碑 2.3）：太阳阴影 = 实时深度图（`skyline.LodShadowReceive`，默认关）；
-  云层阴影与固定光源亮斑 = **烘焙路线**（按最小体素取空气格的光，`LodSurvey.airLight*` 可查）。
+* **LOD 体素参与光影**（2.3）：太阳阴影 = 实时深度图（`LodShadowReceive`，默认关）；云影与光源亮斑 = **烘焙**。
 * **关雾（为了看清光影本身）**：`FogDisabled`（默认开）覆盖**全部**吃雾参数的 pass（地形三 pass /
   LOD 两层 / 体素壳 / 模型与粒子 / 移动方块 / 挖掘裂纹 / 选中框 / 天空地平线 / 掉落物褪色），
   加自研体积雾、神光、远景 LOD 雾、彩光雾 —— **一条 `FogAll(true)` 全关**（`false` 还原），

@@ -267,6 +267,20 @@ namespace Game {
         /// <summary>[v0.1.136 · CC 审计 P3] 读取失败的坏区域数（读完即从 known 摘掉）。</summary>
         public static long RegionsCorrupt => SkylineLod.RegionsCorrupt;
 
+        // ===== [v0.1.137] 里程碑 5.2：Chunky 式区块预加载（虚拟加载点） =====
+        /// <summary>开始预加载一块区域（中心世界坐标 + 半径区块数）。</summary>
+        public static string ChunkPreloadStart(float centerX, float centerZ, int radiusChunks) =>
+            SkylineChunkPreloader.Start(centerX, centerZ, radiusChunks);
+
+        /// <summary>预加载进度/ETA/帧开销账本。</summary>
+        public static string ChunkPreloadStatus() => SkylineChunkPreloader.Status();
+
+        /// <summary>取消预加载（摘掉虚拟加载点）。</summary>
+        public static string ChunkPreloadCancel() => SkylineChunkPreloader.Cancel();
+
+        /// <summary>释放预加载（已完成时用；未完成则等同取消）。</summary>
+        public static string ChunkPreloadRelease() => SkylineChunkPreloader.Release();
+
         /// <summary>[v0.1.136] 体素壳刷新票的账本（编辑失效化后恢复体素壳用）。</summary>
         public static string VoxelRefreshTickets() => new JsonObject {
             ["pending"] = SkylineCubeShellStore.VoxelRefreshTicketsPending,
