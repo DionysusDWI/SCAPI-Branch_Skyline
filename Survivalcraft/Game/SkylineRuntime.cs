@@ -306,6 +306,20 @@ namespace Game {
         public static string GeneratorCtorProbe(int count) =>
             SkylineChunkDeterminism.GeneratorCtorProbe(count);
 
+        /// <summary>[v0.1.146 · 审计验收用] **区块读盘失败注入**的账本（默认开关 -1 = 关）。</summary>
+        public static string ChunkReadFailureInjection() => new JsonObject {
+            ["injectAt"] = TerrainSerializer23.InjectChunkReadFailure,
+            ["injectedFailures"] = TerrainSerializer23.InjectedChunkReadFailures,
+            ["note"] = "只用于验收：非 IOException 的注入不会走『弹窗 + DisposeProject』那条分支"
+        }.ToJsonString();
+
+        /// <summary>[v0.1.146 · 审计验收用] 转发到 `TerrainSerializer23.InjectChunkReadFailure`
+        /// （桥的 `setprop` 目标是 `skyline`，所以要在这里开一个转发口）。**默认 -1 = 关**。</summary>
+        public static int ChunkReadFailureInjectionAt {
+            get => TerrainSerializer23.InjectChunkReadFailure;
+            set => TerrainSerializer23.InjectChunkReadFailure = value;
+        }
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);

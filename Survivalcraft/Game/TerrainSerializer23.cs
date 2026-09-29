@@ -588,6 +588,27 @@ namespace Game {
             m_storage.Open(directoryName, suffix);
         }
 
+        /// <summary>
+        /// [v0.1.146 · 审计验收用，默认 -1 = 关] **区块读盘失败注入**：`>= 0` 时，
+        /// 下一次"存档里**确实存在**该区块数据"的 `LoadChunkData` 会抛 `InvalidDataException`（**一次性**），
+        /// 用来**行为级**验证两条审计口径：
+        ///   * "存档无法回读时立即停止" —— 引擎现有分支是 `catch (Exception e) { Log.Error(...) }`
+        ///     然后**返回 true**（`:626-630`）⇒ 需要实测"坏档被当成已加载之后世界会怎样"；
+        ///   * "异常可定位" —— 日志里必须能看到注入消息与坐标。
+        /// 注意：它抛的是**非 IOException**，所以**不会**走"弹窗 + DisposeProject"那条重分支
+        /// （那条留给真实磁盘 IO 错误，见 `:611-625`）。
+        /// </summary>
+        public static int InjectChunkReadFailure {
+            get => m_injectChunkReadFailure;
+            set => m_injectChunkReadFailure = Math.Clamp(value, -1, 64);
+        }
+
+        static int m_injectChunkReadFailure = -1;
+        static long m_injectedChunkReadFailures;
+
+        /// <summary>[v0.1.146] 注入实际抛出的次数（验收用）。</summary>
+        public static long InjectedChunkReadFailures => m_injectedChunkReadFailures;
+
         public virtual bool LoadChunk(TerrainChunk chunk) => LoadChunkData(chunk);
 
         public virtual void SaveChunk(TerrainChunk chunk) {
@@ -605,6 +626,14 @@ namespace Game {
                     int num = m_storage.Load(chunk.Coords, m_storageBuffer);
                     if (num < 0) {
                         return false;
+                    }
+                    // [v0.1.146 · 审计验收] 注入点：只在"存档里确实有这个区块"时触发，一次性。
+                    if (InjectChunkReadFailure >= 0) {
+                        InjectChunkReadFailure = -1;
+                        m_injectedChunkReadFailures++;
+                        throw new InvalidDataException(
+                            $"skyline: injected chunk read failure at ({chunk.Coords.X},{chunk.Coords.Y}) "
+                            + "(skyline.TerrainSerializer23.InjectChunkReadFailure)");
                     }
                     DecompressChunkData(chunk, m_storageBuffer, num);
                 }
