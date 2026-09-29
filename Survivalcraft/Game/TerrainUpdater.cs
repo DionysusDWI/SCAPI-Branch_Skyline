@@ -206,6 +206,24 @@ namespace Game {
         TerrainChunk[] m_parallelPicks;
         float[] m_parallelPickDist;
 
+        // ===== [v0.1.156 · 里程碑 5.2 第二段] **lockstep 批推进**的账本与开关 =====
+        // 与上面的"日照单段并行"账本分开记，避免两套读数混在一起（本轮教训：混口径会误判）。
+        long m_lockstepBatches;
+        long m_lockstepChunks;
+        int m_lockstepLastBatch;
+        int m_lockstepMaxBatch;
+        int m_lockstepWorkerCeiling;
+        long m_lockstepInjectedFailures;
+        long m_lockstepRejectedAdjacent;     // I2 因"与批内已有候选过近"而被跳过的候选数
+        long m_lockstepContents1;
+        long m_lockstepContents2;
+        long m_lockstepContents3;
+        long m_lockstepContents4;
+        long m_lockstepLight;
+        TerrainChunk[] m_lockstepCandidates;   // 按距离升序的候选缓冲（比 picks 长，供 I2 挑）
+        float[] m_lockstepCandidateDist;
+        TerrainChunk[] m_lockstepPicks;        // I2 之后真正并行执行的批
+
         /// <summary>
         /// [v0.1.138 · 里程碑 5.2 第二段前置] **只读**：把逐 pass 的耗时/次数账本导出成 JSON
         /// （不打印、不重置 —— 与 `LogTerrainUpdateStats` 那条日志路径解耦，供 5.2 的
@@ -980,6 +998,15 @@ namespace Game {
             }
             // [v0.1.139 · 里程碑 5.2 第二段] 有界并行：默认关（0/1）。只在"状态正好是 InvalidLight"
             // 的区块上并行做日照/高度（源码级核实：该 pass 只碰本区块，见 notes/248）；做不到就回退串行。
+            // [v0.1.156 · 里程碑 5.2 第二段] **lockstep 批推进**（默认关）：把窗口扩到
+            // `InvalidContents1..4` + `InvalidLight`，一次凑一批**非邻近**区块并行做纯计算。
+            // 与上一行的关系：上一行是它在"单段"上的特例；两者都关时走原串行路径（逐位不变）。
+            // 默认翻开需三条判据同时满足（CC 080120Z）：六条不变量含 I5 注入全 PASS、
+            // 同 seed 交叉轮次哈希逐位相同、同负载墙钟中位数改善 ≥ 15%。
+            if (SkylineRuntime.ParallelLockstepWorkers >= 2
+                && TryParallelLockstepStep(SkylineRuntime.ParallelLockstepWorkers) > 0) {
+                return false;
+            }
             if (SkylineRuntime.ParallelSunLightWorkers >= 2
                 && TryParallelSunLightStep(SkylineRuntime.ParallelSunLightWorkers) > 0) {
                 return false;
@@ -1181,6 +1208,232 @@ namespace Game {
         }
 
         /// <summary>[v0.1.139] 并行日照 pass 的只读账本（桥：`skyline.ParallelSunLightStats()`）。</summary>
+        /// <summary>
+        /// [v0.1.156 · 里程碑 5.2 第二段] **lockstep 批推进**：把候选窗口从单个 `InvalidLight`
+        /// 扩到**全部白名单段**（`InvalidContents1..4` + `InvalidLight`），一次凑一批**互不邻近**的区块
+        /// 并行做**纯计算**，`join` 之后由工作线程**串行**推进状态机。
+        ///
+        /// 设计与裁定：`notes/254`（交审草案）+ CC `080120Z` 四问裁定（I2 保留、vertices 暂缓、
+        /// **I5 先做**、默认翻开需三条判据同时满足）。
+        ///
+        /// 不变量（`notes/254 §3`，逐条在此落地）：
+        /// * **I2**：批内任意两块 **Chebyshev 距离 ≥ `LockstepMinChunkGap`（=3）**。
+        ///   为什么是 3 而不是草案写的 2：**生成器确实跨块写** —— 树/刷子走
+        ///   `Terrain.SetCellValueFast` → `GetChunkAtCell(...)?.SetCellValueFast`
+        ///   （`TerrainContentsGenerator23.cs:1193-1217`、`TerrainBrush.cs:263/328`），
+        ///   实测那些写入半径 ≤ 8 格（不到 1 个区块）⇒ 每块的**写邻域是 3×3 区块**，
+        ///   取间距 ≥ 3 才能保证写邻域**两两不重叠**（间距 2 时两块会在中间那块上互相踩）。
+        /// * **I3**：状态推进只在 `Parallel.For` **join 之后**、由工作线程按 `picks` 顺序串行做。
+        /// * **I4**：每 worker 只写自己那块；共享的 `m_statistics` **只由工作线程在 join 后**更新。
+        /// * **I6**：批 ≤ `maxWorkers`、无队列；异常沿 `SynchronousUpdateFunction` 抛到
+        ///   `ThreadUpdateFunction` 的 `catch (Exception e) { Log.Error(...) }`。
+        /// * **I5**（注入）：`ParallelLockstepInjectFailure >= 0` 时第 N 个 worker 抛异常 ⇒ **整批不提交**。
+        /// * **`InvalidContents4` 的 mod hook 串行化**：worker 只做 `GenerateChunkContentsPass4`，
+        ///   `ModsManager.HookAction("OnTerrainContentsGenerated", ...)` 留到 join 之后的串行段
+        ///   —— 那是**全局回调**，并行调用它不满足"只写本区块"。
+        ///
+        /// 凑不到 2 个候选就返回 0 ⇒ 调用方**完全回退现有串行路径**（逐位不变）。
+        /// </summary>
+        public const int LockstepMinChunkGap = 3;
+
+        static bool IsLockstepWhitelisted(TerrainChunkState st) =>
+            st == TerrainChunkState.InvalidContents1 || st == TerrainChunkState.InvalidContents2
+            || st == TerrainChunkState.InvalidContents3 || st == TerrainChunkState.InvalidContents4
+            || st == TerrainChunkState.InvalidLight;
+
+        static int CompareCoords(TerrainChunk a, TerrainChunk b) =>
+            a.Coords.X != b.Coords.X ? a.Coords.X.CompareTo(b.Coords.X) : a.Coords.Y.CompareTo(b.Coords.Y);
+
+        public virtual int TryParallelLockstepStep(int maxWorkers) {
+            if (maxWorkers < 2) {
+                return 0;
+            }
+            TerrainChunk[] chunks = m_threadUpdateParameters.Chunks;
+            if (chunks == null || m_threadUpdateParameters.Locations == null) {
+                return 0;
+            }
+            UpdateLocation[] locations = m_threadUpdateParameters.Locations.Values.ToArray();
+            if (locations.Length == 0) {
+                return 0;
+            }
+            int scanCap = Math.Max(maxWorkers * 12, 48);   // 候选窗口要够 I2 挑出 maxWorkers 个
+            if (m_lockstepCandidates == null || m_lockstepCandidates.Length < scanCap) {
+                m_lockstepCandidates = new TerrainChunk[scanCap];
+                m_lockstepCandidateDist = new float[scanCap];
+            }
+            if (m_lockstepPicks == null || m_lockstepPicks.Length < maxWorkers) {
+                m_lockstepPicks = new TerrainChunk[maxWorkers];
+            }
+            int nCand = 0;
+            foreach (TerrainChunk c in chunks) {
+                if (c == null || !IsLockstepWhitelisted(c.ThreadState)) {
+                    continue;
+                }
+                float best = float.MaxValue;
+                bool inRange = false;
+                for (int j = 0; j < locations.Length; j++) {
+                    float d2 = Vector2.DistanceSquared(locations[j].Center, c.Center);
+                    if (d2 < best) {
+                        best = d2;
+                        inRange = d2 <= MathUtils.Sqr(locations[j].VisibilityDistance);
+                    }
+                }
+                if (!inRange) {
+                    continue;
+                }
+                // 距离升序插入；**同距用坐标做确定的 tie-break** ⇒ 跨轮可比（判据②要求逐位可复现）。
+                int pos = nCand < scanCap ? nCand : scanCap;
+                while (pos > 0 && (m_lockstepCandidateDist[pos - 1] > best
+                        || (m_lockstepCandidateDist[pos - 1] == best
+                            && CompareCoords(m_lockstepCandidates[pos - 1], c) > 0))) {
+                    if (pos < scanCap) {
+                        m_lockstepCandidates[pos] = m_lockstepCandidates[pos - 1];
+                        m_lockstepCandidateDist[pos] = m_lockstepCandidateDist[pos - 1];
+                    }
+                    pos--;
+                }
+                if (pos < scanCap) {
+                    m_lockstepCandidates[pos] = c;
+                    m_lockstepCandidateDist[pos] = best;
+                    if (nCand < scanCap) {
+                        nCand++;
+                    }
+                }
+            }
+            // ---- I2：按距离顺序贪心挑选，批内两两 Chebyshev ≥ LockstepMinChunkGap ----
+            int n = 0;
+            for (int i = 0; i < nCand && n < maxWorkers; i++) {
+                TerrainChunk cand = m_lockstepCandidates[i];
+                bool clash = false;
+                for (int k = 0; k < n; k++) {
+                    TerrainChunk p = m_lockstepPicks[k];
+                    if (Math.Abs(p.Coords.X - cand.Coords.X) < LockstepMinChunkGap
+                        && Math.Abs(p.Coords.Y - cand.Coords.Y) < LockstepMinChunkGap) {
+                        clash = true;
+                        break;
+                    }
+                }
+                if (clash) {
+                    m_lockstepRejectedAdjacent++;
+                    continue;
+                }
+                m_lockstepPicks[n++] = cand;
+            }
+            if (n < 2) {
+                for (int k = 0; k < n; k++) {
+                    m_lockstepPicks[k] = null;      // 只有一个候选 ⇒ 不起并行开销，回退串行
+                }
+                return 0;
+            }
+            int skyLightValue = m_subsystemSky.SkyLightValue;
+            double t0 = Time.RealTime;
+            Parallel.For(0, n, new ParallelOptions { MaxDegreeOfParallelism = maxWorkers }, k => {
+                // I5 注入（默认 -1 = 关）：抛在 Parallel.For 内部 ⇒ 推进段不执行 ⇒ 本批整体不提交。
+                // 一次性：抛一次后自动关掉，否则该状态永远推进不了、预加载走不完。
+                if (SkylineRuntime.ParallelLockstepInjectFailure >= 0
+                    && k == SkylineRuntime.ParallelLockstepInjectFailure) {
+                    m_lockstepInjectedFailures++;
+                    SkylineRuntime.ParallelLockstepInjectFailure = -1;
+                    throw new InvalidOperationException(
+                        $"skyline: injected lockstep-batch failure (worker {k}/{n}, "
+                        + "skyline.ParallelLockstepInjectFailure)");
+                }
+                TerrainChunk c = m_lockstepPicks[k];
+                switch (c.ThreadState) {
+                    case TerrainChunkState.InvalidContents1:
+                        m_subsystemTerrain.TerrainContentsGenerator.GenerateChunkContentsPass1(c);
+                        break;
+                    case TerrainChunkState.InvalidContents2:
+                        m_subsystemTerrain.TerrainContentsGenerator.GenerateChunkContentsPass2(c);
+                        break;
+                    case TerrainChunkState.InvalidContents3:
+                        m_subsystemTerrain.TerrainContentsGenerator.GenerateChunkContentsPass3(c);
+                        break;
+                    case TerrainChunkState.InvalidContents4:
+                        m_subsystemTerrain.TerrainContentsGenerator.GenerateChunkContentsPass4(c);
+                        break;      // mod hook 留到下面的串行段
+                    case TerrainChunkState.InvalidLight:
+                        GenerateChunkSunLightAndHeight(c, skyLightValue);
+                        break;
+                }
+            });
+            // ---- I3：join 之后，由工作线程串行推进状态机（与串行路径同一语义）----
+            double dt = Time.RealTime - t0;
+            for (int k = 0; k < n; k++) {
+                TerrainChunk c = m_lockstepPicks[k];
+                TerrainChunkState st = c.ThreadState;
+                switch (st) {
+                    case TerrainChunkState.InvalidContents1:
+                        c.ThreadState = TerrainChunkState.InvalidContents2;
+                        m_statistics.ContentsCount1++;
+                        m_statistics.ContentsTime1 += dt / n;
+                        m_lockstepContents1++;
+                        break;
+                    case TerrainChunkState.InvalidContents2:
+                        c.ThreadState = TerrainChunkState.InvalidContents3;
+                        m_statistics.ContentsCount2++;
+                        m_statistics.ContentsTime2 += dt / n;
+                        m_lockstepContents2++;
+                        break;
+                    case TerrainChunkState.InvalidContents3:
+                        c.ThreadState = TerrainChunkState.InvalidContents4;
+                        m_statistics.ContentsCount3++;
+                        m_statistics.ContentsTime3 += dt / n;
+                        m_lockstepContents3++;
+                        break;
+                    case TerrainChunkState.InvalidContents4:
+                        ModsManager.HookAction(
+                            "OnTerrainContentsGenerated",
+                            modLoader => {
+                                modLoader.OnTerrainContentsGenerated(c);
+                                return false;
+                            }
+                        );
+                        c.ThreadState = TerrainChunkState.InvalidLight;
+                        m_statistics.ContentsCount4++;
+                        m_statistics.ContentsTime4 += dt / n;
+                        m_lockstepContents4++;
+                        break;
+                    case TerrainChunkState.InvalidLight:
+                        c.ThreadState = TerrainChunkState.InvalidPropagatedLight;
+                        m_statistics.LightCount++;
+                        m_statistics.LightTime += dt / n;
+                        m_lockstepLight++;
+                        break;
+                }
+                c.WasUpgraded = true;
+                m_lockstepPicks[k] = null;
+            }
+            m_lockstepBatches++;
+            m_lockstepChunks += n;
+            m_lockstepLastBatch = n;
+            m_lockstepMaxBatch = Math.Max(m_lockstepMaxBatch, n);
+            m_lockstepWorkerCeiling = Math.Max(m_lockstepWorkerCeiling, maxWorkers);
+            return n;
+        }
+
+        public virtual string DescribeParallelLockstep() => new JsonObject {
+            ["workers"] = SkylineRuntime.ParallelLockstepWorkers,
+            ["minChunkGap"] = LockstepMinChunkGap,
+            ["batches"] = m_lockstepBatches,
+            ["chunks"] = m_lockstepChunks,
+            ["lastBatch"] = m_lockstepLastBatch,
+            ["maxBatch"] = m_lockstepMaxBatch,
+            ["workerCeiling"] = m_lockstepWorkerCeiling,
+            ["bounded"] = m_lockstepMaxBatch <= Math.Max(1, m_lockstepWorkerCeiling),
+            ["rejectedAdjacent"] = m_lockstepRejectedAdjacent,
+            ["contents1"] = m_lockstepContents1,
+            ["contents2"] = m_lockstepContents2,
+            ["contents3"] = m_lockstepContents3,
+            ["contents4"] = m_lockstepContents4,
+            ["light"] = m_lockstepLight,
+            ["injectFailureAt"] = SkylineRuntime.ParallelLockstepInjectFailure,
+            ["injectedFailures"] = m_lockstepInjectedFailures,
+            ["note"] = "I2 = 批内 Chebyshev ≥ 3（生成器确有跨块写，写邻域 3×3 必须不重叠）；"
+                       + "InvalidContents4 的 mod hook 串行化；join 后由工作线程串行推进状态；"
+                       + "非白名单段（NotLoaded / PropagatedLight / Vertices）一律回退串行"
+        }.ToJsonString();
+
         public virtual string DescribeParallelSunLight() => new JsonObject {
             ["workers"] = SkylineRuntime.ParallelSunLightWorkers,
             ["batches"] = m_parallelSunLightBatches,

@@ -567,6 +567,44 @@ namespace Game {
             ?? "{\"err\":\"no updater\"}";
 
         /// <summary>
+        /// **[v0.1.156 · 里程碑 5.2 第二段] lockstep 批推进的并发度**（默认 **0 = 关**）。
+        ///
+        /// 它把候选窗口从"只有 `InvalidLight`"扩到 **`InvalidContents1..4` + `InvalidLight`**：
+        /// 一次凑一批**互不邻近**（Chebyshev ≥ 3）的区块并行做纯计算，`join` 之后由地形工作线程
+        /// **串行**推进状态机。设计与四条不变量见 `notes/254`；CC 在 `080120Z` 裁定：
+        /// **I2 保留**（本实现按 ≥3，比草案的 ≥2 更严，理由见 `TerrainUpdater.TryParallelLockstepStep` 的注释：
+        /// 生成器**确有跨块写**，写邻域是 3×3 区块）、**vertices 暂缓**、**I5 先做**；
+        /// **默认翻开需三条判据同时满足**：①六条不变量含 I5 注入全 PASS ②同 seed 交叉轮次哈希逐位相同
+        /// ③同负载墙钟中位数改善 ≥ 15%（r=6、169 区块、弃首轮、≥5 遍取中位）。达不到就保持默认关并如实报告。
+        ///
+        /// 取 0/1 时完全回退现有串行路径（逐位不变）；≥2 才起并行。
+        /// </summary>
+        public static int ParallelLockstepWorkers {
+            get => m_parallelLockstepWorkers;
+            set => m_parallelLockstepWorkers = Math.Clamp(value, 0, 8);
+        }
+
+        static int m_parallelLockstepWorkers;
+
+        /// <summary>
+        /// [v0.1.156 · 审计验收用] **lockstep 批的异常注入**：`>= 0` 时第 N 个 worker 抛异常
+        /// （默认 **-1 = 关**）。语义与 `ParallelSunLightInjectFailure` 完全一致：抛在 `Parallel.For` 内
+        /// ⇒ **状态推进段不执行 ⇒ 整批不提交**（I5）；异常沿 `SynchronousUpdateFunction` 抛到
+        /// `ThreadUpdateFunction` 的 `catch` ⇒ 游戏日志可定位。**一次性**：抛出后自动复位成 -1。
+        /// </summary>
+        public static int ParallelLockstepInjectFailure {
+            get => m_parallelLockstepInjectFailure;
+            set => m_parallelLockstepInjectFailure = value;
+        }
+
+        static int m_parallelLockstepInjectFailure = -1;
+
+        /// <summary>lockstep 批推进的账本（只读探针）：批数/区块数/最大批/并发度上限/I2 拒绝数/各段计数/注入次数。</summary>
+        public static string ParallelLockstepStats() =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeParallelLockstep()
+            ?? "{\"err\":\"no updater\"}";
+
+        /// <summary>
         /// [v0.1.16] 球形加载窗的**内容距离**（米）：0 = 沿用调用方的默认（64，即 content = max(64, visibility)）。
         /// 调大（例如 256）会让超视距 LOD 的**细环**也能被采到——LOD 只能采样"已加载"的区块，
         /// 而引擎默认的 content=64/视距=128 意味着 136~256 m 的细环平时根本没加载过，
