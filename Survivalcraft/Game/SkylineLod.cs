@@ -204,6 +204,19 @@ namespace Game {
             return (unitMetres * MathF.Pow(quadraticBase, 1), unitMetres * MathF.Pow(quadraticBase, 2));
         }
 
+        /// <summary>
+        /// [v0.1.132] **距离 → 合并档号**（1 = 32 m / 2 = 64 m / 3 = 128 m）。
+        ///
+        /// ⚠️ 这里踩过一次坑，写清楚：DH 的 `detailLevel = floor(log_base(d / (unit×16)))` 在
+        /// `d = 384 m`（MEDIUM）处给出的是 **1**、在 `768 m` 处给出 **2** ⇒ 与"第一档 &lt; 384、
+        /// 第二档 384~768、第三档 ≥ 768"相比**整整差一档**（v0.1.130 就是直接 clamp(level,1,3)，
+        /// 结果第一档吃掉了 [0,768)、第三档直到 1536 m 才开始 ⇒ 外环整圈没被画，
+        /// 同半径下画出来的单元从 112 掉到 23，是 v0.1.132 的放大截图核对抓出来的）。
+        /// 正确的换算是 `tier = clamp(level + 1, 1, 3)`：level 0 → 32 m、level 1 → 64 m、level ≥ 2 → 128 m。
+        /// </summary>
+        public static int TierForDistance(float distanceMetres) =>
+            Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(distanceMetres) + 1, 1, 3);
+
         static readonly Dictionary<long, Cell> m_cellsM2 = [];   // 64 m 档（合并 4³）
         static readonly Dictionary<long, Cell> m_cellsM3 = [];   // 128 m 档（合并 8³）
         static int m_ladderTier1Cells, m_ladderTier2Cells, m_ladderTier3Cells;
@@ -1647,7 +1660,7 @@ namespace Game {
                 float wz = (cz << CellShift) + CellSize * 0.5f;
                 float dx = wx - camera.X, dz = wz - camera.Z;
                 float d = MathF.Sqrt(dx * dx + dz * dz);
-                if (Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(d), 1, 3) != tier) {
+                if (TierForDistance(d) != tier) {
                     continue;
                 }
                 AggregateGroup(Key(cx >> shift, cz >> shift), kv.Value);
@@ -2288,9 +2301,52 @@ namespace Game {
                 ["radiusMetres"] = (double)RadiusMetres,
                 ["boundariesMetres"] = new JsonArray(Math.Round(b1, 1), Math.Round(b2, 1)),
                 ["tiers"] = tiers,
+                ["distanceHistogram"] = MergeDistanceHistogram(),
                 ["note"] = "档位边界取 DH 的 unit×16×base^level（MEDIUM = 384/768 m 绝对距离）；"
                            + "每档 32³ 采样，等效精度 1/2/4 m（= DH 的 detail level 1/2/3）"
             }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.132] 诊断：把 `m_cells` 按"到相机的距离"分桶，并给出**每桶会被分到哪一档**
+        /// （档号 = `clamp(DhLevelForDistance(d), 1, 3)`）。用来钉死"阶梯臂在同半径下画得比统一档少"
+        /// 到底是**分配**的问题还是**网格band**的问题 —— 光看两端计数是分不出来的。
+        /// </summary>
+        public static string MergeDistanceHistogram() {
+            (float b1, float b2) = MergeBoundaries();
+            float[] edges = [192f, b1, b2, 1536f, 3072f, float.MaxValue];
+            string[] names = ["0-192", "192-384", "384-768", "768-1536", "1536-3072", "3072+"];
+            int[] counts = new int[names.Length];
+            int[] tier1 = new int[names.Length];
+            int[] tier2 = new int[names.Length];
+            int[] tier3 = new int[names.Length];
+            Vector3 camera = CameraViewPosition();
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                int cx = (int)(kv.Key >> 32);
+                int cz = (int)(uint)kv.Key;
+                float wx = (cx << CellShift) + CellSize * 0.5f;
+                float wz = (cz << CellShift) + CellSize * 0.5f;
+                float dx = wx - camera.X, dz = wz - camera.Z;
+                float d = MathF.Sqrt(dx * dx + dz * dz);
+                int bin = 0;
+                while (bin < edges.Length - 1 && d > edges[bin]) {
+                    bin++;
+                }
+                counts[bin]++;
+                switch (TierForDistance(d)) {
+                    case 1: tier1[bin]++; break;
+                    case 2: tier2[bin]++; break;
+                    default: tier3[bin]++; break;
+                }
+            }
+            JsonArray rows = [];
+            for (int i = 0; i < names.Length; i++) {
+                rows.Add(new JsonObject {
+                    ["band"] = names[i], ["cells16m"] = counts[i],
+                    ["tier1"] = tier1[i], ["tier2"] = tier2[i], ["tier3"] = tier3[i],
+                });
+            }
+            return rows.ToJsonString();
         }
 
         public static string Describe() =>
