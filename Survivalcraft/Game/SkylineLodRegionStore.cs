@@ -127,19 +127,54 @@ namespace Game {
         // ============================================================================================
 
         const uint RegionMagic = 0x524C4B53;   // 'SKLR'
-        const int RegionVersion = 1;
+        /// <summary>
+        /// 区域文件版本。**v2（v0.1.133）**：补上 `LightAir` 与第二层表面四个字段。
+        ///
+        /// 为什么必须补（审计缺陷 "LightAir"）：v1 的 `WriteCell` 只写了 `Height/Value/Light`
+        /// ⇒ `LightAir`（[v0.1.100] 固定光源亮斑的输入）与 `Height2/Value2/Light2/HasSecond`
+        /// （[v0.1.62] 树冠下第二层表面）**存盘即丢**：区域被淘汰后再回读（或重启世界），
+        /// 亮斑与第二层表面就没了 —— 画面与内存态不一致，且属于静默数据损失。
+        ///
+        /// v1 文件仍可读：缺的字段取**显式默认值**（`LightAir = Light` ⇒ 不凭空提亮；
+        /// 第二层 = 无）。旧文件不会被就地改写；重写时按 v2 写出。
+        /// </summary>
+        const int RegionVersion = 2;
 
         static void WriteCell(BinaryWriter writer, Cell cell) {
             writer.Write(cell.Height);
             writer.Write(cell.Value);
             writer.Write(cell.Light);
+            // ---- v2 追加段 ----
+            writer.Write(cell.LightAir);
+            writer.Write(cell.Height2);
+            writer.Write(cell.Value2);
+            writer.Write(cell.Light2);
+            writer.Write(cell.HasSecond);
         }
 
-        static Cell ReadCell(BinaryReader reader) => new() {
-            Height = reader.ReadInt16(),
-            Value = reader.ReadUInt16(),
-            Light = reader.ReadByte()
-        };
+        static Cell ReadCell(BinaryReader reader, int version) {
+            Cell cell = new() {
+                Height = reader.ReadInt16(),
+                Value = reader.ReadUInt16(),
+                Light = reader.ReadByte()
+            };
+            if (version >= 2) {
+                cell.LightAir = reader.ReadByte();
+                cell.Height2 = reader.ReadInt16();
+                cell.Value2 = reader.ReadUInt16();
+                cell.Light2 = reader.ReadByte();
+                cell.HasSecond = reader.ReadBoolean();
+            }
+            else {
+                // v1：缺字段的**显式默认值**（不假装知道旧值；LightAir 取 Light 表示"不额外提亮"）
+                cell.LightAir = cell.Light;
+                cell.Height2 = 0;
+                cell.Value2 = 0;
+                cell.Light2 = 15;
+                cell.HasSecond = false;
+            }
+            return cell;
+        }
 
         /// <summary>把一个区域**整块重写**（该区域内两层单元一起写）。</summary>
         static void SaveRegion(long regionKey) {
@@ -201,19 +236,19 @@ namespace Game {
                 int version = reader.ReadInt32();
                 reader.ReadInt32();
                 reader.ReadInt32();
-                if (magic != RegionMagic || version != RegionVersion) {
+                if (magic != RegionMagic || version < 1 || version > RegionVersion) {
                     m_regionLastError = $"region {rx},{rz} bad header (magic={magic:x} v={version})";
                     return false;
                 }
                 int coarseCount = reader.ReadInt32();
                 for (int i = 0; i < coarseCount; i++) {
                     long key = reader.ReadInt64();
-                    m_cells[key] = ReadCell(reader);
+                    m_cells[key] = ReadCell(reader, version);
                 }
                 int fineCount = reader.ReadInt32();
                 for (int i = 0; i < fineCount; i++) {
                     long key = reader.ReadInt64();
-                    m_cellsFine[key] = ReadCell(reader);
+                    m_cellsFine[key] = ReadCell(reader, version);
                 }
             }
             m_residentRegions.Add(regionKey);

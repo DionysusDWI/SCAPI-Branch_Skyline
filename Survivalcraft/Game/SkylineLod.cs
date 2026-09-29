@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text.Json.Nodes;
 using Engine;
 using Engine.Graphics;
@@ -257,6 +258,14 @@ namespace Game {
             o["effective"] = eff;
             o["brightened"] = c.LightAir > c.Light;
             o["patchEnabled"] = LodAirLightPatch;
+            // [v0.1.133] 审计要求：落盘/回读往返要能**逐字段**比对，所以高度/材质/第二层也回读出来
+            // （旧版只回读两个光照值 ⇒ "LightAir 是否丢"查得出，但"高度/材质有没有丢"查不出）。
+            o["height"] = (int)c.Height;
+            o["value"] = (int)c.Value;
+            o["hasSecond"] = c.HasSecond;
+            o["height2"] = (int)c.Height2;
+            o["value2"] = (int)c.Value2;
+            o["light2"] = (int)c.Light2;
             return o.ToJsonString();
         }
 
@@ -272,7 +281,7 @@ namespace Game {
 
         static readonly Dictionary<long, Cell> m_cells32 = [];          // 32 m 统一档
         // 分组用的临时表（值元组，**不分配数组**；每次重建前 Clear）
-        static readonly Dictionary<long, (int n, long p0, long p1, long p2, long p3, int air)> m_groupScratch = [];
+        // [v0.1.133] 旧的"每组只留 4 个样本"的分组表已由 m_groupSamples 取代（见 AggregateSample）
         static int m_harvestCursor;
         static bool m_dirty = true;
         static double m_nextRebuild;
@@ -660,6 +669,13 @@ namespace Game {
         /// <summary>[v0.1.129] 因预算不足被跳过的补采次数（这些单元留到玩家回来再采）。</summary>
         public static long CellCaptureSkippedOverBudget { get; private set; }
 
+        /// <summary>
+        /// [v0.1.133] 因预算不足而**延期**的脏单元数（审计缺陷 B-04 的分账项）。
+        /// 与 `CellCaptureSkippedOverBudget` 的区别：延期项**保持 dirty**（不销账、不虚报完成），
+        /// 等区块重新加载时按正常脏通道采；计数单独留一列，验收时用它证明"延期真的发生了"。
+        /// </summary>
+        public static long CellCaptureDeferred { get; private set; }
+
         /// <summary>[v0.1.129] 最近一次卸载预扫的耗时（毫秒，含补采）。</summary>
         public static float CellCaptureLastMs { get; private set; }
 
@@ -679,13 +695,20 @@ namespace Game {
                         continue;
                     }
                     long key = Key(chunk.Origin.X >> CellShift, chunk.Origin.Y >> CellShift);
-                    if (m_cells.ContainsKey(key)) {
-                        // 已经有样本：区块马上消失 ⇒ 脏标记没有意义了（重采不可能），直接销账。
+                    bool have = m_cells.ContainsKey(key);
+                    bool dirty = IsKeyDirty(key);
+                    // [v0.1.133] 审计缺陷 B-04（Astra 批准的最小方案）：
+                    //   ① **干净可跳**：有样本且不脏 ⇒ 不需要重采；
+                    //   ② **脏优先采**：只要这一格是脏的（加载期间被编辑过、或刚 Valid 还没轮到），
+                    //      就必须在数据还在的这一帧**重采覆盖** —— 不能拿旧样本冒充"最新状态"；
+                    //   ③ **预算不足延期**：预算用完时**不销账**（保持 dirty），等区块回来再采，不虚报完成。
+                    if (have && !dirty) {
                         SatisfyDirty(key);
                         continue;
                     }
                     if (budget <= 0) {
                         CellCaptureSkippedOverBudget++;
+                        CellCaptureDeferred++;
                         continue;
                     }
                     if (CaptureLeavingCell(chunk, key)) {
@@ -1578,7 +1601,7 @@ namespace Game {
         /// </summary>
         static void BuildUniformCells() {
             m_cells32.Clear();
-            m_groupScratch.Clear();
+            ResetGroups();
             MinVoxelShadowCompared = 0;      // [v0.1.98] 每次重建重新统计
             MinVoxelShadowDiffCells = 0;
             MinVoxelShadowDiffSum255 = 0;
@@ -1596,51 +1619,202 @@ namespace Game {
         // [v0.1.130] 里程碑 2.6：**合并阶梯**（32 / 64 / 128 m 三档，档由 DH 的档位公式给出）
         // ============================================================================================
 
-        /// <summary>把一个 16 m 单元并进当前分组表（高度取中位、材质取众数、空气格光照取最大）。</summary>
-        static void AggregateGroup(long gkey, in Cell cell) {
-            m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3, int air) g);
-            long packed = ((long)cell.Height << 32) | cell.Value;
-            g.air = Math.Max(g.air, cell.LightAir);      // [v0.1.100] 空气格光照取**组内最大**
-            switch (g.n) {
-                case 0: g.p0 = packed; break;
-                case 1: g.p1 = packed; break;
-                case 2: g.p2 = packed; break;
-                default: g.p3 = packed; break;      // 组满 4 个后多余的忽略（中位对少数样本稳健）
+        // [v0.1.133] 审计缺陷 B-01：**聚合必须吃该组的全部样本**。
+        //
+        // 旧实现每组只保留 4 个样本（p0..p3），第 5 个之后**直接丢弃**：2³ 档（4 个样本）看不出问题，
+        // 但 4³ 档有 16 个、8³ 档有 64 个 ⇒ 中位高度与众数材质变成"看枚举顺序"的结果
+        // （审计裁定：保留 `MedianInto` 语义，先把聚合改成使用**该组全部样本**，并用确定性排列复现）。
+        static readonly Dictionary<long, List<long>> m_groupSamples = [];
+        static readonly Dictionary<long, int> m_groupAir = [];
+        static readonly Stack<List<long>> m_groupPool = [];
+
+        /// <summary>把一个样本并进分组表（`packed` = height&lt;&lt;32 | value；`airLight` 取组内最大）。</summary>
+        static void AggregateSample(long gkey, long packed, int airLight) {
+            if (!m_groupSamples.TryGetValue(gkey, out List<long> list)) {
+                list = m_groupPool.Count > 0 ? m_groupPool.Pop() : [];
+                list.Clear();
+                m_groupSamples[gkey] = list;
             }
-            if (g.n < 4) {
-                g.n++;
+            list.Add(packed);
+            m_groupAir.TryGetValue(gkey, out int air);
+            if (airLight > air) {
+                m_groupAir[gkey] = airLight;
             }
-            m_groupScratch[gkey] = g;
         }
 
-        /// <summary>把分组表按**同一套 `MedianInto` 口径**落成合并后的单元表。</summary>
+        /// <summary>把一个 16 m 单元并进当前分组表（高度取中位、材质取众数、空气格光照取最大）。</summary>
+        static void AggregateGroup(long gkey, in Cell cell) =>
+            AggregateSample(gkey, ((long)cell.Height << 32) | cell.Value, cell.LightAir);
+
+        /// <summary>把分组表按**同一套 `MedianInto` 口径**落成合并后的单元表，并回收样本列表。</summary>
         static void FlushGroups(Dictionary<long, Cell> dest) {
-            Span<long> samples = stackalloc long[4];
             Span<int> top = stackalloc int[1];
             Span<int> val = stackalloc int[1];
             Span<byte> light = stackalloc byte[1];
-            foreach (KeyValuePair<long, (int n, long p0, long p1, long p2, long p3, int air)> kv in m_groupScratch) {
-                (int n, long p0, long p1, long p2, long p3, int air) g = kv.Value;
-                if (g.n <= 0) {
+            foreach (KeyValuePair<long, List<long>> kv in m_groupSamples) {
+                List<long> samples = kv.Value;
+                if (samples.Count == 0) {
                     continue;
                 }
-                samples[0] = g.p0;
-                samples[1] = g.p1;
-                samples[2] = g.p2;
-                samples[3] = g.p3;
                 top[0] = int.MaxValue;
                 val[0] = 0;
                 light[0] = 15;
-                MedianInto(samples, g.n, top, val, light, 0);
+                // `CollectionsMarshal.AsSpan`：直接拿 List 的底层数组当 Span（`MedianInto` 就地排序，
+                // 这块数组是**本组独占**的，排序不会影响别的组）。
+                MedianInto(CollectionsMarshal.AsSpan(samples), samples.Count, top, val, light, 0);
                 if (top[0] == int.MaxValue) {
                     continue;
                 }
+                m_groupAir.TryGetValue(kv.Key, out int air);
                 dest[kv.Key] = new Cell {
                     Height = (short)top[0], Value = (ushort)val[0], Light = light[0],
-                    LightAir = (byte)Math.Clamp(g.air, 0, 255)
+                    LightAir = (byte)Math.Clamp(air, 0, 255)
                 };
             }
-            m_groupScratch.Clear();
+            ResetGroups();
+        }
+
+        /// <summary>清空分组表并把样本列表还进池（避免每 3 s 重建都新建上千个 List）。</summary>
+        static void ResetGroups() {
+            foreach (List<long> list in m_groupSamples.Values) {
+                m_groupPool.Push(list);
+            }
+            m_groupSamples.Clear();
+            m_groupAir.Clear();
+            // 注意：这里**不能**再调用 ResetGroups()（v0.1.133 第一版把它写成自调用 ⇒ StackOverflow，
+            // 实测 CLR20r3 / System.StackOverflowException，已由事件日志定位）。旧的 m_groupScratch 已删除。
+        }
+
+        /// <summary>
+        /// [v0.1.133] 审计要求的**聚合排列不变性自检**（确定性、不依赖世界状态）：
+        /// 造 n = 4 / 16 / 64（三档的组大小）+ 65（越界一个）个合成样本，用**原序 / 倒序 / 确定性洗牌**
+        /// 三种输入顺序各聚合一次，比对 (height, value, light, air) 是否相同。
+        /// **旧实现（每组只留 4 个样本）在 n = 16 / 64 上必然 FAIL** —— 这就是它的可证伪复现。
+        /// </summary>
+        public static string MergeAggregationSelfCheck() {
+            int[] sizes = [4, 16, 64, 65];
+            JsonArray rows = [];
+            bool allOk = true;
+            foreach (int n in sizes) {
+                long[] packed = new long[n];
+                int[] air = new int[n];
+                System.Random rng = new(12345 + n);
+                for (int i = 0; i < n; i++) {
+                    int h = 60 + rng.Next(0, 41);
+                    // 材质**故意做成三峰**（i%3）：众数由"全部样本"决定，只看前 4 个样本时极易跑偏
+                    int v = (i % 3) switch { 0 => 3, 1 => 7, _ => 67 };
+                    packed[i] = ((long)h << 32) | (uint)v;
+                    air[i] = 100 + i % 7;
+                }
+                int[] identity = [.. Enumerable.Range(0, n)];
+                int[] reversed = [.. Enumerable.Range(0, n).Reverse()];
+                int[] shuffled = [.. Enumerable.Range(0, n)];
+                System.Random sr = new(777 + n);
+                for (int i = n - 1; i > 0; i--) {
+                    int j = sr.Next(0, i + 1);
+                    (shuffled[i], shuffled[j]) = (shuffled[j], shuffled[i]);
+                }
+                JsonArray outs = [];
+                (int h, int v, int l, int a)? first = null;
+                bool same = true;
+                foreach (int[] order in new[] { identity, reversed, shuffled }) {
+                    ResetGroups();
+                    foreach (int i in order) {
+                        AggregateSample(1L, packed[i], air[i]);
+                    }
+                    Dictionary<long, Cell> one = [];
+                    FlushGroups(one);
+                    if (!one.TryGetValue(1L, out Cell c)) {
+                        same = false;
+                        outs.Add(new JsonObject { ["err"] = "no cell" });
+                        continue;
+                    }
+                    (int h, int v, int l, int a) r = (c.Height, c.Value, c.Light, c.LightAir);
+                    outs.Add(new JsonObject {
+                        ["height"] = r.h, ["value"] = r.v, ["light"] = r.l, ["air"] = r.a
+                    });
+                    first ??= r;
+                    if (r != first.Value) {
+                        same = false;
+                    }
+                }
+                allOk &= same;
+                rows.Add(new JsonObject {
+                    ["samples"] = n, ["ordersCompared"] = 3, ["identical"] = same, ["outputs"] = outs
+                });
+            }
+            ResetGroups();
+            return new JsonObject {
+                ["ok"] = allOk,
+                ["criterion"] = "同一组样本在 原序/倒序/确定性洗牌 三种输入顺序下，"
+                                + "(height, value, light, air) 必须完全相同",
+                ["note"] = "旧实现（每组只留 4 个样本）在 n=16/64 上会给出顺序相关的输出",
+                ["rows"] = rows
+            }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.133] 审计缺陷 A-01 的**空间覆盖口径**（不是"索引比例"）：
+        /// 逐档给出 ① 该距离带里**已采样**的 16 m 单元数与面积；② 该档**真正进网格**的单元数与面积；
+        /// ③ 面积比。判据用它来回答"合并后有没有把采到的地扔在地上不画"，而不是拿索引数当覆盖。
+        ///
+        /// 注意两点（如实写在返回里）：① 近档会被壳层接管（`HasShellInBand`）⇒ 近档的面积比**天生偏低**，
+        /// 判据应只压在外环（tier2/tier3）；② 面积 = 单元数 × 单元边长²，是**坐标口径**的近似，
+        /// 不是逐格的并集去重（LOD 单元本身就是互不重叠的正交网格 ⇒ 这个近似是精确的）。
+        /// </summary>
+        public static string LodDrawnCoverage() {
+            (float b1, float b2) = MergeBoundaries();
+            float[] edges = [b1, b2, 1536f, float.MaxValue];
+            int[] harvested = new int[4];
+            int[] drawn = new int[4];
+            Vector3 camera = CameraViewPosition();
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                int cx = (int)(kv.Key >> 32);
+                int cz = (int)(uint)kv.Key;
+                float wx = (cx << CellShift) + CellSize * 0.5f;
+                float wz = (cz << CellShift) + CellSize * 0.5f;
+                float dx = wx - camera.X, dz = wz - camera.Z;
+                float d = MathF.Sqrt(dx * dx + dz * dz);
+                // 档号 - 1 = 桶号（tier1 → 0）；tier3 收 768+ 全部
+                int tier = TierForDistance(d);
+                harvested[Math.Clamp(tier - 1, 0, 3)]++;
+            }
+            drawn[0] = (UniformBeyondLoaded && !MergeLadderEnabled) ? m_cellsInMesh : m_cells32.Count;
+            if (MergeLadderEnabled) {
+                // 逐档的"进网格"计数：tier1 在主网格，tier2/tier3 复用精细/近环槽位
+                drawn[0] = m_cellsInMesh;
+                drawn[1] = m_cellsInMeshFine;
+                drawn[2] = m_cellsInMeshNear;
+                drawn[3] = 0;
+            }
+            // 桶 → 该档的块边长：192-384 → tier1(32 m)、384-768 → tier2(64 m)、768+ → tier3(128 m)
+            // （第一版把 [1] 也写成 32 m ⇒ 外环面积被低报 4 倍，是量纲错误，已由 v0130 判据自己抓出来）
+            int[] cellSizes = [CellSize << 1, CellSize << 2, CellSize << 3, CellSize << 3];
+            JsonArray rows = [];
+            for (int i = 0; i < 4; i++) {
+                // ⚠️ 单位必须分开算（v0.1.133 第一版把两侧都乘成"档格边长²" ⇒ 采到的面积被放大 4~64 倍，
+                //    于是覆盖率看着只有 2~3%，其实是**量纲错误**，不是产品退化）：
+                //   * `harvested` 数的是 16 m 源单元 ⇒ 面积 = 格数 × 16²；
+                //   * `drawn` 数的是该档的合并块 ⇒ 面积 = 格数 × 档边长²。
+                float drawnSide = UniformBeyondLoaded && !MergeLadderEnabled ? CellSize << 1 : cellSizes[i];
+                float hArea = harvested[i] * CellSize * CellSize;
+                float dArea = drawn[i] * drawnSide * drawnSide;
+                rows.Add(new JsonObject {
+                    ["bucket"] = i switch { 0 => "192-384", 1 => "384-768", 2 => "768-1536", _ => "1536+" },
+                    ["sourceCellMetres"] = CellSize,
+                    ["drawnCellMetres"] = drawnSide,
+                    ["harvestedCells"] = harvested[i], ["harvestedAreaM2"] = Math.Round(hArea, 0),
+                    ["drawnCells"] = drawn[i], ["drawnAreaM2"] = Math.Round(dArea, 0),
+                    ["drawnOverHarvested"] = hArea > 0 ? Math.Round(dArea / hArea, 3) : 0.0
+                });
+            }
+            return new JsonObject {
+                ["mergeLadder"] = MergeLadderEnabled,
+                ["uniformMode"] = UniformBeyondLoaded && !MergeLadderEnabled,
+                ["radiusMetres"] = (double)RadiusMetres,
+                ["rows"] = rows,
+                ["note"] = "面积 = 单元数 × 边长²（正交网格 ⇒ 精确）；近档会被壳层接管，判据只看外环"
+            }.ToJsonString();
         }
 
         /// <summary>
@@ -1650,7 +1824,7 @@ namespace Game {
         /// </summary>
         static void BuildMergedTier(int tier, Dictionary<long, Cell> dest) {
             dest.Clear();
-            m_groupScratch.Clear();
+            ResetGroups();
             Vector3 camera = CameraViewPosition();
             int shift = Math.Clamp(tier, 1, 3);
             foreach (KeyValuePair<long, Cell> kv in m_cells) {
@@ -2468,6 +2642,7 @@ namespace Game {
                 // [v0.1.129] 里程碑 3.2：卸载前补采（脏队列排空的关键路径）
                 ["cellsCapturedOnUnload"] = CellsCapturedOnUnload,
                 ["cellCaptureSkippedOverBudget"] = CellCaptureSkippedOverBudget,
+                ["cellCaptureDeferred"] = CellCaptureDeferred,
                 ["cellCapturePerCall"] = CellCapturePerCall,
                 ["cellCaptureLastMs"] = Math.Round(CellCaptureLastMs, 2),
                 ["refresh"] = RefreshSurveyJson(),

@@ -7,6 +7,52 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.133] - 2026-09-29
+
+第一百三十九个版本：**合并阶梯 off-by-one 修复（v0.1.132 的提交内容）+ 按独立审计逐条整改**。
+相对 v0.1.131 的变更：
+
+### 0. 合并阶梯的 off-by-one（v0.1.132 已提交、本版一并发布）
+
+DH 的 `detailLevel` 在 **384 m** 处给 1、768 m 处给 2，而档位边界也是 384/768 ⇒ `clamp(level,1,3)`
+**整整差一档**（第一档吃掉 [0,768)、第三档 1536 m 才开始）⇒ 同半径画出的单元 **112 → 23**、外环整圈没画。
+修法 `TierForDistance(d) = clamp(level + 1, 1, 3)`，并加 `distanceHistogram` 探针。
+
+### 1. 实现侧（审计缺陷 B-01 / B-04 / LightAir）
+
+* **B-01**：聚合原只保留 **4 个样本** ⇒ 4³（16 个）/8³（64 个）档的高度中位与材质众数**看枚举顺序**。
+  改为**吃该组全部样本**（列表池复用，`MedianInto` 语义不动）；新增
+  `skyline.LodMergeAggregationSelfCheck()`（n=4/16/64/65 × 原序/倒序/确定性洗牌，输出须逐字段相同）。
+* **B-04**：卸载预扫从"已有样本就销账"改为 **干净可跳 / 脏优先重采 / 预算不足延期不销账**（Astra 批准方案），
+  新增 `cellCaptureDeferred` 分账计数。
+* **LightAir（区域仓格式）**：v1 只写 `Height/Value/Light` ⇒ `LightAir` 与第二层表面**存盘即丢**。
+  格式升 **v2** 追加五个字段；**v1 旧档仍可读**（缺字段取显式默认）；光照探针补 `height/value/hasSecond/…`
+  以便逐字段核对往返。
+
+### 2. 验收侧（审计缺陷 A-01~A-04）
+
+* **A-01**：新增 `skyline.LodDrawnCoverage()` —— 逐档"**已采样 16 m 源格面积** vs **该档进网格的块面积**"，
+  覆盖判据由"索引比例"改成**空间面积**（外环 ≥30%）；
+* **A-02**：直方图判据加"非空且样本>0"；
+* **A-03**：`off-bit-identical` 改名 `ladder-off-narrow-state-restored` 并**列出只比较了哪些字段**；
+* **A-04**：观感脚本改为**进入前快照运行态 + finally 逐项还原**（机位/时刻/雾/风/云影/半径/开关）；
+* 门禁新增 `lod-merge-aggregation`（自检常驻）。
+
+### 3. 验收
+
+`skyline-v0133-audit-fixes.py` **6/6**、`skyline-v0130-merge-ladder.py` **8/8**、
+`skyline-v0129-dirty-drain.py` **4/4**、门禁 **PASS 18 / FAIL 0 / SKIP 2**；
+高区分力样本（`light=3 / lightAir=14`）落盘→回读逐字段一致 ⇒ LightAir 数据损失闭合。
+**如实记录**：整改过程中我自己引入过两个缺陷并被判据抓出 —— ① `ResetGroups()` 自调用 ⇒
+`System.StackOverflowException`（加载世界后立刻退出；靠 Windows 事件日志 `CLR20r3 / 0xc00000fd` 定位，
+`Game.log` 无任何记录）；② 新覆盖探针两处量纲错误（用档格边长算采到面积、tier2 边长写成 32 m）。`notes/241`。
+
+### 4. 协作基建（非游戏改动）
+
+新增 `__CC-Codex-Bridge__/`（协议 + 给 Claude Code 的说明）与 `tools/cc_bridge.py`：
+Claude Code（GLM5.3flash）以 loop 轮询做实时审计；规则含目录即邮箱、原子交付、裁定词汇
+（空样本/未复跑一律 `insufficient_evidence`）、不阻塞、写权限边界与心跳活性。
+
 ## [v0.1.131] - 2026-09-29
 
 第一百三十八个版本：**里程碑 2.5 —— 游戏原生气氛可选择性移除**。相对 v0.1.130 的变更：

@@ -277,6 +277,12 @@ namespace Game {
         /// <summary>[v0.1.60] 某个 16 m 单元还在脏队列里吗（手动生成 LOD 用它算"真实完成度"）。</summary>
         public static bool IsCellDirty(int cellX, int cellZ) => m_dirtyCells.ContainsKey(Key(cellX, cellZ));
 
+        /// <summary>
+        /// [v0.1.133] 按**打包键**查脏（卸载钩子用：那边手里只有 `Key(cx, cz)` 形式的 long）。
+        /// 审计缺陷 B-04 的修复需要"这一格是不是脏的"来区分"干净可跳"与"脏优先采"。
+        /// </summary>
+        internal static bool IsKeyDirty(long key) => m_dirtyCells.ContainsKey(key);
+
         /// <summary>[v0.1.17] 因"区块刚 Valid"而标脏的次数（诊断）。</summary>
         public static long BackfilledOnValid => m_backfilled;
 

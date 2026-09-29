@@ -229,6 +229,22 @@ namespace Game {
         public static string AmbienceStatus() => SkylineAtmosphere.AmbienceStatus();
 
         /// <summary>
+        /// [v0.1.133] 审计缺陷 B-01 的自检：**合并聚合的排列不变性**
+        /// （n = 4/16/64/65 个合成样本 × 原序/倒序/确定性洗牌 三种顺序，输出必须完全相同）。
+        /// </summary>
+        public static string LodMergeAggregationSelfCheck() => SkylineLod.MergeAggregationSelfCheck();
+
+        /// <summary>[v0.1.133] 空间覆盖口径（审计缺陷 A-01）：逐档"已采样面积 vs 真正进网格面积"。</summary>
+        public static string LodDrawnCoverage() => SkylineLod.LodDrawnCoverage();
+
+        /// <summary>
+        /// [v0.1.133] **只给审计用的落盘/回读探针**：调用一次即 `SkylineLod.Load()`（清空内存 LOD 单元，
+        /// 再从区域仓读取相机附近的区域）。用途：验证区域格式 v2 的字段往返（`LightAir` 与第二层表面不再丢）。
+        /// 可回滚：LOD 单元由"加载中的区块 + 区域仓"两条既有通道重建，下一次轮转采集会补齐。
+        /// </summary>
+        public static void LodReloadNow() => SkylineLod.Load();
+
+        /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），
         /// 沿太阳方向在云带里积一次、烘进 LOD 顶点色 ⇒ 与"看得见的云"对齐，
