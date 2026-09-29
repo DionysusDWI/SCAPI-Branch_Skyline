@@ -2779,6 +2779,10 @@ namespace Game {
             ];
             return new JsonObject {
                 ["enabled"] = MergeLadderEnabled,
+                // [v0.1.158g] **键名别名**：`LodSurvey` 那边叫 `mergeLadderEnabled`，本表原来只叫 `enabled`
+                //   ⇒ 探针/脚本按同名去读会拿到 `None`（本轮我就读错过一次，误判"阶梯状态未知"）。
+                //   两个探针对同一个开关必须能**同名互查**，所以这里补别名（不改旧键，保持兼容）。
+                ["mergeLadderEnabled"] = MergeLadderEnabled,
                 ["uniformMode"] = UniformBeyondLoaded && !MergeLadderEnabled,
                 ["radiusMetres"] = (double)RadiusMetres,
                 ["boundariesMetres"] = new JsonArray(Math.Round(b1, 1), Math.Round(b2, 1)),
