@@ -640,6 +640,18 @@ namespace Game {
         public static bool InvalidateOnEdit { get; set; } = true;
         public static long InvalidatedByEdit { get; private set; }
 
+        /// <summary>
+        /// [v0.1.136] **体素壳刷新票**：失效化时**本来有体素壳**的立方体，重采时可以绕过
+        /// `SurfaceVoxelMaxCubes` 额度一次（否则"编辑过"会变成"永远降级成列顶壳"）。
+        /// 票据有上限（`VoxelRefreshTicketCap`），超出时丢最旧的一批，避免无限增长。
+        /// </summary>
+        static readonly HashSet<(int Cx, int Cy, int Cz)> m_voxelRefreshTickets = [];
+        static readonly Queue<(int Cx, int Cy, int Cz)> m_voxelRefreshOrder = [];
+        public static int VoxelRefreshTicketCap { get; set; } = 4096;
+        public static long VoxelRefreshTicketsIssued { get; private set; }
+        public static long VoxelRefreshTicketsUsed { get; private set; }
+        public static int VoxelRefreshTicketsPending => m_voxelRefreshTickets.Count;
+
         internal static void NotifyCellEdited(int worldX, int worldY, int worldZ) {
             if (!Enabled || !InvalidateOnEdit) {
                 return;
@@ -651,6 +663,15 @@ namespace Game {
                 (int Cx, int Cy, int Cz) key = (cx, cy + dy, cz);
                 if (!m_entries.TryGetValue(key, out Entry entry)) {
                     continue;
+                }
+                // 失效化前有体素壳 ⇒ 发一张刷新票（重采时绕过额度，恢复体素壳）
+                if (entry.VoxelShell != null && m_voxelRefreshTickets.Add(key)) {
+                    m_voxelRefreshOrder.Enqueue(key);
+                    VoxelRefreshTicketsIssued++;
+                    while (m_voxelRefreshTickets.Count > Math.Max(64, VoxelRefreshTicketCap)) {
+                        (int Cx, int Cy, int Cz) old = m_voxelRefreshOrder.Dequeue();
+                        m_voxelRefreshTickets.Remove(old);
+                    }
                 }
                 DisposeMeshes(entry);
                 ReleaseEntry(entry);
@@ -696,7 +717,11 @@ namespace Game {
             if (!SurfaceVoxelEnabled || entry == null || terrain == null) {
                 return;
             }
-            if (m_voxelShellCount >= SurfaceVoxelMaxCubes) {
+            // [v0.1.136] **刷新票**：编辑失效化前**本来就有体素壳**的立方体，重采时应当恢复
+            // 它的体素壳，而不是被 512 额度当成"新增"挡掉（那会把"编辑过"变成"永远降级"）。
+            (int Cx, int Cy, int Cz) key = (cx, cy, cz);
+            bool ticket = m_voxelRefreshTickets.Contains(key);
+            if (m_voxelShellCount >= SurfaceVoxelMaxCubes && !ticket) {
                 VoxelSkippedByCap++;
                 return;
             }
@@ -704,18 +729,23 @@ namespace Game {
             if (rel > SurfaceVoxelRelMetres) {
                 return;
             }
-            HarvestVoxelShell(entry, terrain, cx, cy, cz);
+            bool harvested = HarvestVoxelShell(entry, terrain, cx, cy, cz, ticket);
+            if (ticket && (harvested || entry.VoxelShell != null)) {
+                m_voxelRefreshTickets.Remove(key);
+                VoxelRefreshTicketsUsed++;
+            }
         }
 
         /// <summary>
         /// [v0.1.60] **真正抓一次**表面体素壳并挂到条目上（新建或**刷新**）。
         /// 返回 true 表示这次抓到并写入了（`VoxelCount == 0` 的空立方体不算）。
         /// </summary>
-        static bool HarvestVoxelShell(Entry entry, Terrain terrain, int cx, int cy, int cz) {
+        static bool HarvestVoxelShell(Entry entry, Terrain terrain, int cx, int cy, int cz,
+                                      bool bypassCap = false) {
             if (!SurfaceVoxelEnabled || entry == null || terrain == null) {
                 return false;
             }
-            if (entry.VoxelShell == null && m_voxelShellCount >= SurfaceVoxelMaxCubes) {
+            if (entry.VoxelShell == null && m_voxelShellCount >= SurfaceVoxelMaxCubes && !bypassCap) {
                 VoxelSkippedByCap++;
                 return false;
             }

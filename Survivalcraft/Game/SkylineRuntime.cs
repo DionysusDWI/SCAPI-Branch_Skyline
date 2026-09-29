@@ -267,6 +267,17 @@ namespace Game {
         /// <summary>[v0.1.136 · CC 审计 P3] 读取失败的坏区域数（读完即从 known 摘掉）。</summary>
         public static long RegionsCorrupt => SkylineLod.RegionsCorrupt;
 
+        /// <summary>[v0.1.136] 体素壳刷新票的账本（编辑失效化后恢复体素壳用）。</summary>
+        public static string VoxelRefreshTickets() => new JsonObject {
+            ["pending"] = SkylineCubeShellStore.VoxelRefreshTicketsPending,
+            ["issued"] = SkylineCubeShellStore.VoxelRefreshTicketsIssued,
+            ["used"] = SkylineCubeShellStore.VoxelRefreshTicketsUsed,
+            ["cap"] = SkylineCubeShellStore.VoxelRefreshTicketCap,
+            ["voxelShellCount"] = SkylineCubeShellStore.VoxelShellCubes,
+            ["voxelCap"] = SkylineCubeShellStore.SurfaceVoxelMaxCubes,
+            ["note"] = "编辑失效化前有体素壳的立方体会拿到票；重采时凭票绕过 512 额度一次"
+        }.ToJsonString();
+
         /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），
