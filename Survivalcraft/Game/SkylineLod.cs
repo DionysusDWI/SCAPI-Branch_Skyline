@@ -418,6 +418,16 @@ namespace Game {
         // 顶点属性格式（SkylineLodVertex，28 B）与老格式（TerrainVertex，20 B）的常驻字节就靠这两个数算。
         static int m_vertexCount, m_vertexCountFine, m_vertexCountNear;
 
+        // [v0.1.156 · CC P3 `104503Z`] **让位计数**：`RebuildMeshCore` 里因"壳接管"被
+        // `continue` 掉的格数（只统计**最近一次重建**）。用途：`LodDrawnCoverage` 的口径更正
+        // —— 分子扣让位、另列 `yieldedCells`，否则 `drawnOverHarvested` 会 >1（实测外环 1.598）。
+        static int m_yieldedCells;
+        /// <summary>**最近一次**网格重建里"因壳接管而让位"的格数（只读探针用；在每次粗层重建开始时清零）。</summary>
+        public static int YieldedCells => m_yieldedCells;
+        /// <summary>裙边墙因"缺邻居"而跳过的次数（只读，**累计**）。悬空板片的可复现来源之一：缺邻居不画墙。</summary>
+        static long m_wallNeighborMisses;
+        public static long WallNeighborMisses => m_wallNeighborMisses;
+
         // ===== [v0.1.74] 网格重建的**复用缓冲**（里程碑 2.2：不要"只增不减"）=====
         //
         // 为什么必须有：重建一次网格要几千~几万项 —— `keys`/`tops`/`walls` 三个 List、
@@ -692,6 +702,7 @@ namespace Game {
             m_indexCountNear = 0;
             m_cellsInMeshNear = 0;
             m_harvestedCells = 0;
+            m_yieldedCells = 0;          // [v0.1.156 · CC P3] 让位计数按每次重建清零
             Utilities.Dispose(ref m_vb);
             Utilities.Dispose(ref m_ib);
             Utilities.Dispose(ref m_vbFine);
@@ -2008,7 +2019,13 @@ namespace Game {
                 ["uniformMode"] = UniformBeyondLoaded && !MergeLadderEnabled,
                 ["radiusMetres"] = (double)RadiusMetres,
                 ["rows"] = rows,
-                ["note"] = "面积 = 单元数 × 边长²（正交网格 ⇒ 精确）；近档会被壳层接管，判据只看外环"
+                // [v0.1.156 · CC P3 `104503Z` 口径更正] 让位格单列：读 `drawnOverHarvested` 时
+                // 应理解为 `drawn / (harvested − yielded)` —— 被壳接管的格**不是画少了**，是**让位了**。
+                ["yieldedCells"] = m_yieldedCells,
+                ["wallNeighborMisses"] = m_wallNeighborMisses,
+                ["note"] = "面积 = 单元数 × 边长²（正交网格 ⇒ 精确）；近档会被壳层接管，判据只看外环。"
+                           + "让位格单列在 yieldedCells（分子应扣它；不扣会让比值 >1，实测外环 1.598）；"
+                           + "wallNeighborMisses 是裙边墙因缺邻居跳过墙的次数（悬空观感的直接归因）。"
             }.ToJsonString();
         }
 
@@ -2046,6 +2063,9 @@ namespace Game {
             if (layer == 0) {
                 SkylineLodCloudShadow.ResetStats();     // [v0.1.99] 云影统计按"最粗那一层"重建一次
                 m_airLightBrightenedCells = 0;          // [v0.1.100] 亮斑统计同样按最粗那层重建一次
+                // [v0.1.156 · CC P3] 让位计数**按重建清零**（与上面两条同一语义：只反映最近一次重建）；
+                //   `m_wallNeighborMisses` 故意**不清**——它是跨重建的累计计数（用于看"悬空"的总体规模）。
+                m_yieldedCells = 0;
             }
             SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
             if (subsystemTerrain == null) {
@@ -2088,6 +2108,10 @@ namespace Game {
                     if (SkylineCubeShellStore.RestrictLod
                         && SkylineCubeShellStore.HasShellInBand(cx << cellShift, cell.Height, cz << cellShift,
                             camera.X, camera.Z)) {
+                        // [v0.1.156 · CC P3] **把"让位"计数出来**：`LodDrawnCoverage` 的 `drawnOverHarvested`
+                        // 原先分子不扣让位格、分母却含全部标记格 ⇒ 外环比值可 >1，口径混杂。
+                        // 现在既计数（供"扣掉让位"的口径），也留给验收当"缺口归因"的直接证据。
+                        m_yieldedCells++;
                         continue;
                     }
                     keys.Add(key);
@@ -2134,6 +2158,9 @@ namespace Game {
                 for (int side = 0; side < 4; side++) {
                     long nk = Key(cx + s_sideDx[side], cz + s_sideDz[side]);
                     if (!dict.TryGetValue(nk, out Cell neighbor)) {
+                        // [v0.1.156 · CC P3 `094508Z`] **缺邻居不画墙 ⇒ 画面出现"悬空板片"**。
+                        //   让位/带边界/未采集都会造成缺邻，所以这条计数是"悬空观感"的直接归因证据。
+                        m_wallNeighborMisses++;
                         continue;                          // 缺邻居：不画（避免无边长裙）
                     }
                     float yLow = neighbor.Height + 1f;
@@ -2788,6 +2815,9 @@ namespace Game {
                 ["uniformCellSizeBlocks"] = CellSize << Math.Clamp(UniformExtraShift, 0, 3),
                 ["uniformCells"] = m_cells32.Count,
                 ["uniformCellsInMesh"] = UniformBeyondLoaded ? m_cellsInMesh : 0,
+                // [v0.1.156 · CC P3 `104503Z`] 让位格 + 缺邻居跳墙次数（口径透明化）
+                ["yieldedCells"] = m_yieldedCells,
+                ["wallNeighborMisses"] = m_wallNeighborMisses,
                 ["uniformMeshIndices"] = UniformBeyondLoaded ? m_indexCount : 0,
                 // [v0.1.130] 里程碑 2.6：合并阶梯
                 ["mergeLadderEnabled"] = MergeLadderEnabled,
