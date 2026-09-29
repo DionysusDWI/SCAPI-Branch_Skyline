@@ -496,19 +496,28 @@ namespace Game {
         public static long ShellBytes => (long)m_entries.Count * ShellBytesPerCube;
 
         /// <summary>
-        /// [v0.1.152 · CC P3 整改] **只读**：返回**离给定世界坐标最近**、且**确实带壳**的壳立方体坐标。
+        /// [v0.1.152 · CC P3 整改] **只读**：返回**离给定立方体索引最近**、且**确实带壳**的壳立方体坐标。
         ///
         /// 为什么要它：门禁项 `shell-mesh-tiers` / `shell-column` 原来只查"玩家所在立方体"，
         /// 玩家一换地方就 SKIP ⇒ **SKIP 随现场漂移**（CC 点名要求"固定锚点"）。
         /// 有这条探针，门禁就能锚到**壳仓里真实存在的**立方体（而不是赌玩家脚下正好有壳）。
         /// 只读：只遍历 `m_entries` 的键做距离比较，不触碰任何缓存。
+        ///
+        /// **【v0.1.155 修正】入参单位是「立方体索引」，不是世界方块坐标**：`v0.1.152` 的形参名写成
+        /// `worldX/worldY/worldZ` 而实现是拿**立方体索引**直接相减（`cx - worldX`），且把
+        /// `sqrt(Δcube²)` 当"米"回报 ⇒ 谁按文档传世界坐标，就会**静默**拿到一个 `ok:true` 的错答案
+        /// （实测传 `(51690,358,34149)` 得 `distanceMetres=58013.1`，而真实最近壳立方体在 16 m 外）。
+        /// 门禁 `regression-skyline.py` 传的是 `player_cube()`（`>> cubeShift`）⇒ 门禁侧行为**不变**。
+        /// 本版只做**零语义变更**的两件修正：形参/文档改成"立方体索引"，并把单位修对
+        /// （`distanceCubes` = 立方体数；`distanceMetres` = 立方体数 × `cubeSize`）。
         /// </summary>
-        public static string NearestShellCube(int worldX, int worldY, int worldZ) =>
-            NearestShellCubes(worldX, worldY, worldZ, 1);
+        public static string NearestShellCube(int cubeX, int cubeY, int cubeZ) =>
+            NearestShellCubes(cubeX, cubeY, cubeZ, 1);
 
-        /// <summary>[v0.1.152] 最近 **N** 个有壳立方体（距离升序）。给门禁当锚点用：
-        /// `shell-column` 需要"列上确实读得到壳"的那个，所以它会依次试这 N 个候选。</summary>
-        public static string NearestShellCubes(int worldX, int worldY, int worldZ, int count) {
+        /// <summary>[v0.1.152 · v0.1.155 修正单位] 最近 **N** 个有壳立方体（距离升序）。
+        /// **入参 = 立方体索引**（见上）。给门禁当锚点用：`shell-column` 需要"列上确实读得到壳"的那个，
+        /// 所以它会依次试这 N 个候选。</summary>
+        public static string NearestShellCubes(int cubeX, int cubeY, int cubeZ, int count) {
             count = Math.Clamp(count, 1, 32);
             var cands = new List<((int Cx, int Cy, int Cz) Cube, long Dist)>();
             int examined = 0;
@@ -519,7 +528,7 @@ namespace Game {
                 }
                 examined++;
                 (int cx, int cy, int cz) = kv.Key;
-                long dx = cx - worldX, dy = cy - worldY, dz = cz - worldZ;
+                long dx = cx - cubeX, dy = cy - cubeY, dz = cz - cubeZ;
                 long d = dx * dx + dy * dy + dz * dz;
                 cands.Add((kv.Key, d));
             }
@@ -528,22 +537,26 @@ namespace Game {
                                         ["examined"] = 0, ["cubeCount"] = m_entries.Count }.ToJsonString();
             }
             cands.Sort((a, b) => a.Dist.CompareTo(b.Dist));
+            int cubeSize = CubeSurface32.Size;
             var list = new JsonArray();
             for (int i = 0; i < cands.Count && i < count; i++) {
                 list.Add(new JsonObject {
                     ["cube"] = new JsonArray(cands[i].Cube.Cx, cands[i].Cube.Cy, cands[i].Cube.Cz),
-                    ["distanceMetres"] = Math.Round(Math.Sqrt(cands[i].Dist), 1),
+                    ["distanceCubes"] = Math.Round(Math.Sqrt(cands[i].Dist), 1),
+                    ["distanceMetres"] = Math.Round(Math.Sqrt(cands[i].Dist) * cubeSize, 1),
                 });
             }
             (int Cx, int Cy, int Cz) best = cands[0].Cube;
             return new JsonObject {
                 ["ok"] = true,
                 ["cube"] = new JsonArray(best.Cx, best.Cy, best.Cz),
-                ["distanceMetres"] = Math.Round(Math.Sqrt(cands[0].Dist), 1),
+                ["distanceCubes"] = Math.Round(Math.Sqrt(cands[0].Dist), 1),
+                ["distanceMetres"] = Math.Round(Math.Sqrt(cands[0].Dist) * cubeSize, 1),
                 ["candidates"] = list,
                 ["examined"] = examined,
                 ["cubeCount"] = m_entries.Count,
-                ["cubeSize"] = CubeSurface32.Size,
+                ["cubeSize"] = cubeSize,
+                ["inputUnits"] = "cubeIndices",
             }.ToJsonString();
         }
 
