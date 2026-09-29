@@ -1762,6 +1762,79 @@ namespace Game {
         /// 判据应只压在外环（tier2/tier3）；② 面积 = 单元数 × 单元边长²，是**坐标口径**的近似，
         /// 不是逐格的并集去重（LOD 单元本身就是互不重叠的正交网格 ⇒ 这个近似是精确的）。
         /// </summary>
+        /// <summary>
+        /// [v0.1.134] 审计 B-02 的**共同事实基础**（只读）：给定世界坐标，列出它所属 LOD 合并块的
+        /// **全部源 16 m 格**（坐标 + 存下来的 height/value/light/lightAir/hasSecond），并显式声明
+        /// 这块里**有没有** 32³ 体素。
+        ///
+        /// 为什么需要它：目标 2.6 写"每个 LOD 块保持 32³ 分辨率"，而我们的 LOD 层实际存的是
+        /// **2.5D 高度场**（每 16 m 源格一个 `Cell`），真正的 32³ 采样在壳层（`SkylineCubeShellStore`）。
+        /// 这条探针把"数据到底在哪一层、长什么样"变成可核对的清单，供裁定 B-02（壳层承担 / 块内真采 / 表面壳体素）。
+        /// </summary>
+        public static string LodBlockProvenance(int worldX, int worldZ) {
+            int cx = worldX >> CellShift;
+            int cz = worldZ >> CellShift;
+            Vector3 camera = CameraViewPosition();
+            float wx = (cx << CellShift) + CellSize * 0.5f;
+            float wz = (cz << CellShift) + CellSize * 0.5f;
+            float dx = wx - camera.X, dz = wz - camera.Z;
+            float d = MathF.Sqrt(dx * dx + dz * dz);
+            int tierShift = MergeLadderEnabled ? TierForDistance(d) : Math.Clamp(UniformExtraShift, 1, 3);
+            long blockKey = Key(cx >> tierShift, cz >> tierShift);
+            List<JsonObject> sources = [];
+            int second = 0;
+            int totalSources = 0;
+            HashSet<int> heights = [];
+            HashSet<int> materials = [];
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                int scx = (int)(kv.Key >> 32);
+                int scz = (int)(uint)kv.Key;
+                if (Key(scx >> tierShift, scz >> tierShift) != blockKey) {
+                    continue;
+                }
+                Cell c = kv.Value;
+                totalSources++;
+                heights.Add(c.Height);
+                materials.Add(Terrain.ExtractContents(c.Value));
+                if (c.HasSecond) {
+                    second++;
+                }
+                if (sources.Count < 64) {
+                    sources.Add(new JsonObject {
+                        ["cell"] = new JsonArray(scx, scz),
+                        ["worldX"] = scx << CellShift,
+                        ["worldZ"] = scz << CellShift,
+                        ["height"] = (int)c.Height,
+                        ["value"] = (int)c.Value,
+                        ["contents"] = Terrain.ExtractContents(c.Value),
+                        ["light"] = (int)c.Light,
+                        ["lightAir"] = (int)c.LightAir,
+                        ["hasSecond"] = c.HasSecond,
+                    });
+                }
+            }
+            return new JsonObject {
+                ["worldX"] = worldX, ["worldZ"] = worldZ,
+                ["sourceCellShift"] = CellShift, ["sourceCellMetres"] = CellSize,
+                ["distanceMetres"] = Math.Round(d, 1),
+                ["tierShift"] = tierShift, ["blockMetres"] = CellSize << tierShift,
+                ["mergeLadder"] = MergeLadderEnabled,
+                ["blockKey"] = blockKey,
+                ["sourceCellCount"] = totalSources,
+                ["listedSources"] = sources.Count,
+                ["distinctHeights"] = heights.Count,
+                ["distinctMaterials"] = materials.Count,
+                ["cellsWithSecond"] = second,
+                ["has3DVoxels"] = false,
+                ["whereAreThe32CubedSamples"] =
+                    "壳层 `SkylineCubeShellStore`（16 m 立方体 × 32³ = 0.5 m 体素，只出外表面的体素壳）；"
+                    + "LOD 层这里只有 2.5D 高度场（每 16 m 源格一个 Cell）",
+                ["sources"] = new JsonArray([.. sources]),
+                ["note"] = "B-02 的裁定依据：本探针把'块内是什么数据'列成清单；"
+                           + "`has3DVoxels=false` 是**事实声明**，不是缺陷判定"
+            }.ToJsonString();
+        }
+
         public static string LodDrawnCoverage() {
             (float b1, float b2) = MergeBoundaries();
             float[] edges = [b1, b2, 1536f, float.MaxValue];

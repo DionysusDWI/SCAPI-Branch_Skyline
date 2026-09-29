@@ -244,6 +244,10 @@ namespace Game {
         /// </summary>
         public static void LodReloadNow() => SkylineLod.Load();
 
+        /// <summary>[v0.1.134] 审计 B-02 的事实基础：列出某坐标所属 LOD 合并块的全部源 16 m 格。</summary>
+        public static string LodBlockProvenance(int worldX, int worldZ) =>
+            SkylineLod.LodBlockProvenance(worldX, worldZ);
+
         /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），
