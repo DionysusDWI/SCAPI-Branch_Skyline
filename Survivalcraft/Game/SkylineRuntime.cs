@@ -495,6 +495,28 @@ namespace Game {
         /// <summary>[v0.1.99] 云影确定性自检：沿风向移动 64 个采样点，因子必须**有变化**且在 (0,1] 内。</summary>
         public static string LodCloudShadowSelfCheck() => SkylineLodCloudShadow.SelfCheck();
 
+        /// <summary>[v0.1.158 · 用户口径 4.4-1] **云影单色调试开关**（默认关）：
+        /// 打开后被云影压暗的 LOD 顶点色不再是"变暗"，而是乘上 `LodCloudShadowTint` 的**高饱和平色**
+        /// （默认黄绿）——用来一眼看出云影落在哪，也避免与"云本身的白"混淆。</summary>
+        public static bool LodCloudShadowTintEnabled {
+            get => SkylineLodCloudShadow.TintEnabled;
+            set {
+                if (SkylineLodCloudShadow.TintEnabled != value) {
+                    SkylineLodCloudShadow.TintEnabled = value;
+                    SkylineLod.RequestRebuild();   // 顶点色是烘出来的 ⇒ 改了要重建
+                }
+            }
+        }
+
+        /// <summary>[v0.1.158] 云影单色（默认黄绿 0.72/1.00/0.24，高饱和）。</summary>
+        public static Vector3 LodCloudShadowTint {
+            get => SkylineLodCloudShadow.Tint;
+            set {
+                SkylineLodCloudShadow.Tint = value;
+                SkylineLod.RequestRebuild();
+            }
+        }
+
         /// <summary>
         /// [v0.1.100] 里程碑 2.3 第三项：**固定光源（火把/灯）造成的亮度斑块**（默认开）。
         /// 开 = LOD 顶面基色取 `max(实心方块自身 light, **上方空气格 light**)`；

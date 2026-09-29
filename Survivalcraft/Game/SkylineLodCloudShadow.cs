@@ -22,6 +22,20 @@ namespace Game {
         public static float Depth { get; set; } = 0.55f;
         /// <summary>沿太阳方向在云带里的采样步数（默认 6；云带是几百米厚，低频，不需要多）。</summary>
         public static int Steps { get; set; } = 6;
+
+        /// <summary>
+        /// [v0.1.158 · 用户口径 4.4-1] **云影单色调试**（默认 **关**）。
+        ///
+        /// 用户原话："天空中云投下的阴影的实际视觉表现是一层白色化的遮罩，这在视觉效果上似乎不合适，
+        /// 如果是开发需要，则改成明红色或黄绿色等高饱和度单色比较合适。"
+        /// ⇒ 打开它之后，被云影压暗的 LOD 顶点色**不再"变暗"**，而是乘上一个**高饱和平色**（默认黄绿）：
+        /// 一眼看得出"云影落在哪"，也便于把它和"云本身的白"区分开（两者的根因不同，见 `notes/286`）。
+        /// 默认关 = 保留正常观感（真实压暗）；要看云影分布时打开。
+        /// </summary>
+        public static bool TintEnabled { get; set; }
+
+        /// <summary>[v0.1.158] 云影单色（默认黄绿 0.72/1.00/0.24，高饱和）。可用 `LodCloudShadowTint` 改。</summary>
+        public static Vector3 Tint { get; set; } = new(0.72f, 1.0f, 0.24f);
         /// <summary>光照低于这个量（夜里）不算云影 —— 夜里没有"太阳被云挡住"这回事。</summary>
         public static float MinSunAmount { get; set; } = 0.05f;
 
@@ -144,6 +158,21 @@ namespace Game {
         /// <summary>烘进顶点色时的实际乘子：`1 - Depth·(1 - factor)`。</summary>
         public static float ShadeFactor(float factor) =>
             Enabled ? MathUtils.Clamp(1f - Depth * (1f - MathUtils.Clamp(factor, 0f, 1f)), 0f, 1f) : 1f;
+
+        /// <summary>
+        /// [v0.1.158 · 用户口径 4.4-1] **逐通道的云影乘子**（默认 = 旧行为，三通道相等）。
+        /// `TintEnabled=true` 时返回 `lerp(白, Tint, 云影强度)` —— 即"高饱和单色"而不是"变暗"。
+        /// 之所以是**逐通道**：用户要的替代观感是**色相**变化（明红 / 黄绿），不是亮度变化，
+        /// 所以它只能乘在 RGB 上，不能继续用单个 `gain` 标量。
+        /// </summary>
+        public static Vector3 ShadeTint(float factor) {
+            float shade = ShadeFactor(factor);
+            if (!TintEnabled) {
+                return new Vector3(shade);                  // 旧口径：三通道同值（只变暗）
+            }
+            float k = MathUtils.Clamp(1f - shade, 0f, 1f);   // 云影强度 0..1
+            return Vector3.Lerp(Vector3.One, Tint, k);
+        }
 
         /// <summary>
         /// **确定性自检**（判据可证伪）：固定时刻/固定太阳，采样一条随风吹动的直线上的云影因子 ——

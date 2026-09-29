@@ -2275,6 +2275,7 @@ namespace Game {
                 Vector3 topNormal = SlopeNormal(dict, cx, cz, topHeight, cellSize);
                 bool gpuShade = attr && SkylineRuntime.LodAttrShaderOn;
                 Color cellLight = cellBase;
+                Vector3 cloudTint = Vector3.One;   // [v0.1.158] 云影逐通道乘子（默认 = 1,1,1）
                 if (SlopeShadingStrength > 0f || SelfShadowStrength > 0f || SkylineLodCloudShadow.Enabled) {
                     float gain = 1f;
                     // [v0.1.99] 里程碑 2.3：**云层阴影**（与体积云 shader 同源的低频项）——
@@ -2284,7 +2285,9 @@ namespace Game {
                         float cloudFactor = SkylineLodCloudShadow.Factor(
                             x0 + cellSize * 0.5f, topHeight, z0 + cellSize * 0.5f, lodSun, m_sunAmount);
                         SkylineLodCloudShadow.Note(cloudFactor);
-                        gain *= SkylineLodCloudShadow.ShadeFactor(cloudFactor);
+                        // [v0.1.158 · 用户口径 4.4-1] 逐通道：默认三通道同值（旧行为），
+                        //   打开 `LodCloudShadowTintEnabled` 时变成**高饱和平色**（便于看清云影落点）。
+                        cloudTint = SkylineLodCloudShadow.ShadeTint(cloudFactor);
                     }
                     // 坡向明暗：**GPU 路径不在 CPU 烘焙**（着色器按顶点法线逐片元算同一个式子），否则会算两遍。
                     if (SlopeShadingStrength > 0f && !gpuShade) {
@@ -2318,9 +2321,9 @@ namespace Game {
                         }
                     }
                     cellLight = new Color(
-                        (byte)MathUtils.Clamp(cellBase.R * gain, 0f, 255f),
-                        (byte)MathUtils.Clamp(cellBase.G * gain, 0f, 255f),
-                        (byte)MathUtils.Clamp(cellBase.B * gain, 0f, 255f),
+                        (byte)MathUtils.Clamp(cellBase.R * gain * cloudTint.X, 0f, 255f),
+                        (byte)MathUtils.Clamp(cellBase.G * gain * cloudTint.Y, 0f, 255f),
+                        (byte)MathUtils.Clamp(cellBase.B * gain * cloudTint.Z, 0f, 255f),
                         cellBase.A
                     );
                 }
