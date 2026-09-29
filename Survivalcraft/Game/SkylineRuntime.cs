@@ -196,6 +196,24 @@ namespace Game {
         }
 
         /// <summary>
+        /// [v0.1.130] 里程碑 2.6：**外围区块合并阶梯**（默认 **关** = v0.1.98 起的"加载距离之外一档 32 m"）。
+        /// 开 = 按 DH 的档位边界分成 32 / 64 / 128 m 三档（合并 2³/4³/8³ 个 16 m 单元，
+        /// 每档仍是 32³ 采样，等效精度 1/2/4 m），把绘制半径推到 2048 m 时外围仍只有粗档。
+        /// </summary>
+        public static bool LodMergeLadder {
+            get => SkylineLod.MergeLadderEnabled;
+            set {
+                if (SkylineLod.MergeLadderEnabled != value) {
+                    SkylineLod.MergeLadderEnabled = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>[v0.1.130] 里程碑 2.6 只读表：三档的边长/边界/单元数/网格量。</summary>
+        public static string LodMergeTable() => SkylineLod.LodMergeTable();
+
+        /// <summary>
         /// [v0.1.99] 里程碑 2.3：**LOD 是否参与云层阴影**（默认开）。
         /// 云影与体积云 shader **同源**（同一哈希/值噪声/密度场 + 同样的光学厚度口径），
         /// 沿太阳方向在云带里积一次、烘进 LOD 顶点色 ⇒ 与"看得见的云"对齐，

@@ -177,6 +177,37 @@ namespace Game {
         /// <summary>[v0.1.98] 统一档的单元边长 = CellShift + 本值（默认 4+1 = 5 ⇒ **32 m**）。</summary>
         public static int UniformExtraShift { get; set; } = 1;
 
+        // ===== [v0.1.130] 里程碑 2.6：**外围区块合并阶梯**（Distant Horizons 的"越远越粗"）=====
+        /// <summary>
+        /// 用户口径（目标 2.6）："随着距离渐远，将 2³、4³、8³ 及以上个区块合并成一个 LOD 块渲染，
+        /// 每个 LOD 块保持 32³ 分辨率，合并后大 LOD 精度就自然下降到原来 1/2、1/4、1/8 及以下，
+        /// 这在构建外围 LOD 的时候较为高效。"
+        ///
+        /// **关（默认）** = v0.1.98 起的"加载距离之外只画一档 32 m"（已验收的出厂行为，逐位不变）；
+        /// **开** = 按 DH 的档位边界把 LOD 分成 **32 / 64 / 128 m** 三档：
+        /// 合并 2³ / 4³ / 8³ 个 16 m 单元，每档仍然只出**一张 32³ 采样**的表面网格
+        /// （合并后等效精度 1 m / 2 m / 4 m，正好对应 DH 的 detail level 1 / 2 / 3）。
+        /// 外围因此可以在同样的单元预算下把绘制半径推得更远。
+        /// </summary>
+        public static bool MergeLadderEnabled { get; set; }
+
+        /// <summary>
+        /// [v0.1.130] 合并阶梯的两条边界（米）直接取 DH 的 `unit × 16 × base^level`（MEDIUM ⇒ 384 / 768）。
+        ///
+        /// 取的是 `level = 1` 与 `level = 2` 的**起点**：DH 的 `DhLevelForDistance` 在 192 / 384 / 768 m
+        /// 分别跨到 1 / 2 / 3 级，而我们的三档把 `clamp(level, 1, 3)` 当作档号 ⇒
+        /// 第一档 = level 0~1（小于 384 m）、第二档 = level 2、第三档 = level 3 及其以上。
+        /// </summary>
+        public static (float B1, float B2) MergeBoundaries() {
+            (float quadraticBase, int unit) = SkylineCubeShellStore.DhQualityParams();
+            float unitMetres = unit * SkylineCubeShellStore.McChunkWidthBlocks;   // 方块数 = 米数
+            return (unitMetres * MathF.Pow(quadraticBase, 1), unitMetres * MathF.Pow(quadraticBase, 2));
+        }
+
+        static readonly Dictionary<long, Cell> m_cellsM2 = [];   // 64 m 档（合并 4³）
+        static readonly Dictionary<long, Cell> m_cellsM3 = [];   // 128 m 档（合并 8³）
+        static int m_ladderTier1Cells, m_ladderTier2Cells, m_ladderTier3Cells;
+
         /// <summary>
         /// [v0.1.100] 里程碑 2.3 第三项：**固定光源的亮度斑块**（默认开）。
         /// 开 = 顶面基色取 `max(实心方块自身 light, **上方空气格 light**)`（单元内取最大）；
@@ -1368,22 +1399,66 @@ namespace Game {
             if (UniformBeyondLoaded) {
                 // [v0.1.98] 里程碑 2.2：**加载距离之外只画一档 32 m**（消除三档交界那种"分级过于明显"）。
                 //   近环/精细两档**不建网格**（并清空），统一档覆盖 `[skipRadius, RadiusMetres]`。
-                BuildUniformCells();
-                if (m_indexCountFine > 0 || m_cellsFine.Count > 0) {
-                    m_cellsFine.Clear();
-                    m_indexCountFine = 0;
-                    m_cellsInMeshFine = 0;
-                    Utilities.Dispose(ref m_vbFine);
-                    Utilities.Dispose(ref m_ibFine);
+                if (MergeLadderEnabled) {
+                    // [v0.1.130] 里程碑 2.6：**合并阶梯**（32 / 64 / 128 m 三档，边界取 DH 的 L2/L3）。
+                    (float b1, float b2) = MergeBoundaries();
+                    BuildMergedTier(1, m_cells32);
+                    BuildMergedTier(2, m_cellsM2);
+                    BuildMergedTier(3, m_cellsM3);
+                    m_ladderTier1Cells = m_cells32.Count;
+                    m_ladderTier2Cells = m_cellsM2.Count;
+                    m_ladderTier3Cells = m_cellsM3.Count;
+                    PruneFarCells(m_cells32, CellShift + 1, CellSize << 1,
+                        MathF.Min(b1, RadiusMetres) * LodCellReleaseFactor, out _);
+                    PruneFarCells(m_cellsM2, CellShift + 2, CellSize << 2,
+                        MathF.Min(b2, RadiusMetres) * LodCellReleaseFactor, out _);
+                    PruneFarCells(m_cellsM3, CellShift + 3, CellSize << 3,
+                        RadiusMetres * LodCellReleaseFactor, out _);
+                    RebuildMeshCore(m_cells32, CellShift + 1, skipRadius, MathF.Min(b1, RadiusMetres), 0,
+                        m_cells, CellSize);
+                    if (RadiusMetres > b1) {
+                        RebuildMeshCore(m_cellsM2, CellShift + 2, MathF.Max(b1, skipRadius),
+                            MathF.Min(b2, RadiusMetres), 1, m_cells, CellSize);
+                    }
+                    else {
+                        ClearLayer(1);
+                    }
+                    if (RadiusMetres > b2) {
+                        RebuildMeshCore(m_cellsM3, CellShift + 3, MathF.Max(b2, skipRadius),
+                            RadiusMetres, 2, m_cells, CellSize);
+                    }
+                    else {
+                        ClearLayer(2);
+                    }
+                    if (m_cellsFine.Count > 0) {
+                        m_cellsFine.Clear();
+                    }
+                    if (m_cellsNear.Count > 0) {
+                        m_cellsNear.Clear();
+                    }
                 }
-                if (m_cellsNear.Count > 0) {
+                else {
+                    BuildUniformCells();
+                }
+                if (m_indexCountFine > 0 || m_cellsFine.Count > 0) {
+                    if (!MergeLadderEnabled) {
+                        m_cellsFine.Clear();
+                        m_indexCountFine = 0;
+                        m_cellsInMeshFine = 0;
+                        Utilities.Dispose(ref m_vbFine);
+                        Utilities.Dispose(ref m_ibFine);
+                    }
+                }
+                if (!MergeLadderEnabled && m_cellsNear.Count > 0) {
                     m_cellsNear.Clear();
                 }
-                PruneFarCells(m_cells32, CellShift + UniformExtraShift, CellSize << UniformExtraShift,
-                    RadiusMetres * LodCellReleaseFactor, out _);
-                // 里程碑 2.3：32 m 的**网格**配 16 m 的**阴影最小体素**（`m_cells` 就是手里最细的采样）
-                RebuildMeshCore(m_cells32, CellShift + UniformExtraShift, skipRadius, RadiusMetres, 0,
-                    m_cells, CellSize);
+                if (!MergeLadderEnabled) {
+                    PruneFarCells(m_cells32, CellShift + UniformExtraShift, CellSize << UniformExtraShift,
+                        RadiusMetres * LodCellReleaseFactor, out _);
+                    // 里程碑 2.3：32 m 的**网格**配 16 m 的**阴影最小体素**（`m_cells` 就是手里最细的采样）
+                    RebuildMeshCore(m_cells32, CellShift + UniformExtraShift, skipRadius, RadiusMetres, 0,
+                        m_cells, CellSize);
+                }
             }
             else {
                 RebuildMeshCore(m_cellsFine, FineShift, MathF.Max(skipRadius, nearRange), fineRange, 1);
@@ -1499,20 +1574,34 @@ namespace Game {
                 int cx = (int)(kv.Key >> 32);
                 int cz = (int)(uint)kv.Key;
                 long gkey = Key(cx >> extra, cz >> extra);
-                m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3, int air) g);
-                long packed = ((long)kv.Value.Height << 32) | kv.Value.Value;
-                g.air = Math.Max(g.air, kv.Value.LightAir);      // [v0.1.100] 空气格光照取**组内最大**
-                switch (g.n) {
-                    case 0: g.p0 = packed; break;
-                    case 1: g.p1 = packed; break;
-                    case 2: g.p2 = packed; break;
-                    default: g.p3 = packed; break;      // 组满 4 个后多余的忽略（中位对少数样本稳健）
-                }
-                if (g.n < 4) {
-                    g.n++;
-                }
-                m_groupScratch[gkey] = g;
+                AggregateGroup(gkey, kv.Value);
             }
+            FlushGroups(m_cells32);
+        }
+
+        // ============================================================================================
+        // [v0.1.130] 里程碑 2.6：**合并阶梯**（32 / 64 / 128 m 三档，档由 DH 的档位公式给出）
+        // ============================================================================================
+
+        /// <summary>把一个 16 m 单元并进当前分组表（高度取中位、材质取众数、空气格光照取最大）。</summary>
+        static void AggregateGroup(long gkey, in Cell cell) {
+            m_groupScratch.TryGetValue(gkey, out (int n, long p0, long p1, long p2, long p3, int air) g);
+            long packed = ((long)cell.Height << 32) | cell.Value;
+            g.air = Math.Max(g.air, cell.LightAir);      // [v0.1.100] 空气格光照取**组内最大**
+            switch (g.n) {
+                case 0: g.p0 = packed; break;
+                case 1: g.p1 = packed; break;
+                case 2: g.p2 = packed; break;
+                default: g.p3 = packed; break;      // 组满 4 个后多余的忽略（中位对少数样本稳健）
+            }
+            if (g.n < 4) {
+                g.n++;
+            }
+            m_groupScratch[gkey] = g;
+        }
+
+        /// <summary>把分组表按**同一套 `MedianInto` 口径**落成合并后的单元表。</summary>
+        static void FlushGroups(Dictionary<long, Cell> dest) {
             Span<long> samples = stackalloc long[4];
             Span<int> top = stackalloc int[1];
             Span<int> val = stackalloc int[1];
@@ -1533,12 +1622,41 @@ namespace Game {
                 if (top[0] == int.MaxValue) {
                     continue;
                 }
-                m_cells32[kv.Key] = new Cell {
+                dest[kv.Key] = new Cell {
                     Height = (short)top[0], Value = (ushort)val[0], Light = light[0],
                     LightAir = (byte)Math.Clamp(g.air, 0, 255)
                 };
             }
+            m_groupScratch.Clear();
         }
+
+        /// <summary>
+        /// 把 16 m 单元按**它自己到相机的水平距离**分进第 `tier` 档（1 = 32 m、2 = 64 m、3 = 128 m）。
+        /// 档位判据直接用 DH 的 `LodQuadTree.calcDetailLevelFromDistance`（`SkylineCubeShellStore.DhLevelForDistance`），
+        /// 所以边界就是 DH 的 192 / 384 / 768 / 1536 m 绝对距离，减到我们这三档即 clamp 到 [1,3]。
+        /// </summary>
+        static void BuildMergedTier(int tier, Dictionary<long, Cell> dest) {
+            dest.Clear();
+            m_groupScratch.Clear();
+            Vector3 camera = CameraViewPosition();
+            int shift = Math.Clamp(tier, 1, 3);
+            foreach (KeyValuePair<long, Cell> kv in m_cells) {
+                int cx = (int)(kv.Key >> 32);
+                int cz = (int)(uint)kv.Key;
+                float wx = (cx << CellShift) + CellSize * 0.5f;
+                float wz = (cz << CellShift) + CellSize * 0.5f;
+                float dx = wx - camera.X, dz = wz - camera.Z;
+                float d = MathF.Sqrt(dx * dx + dz * dz);
+                if (Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(d), 1, 3) != tier) {
+                    continue;
+                }
+                AggregateGroup(Key(cx >> shift, cz >> shift), kv.Value);
+            }
+            FlushGroups(dest);
+        }
+
+        /// <summary>清空某一层的网格缓冲（层号：0 主 / 1 精细 / 2 近环；合并阶梯时 1/2 被复用为 64/128 m 档）。</summary>
+        static void ClearLayer(int layer) => SetLayerMesh(layer, null, null, 0, 0, 0);
 
         static void RebuildMeshCore(Dictionary<long, Cell> dict, int cellShift,
                                     float minDist, float maxDist, int layer,
@@ -2137,6 +2255,44 @@ namespace Game {
 
         // ---------------- 状态 ----------------
 
+        /// <summary>
+        /// [v0.1.130] 里程碑 2.6 只读表：**合并阶梯的三档**（32 / 64 / 128 m）、边界、以及每档的
+        /// 单元数与网格量。每档的"等效精度"= 16 m 单元边长 ÷ 合并倍数（1 m / 2 m / 4 m），
+        /// 与 DH 的 detail level 1 / 2 / 3 对齐；每档仍然只出一张 32³ 采样的表面网格。
+        /// </summary>
+        public static string LodMergeTable() {
+            (float b1, float b2) = MergeBoundaries();
+            JsonArray tiers = [
+                new JsonObject {
+                    ["tier"] = 1, ["merge"] = "2³", ["cellMetres"] = CellSize << 1,
+                    ["voxelMetres"] = 1.0, ["bandMetres"] = new JsonArray(0.0, Math.Round(b1, 1)),
+                    ["cells"] = m_cells32.Count, ["cellsInMesh"] = m_cellsInMesh,
+                    ["indices"] = m_indexCount,
+                },
+                new JsonObject {
+                    ["tier"] = 2, ["merge"] = "4³", ["cellMetres"] = CellSize << 2,
+                    ["voxelMetres"] = 2.0, ["bandMetres"] = new JsonArray(Math.Round(b1, 1), Math.Round(b2, 1)),
+                    ["cells"] = m_cellsM2.Count, ["cellsInMesh"] = m_cellsInMeshFine,
+                    ["indices"] = m_indexCountFine,
+                },
+                new JsonObject {
+                    ["tier"] = 3, ["merge"] = "8³", ["cellMetres"] = CellSize << 3,
+                    ["voxelMetres"] = 4.0, ["bandMetres"] = new JsonArray(Math.Round(b2, 1), (double)RadiusMetres),
+                    ["cells"] = m_cellsM3.Count, ["cellsInMesh"] = m_cellsInMeshNear,
+                    ["indices"] = m_indexCountNear,
+                }
+            ];
+            return new JsonObject {
+                ["enabled"] = MergeLadderEnabled,
+                ["uniformMode"] = UniformBeyondLoaded && !MergeLadderEnabled,
+                ["radiusMetres"] = (double)RadiusMetres,
+                ["boundariesMetres"] = new JsonArray(Math.Round(b1, 1), Math.Round(b2, 1)),
+                ["tiers"] = tiers,
+                ["note"] = "档位边界取 DH 的 unit×16×base^level（MEDIUM = 384/768 m 绝对距离）；"
+                           + "每档 32³ 采样，等效精度 1/2/4 m（= DH 的 detail level 1/2/3）"
+            }.ToJsonString();
+        }
+
         public static string Describe() =>
             $"lod:enabled={Enabled} cells={m_cells.Count}(+{m_cellsFine.Count}f+{m_cellsNear.Count}n) "
             + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f+{m_cellsInMeshNear}n) "
@@ -2208,6 +2364,12 @@ namespace Game {
                 ["uniformCells"] = m_cells32.Count,
                 ["uniformCellsInMesh"] = UniformBeyondLoaded ? m_cellsInMesh : 0,
                 ["uniformMeshIndices"] = UniformBeyondLoaded ? m_indexCount : 0,
+                // [v0.1.130] 里程碑 2.6：合并阶梯
+                ["mergeLadderEnabled"] = MergeLadderEnabled,
+                ["mergeBoundariesMetres"] = new JsonArray(
+                    Math.Round(MergeBoundaries().B1, 1), Math.Round(MergeBoundaries().B2, 1)),
+                ["merged64Metres"] = CellSize << 2,
+                ["merged128Metres"] = CellSize << 3,
                 // [v0.1.98] 里程碑 2.3：阴影是否真的按"最小体素"参与（与"整块步进"的差别量化）
                 ["minVoxelShadowCompared"] = MinVoxelShadowCompared,
                 ["minVoxelShadowDiffCells"] = MinVoxelShadowDiffCells,
