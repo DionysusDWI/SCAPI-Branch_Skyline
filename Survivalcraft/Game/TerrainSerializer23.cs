@@ -650,6 +650,19 @@ namespace Game {
             }
         }
 
+        /// <summary>[v0.1.154 · 验收用] **把"从盘读回"的溯源清零**（按轮次计数用）。
+        ///
+        /// 为什么需要：`WasLoadedFromDisk` 原来是**累积**语义（"曾经读过盘"），
+        /// 所以它无法回答"**这一轮**它到底是不是从盘读的"——而 crit5 正需要这个区分
+        /// （若某邻块在注入轮里其实是**被重新生成**的，那它高度图不同就属正常，不是污染）。
+        /// 验收脚本在**每轮预加载之前**调用它，之后的 `WasLoadedFromDisk` 就只反映该轮。
+        /// </summary>
+        public static void ResetDiskProvenance() {
+            lock (m_chunkLoadLedgerLock) {
+                m_chunksLoadedFromDisk.Clear();
+            }
+        }
+
         /// <summary>[v0.1.147] 坏档账本（只读探针）：计数 + 最近若干条失败的坐标/异常/线程。</summary>
         public static string DescribeChunkLoadFailures() {
             lock (m_chunkLoadLedgerLock) {

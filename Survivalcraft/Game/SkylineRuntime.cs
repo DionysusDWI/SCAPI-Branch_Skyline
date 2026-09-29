@@ -340,6 +340,12 @@ namespace Game {
             ["loadedFromDisk"] = TerrainSerializer23.WasLoadedFromDisk(cx, cz),
         }.ToJsonString();
 
+        /// <summary>[v0.1.154 · 验收用] 清零"从盘读回"溯源 ⇒ 之后的 `ChunkLoadedFromDisk` 只反映**本轮**。</summary>
+        public static string ResetDiskProvenance() {
+            TerrainSerializer23.ResetDiskProvenance();
+            return "{\"ok\":true}";
+        }
+
         /// <summary>[v0.1.152 · CC P3] **最近的有壳立方体**（只读）：给门禁的
         /// `shell-mesh-tiers` / `shell-column` 当**固定锚点**用，避免它们随玩家机位 SKIP。</summary>
         public static string NearestShellCube(int worldX, int worldY, int worldZ) =>
