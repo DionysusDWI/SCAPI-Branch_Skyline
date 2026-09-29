@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.154**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.155**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -65,29 +65,24 @@
   2³/4³/8³ 个 16 m 单元）；半径 2048 m 时外环用 14 个 128 m 块（等精度 32 m 要 224 个，**省 16×**）；默认**关**。
 * **[v0.1.141] 距离契约（B-03）**：只读探针 `skyline.LodDistanceContract()` 并排"中心 vs 最短距离"
   —— 换口径只把边界外推半个块，120 步里仅 **6 行**改档。
-  新增两条只读探针：`LodBlockProvenance(x,z)` 列出合并块内全部源 16 m 格（LOD 层是 2.5D 高度场）、
-  `ShellVoxelProbe(cx,cy,cz)` 回读壳立方体的占用/材质（**壳层是 16³、格距 1 m**，非 32³/0.5 m）；
-  **编辑现在会失效化壳层**（旧快照不再冒充新地形，`ShellInvalidateOnEdit` 默认开）。
-* DH 的 `overdrawPrevention` 开关 `SkylineLod.OverdrawPrevention`（默认 **0**）：
-  代价 −0.83%，但重叠带会盖掉真地形细节 ⇒ 默认关。
+  另加只读探针 `LodBlockProvenance(x,z)`（列合并块内全部源 16 m 格；LOD 层是 2.5D 高度场）与
+  `ShellVoxelProbe(cx,cy,cz)`（**壳层 16³、格距 1 m**，非 32³/0.5 m）；编辑会失效化壳层（`ShellInvalidateOnEdit` 默认开）。
+* DH `overdrawPrevention`（`SkylineLod.OverdrawPrevention`，默认 **0**）：代价 −0.83%，但会盖掉真地形细节。
 
 **光影（里程碑 4；主要参考 Iris 光影包，Dawnlight 作接口参考）**
 
 * **太阳阴影（默认开）**：软阴影 PCF，核为**双同心环 16 抽样**（`GpuShadowKernelSelfCheck()` 可量化）；
   太阳追踪 + 远/近两级 GPU 阴影图，强度**跟随昼光**；`GpuShadowSampleEnabled=false` 可整条关掉；
-  **[v0.1.122] Iris「镜像螺旋核」**（`GpuShadowKernel=3`）直边严格无偏但各向异性更差 ⇒ 默认 ring16。
+  （Iris「镜像螺旋核」直边无偏但各向异性更差 ⇒ 默认 `GpuShadowKernel=2` 的双同心环）
 * **远处阴影距离淡出**（Iris 的 `smoothstep(far*0.4, far*0.9, dist)`），
   消掉阴影图边界硬切（`GpuShadowFadeScale=0` 可回退）；
 * **体积云 / 体积雾 / 体积神光**：雾里逐步做太阳遮挡 × 前向散射，**同时覆盖远景 LOD 层**；
-  **[v0.1.119] 神光跟随昼光**；**[v0.1.118] 体积雾基础密度** `FogBaseDensity=0.10`（0.19% → **71%**）；
+  神光跟随昼光；体积雾基础密度 `FogBaseDensity=0.10`；
 * **固定光源**：复用引擎扫描建光源列表、逐帧取 K 近邻做距离衰减（`skyline.PointLights(true)`，默认关、零代价）；
-* **相机空间深度预通道**（`SkylineScreenDepth`）：半分辨率、16 bit 线性视距、只画 112 m 内真地形（默认关）；
 * **屏幕空间体积光**（Iris `volumetricLight.glsl` 迁移）：全屏**加法** pass、12 步 + IGN 抖动、每步查阴影图，
   **天空片元也走满 256 m**；默认关、强度 **0.22**、代价 **0.138 ms**（实测）。
-* **屏幕空间 AO**（`SkylineScreenAo`）：horizon-based、法线由深度重建、8 方向 × 3 步、旋转用**屏幕像素 IGN**
-  （v0.1.116 修掉同心环）+ 24~56 m 淡出；
-  实测默认档只影响 **0.95%** 帧面积，多机位 0.83%~9.05% 全 ≤10%，代价在噪声内；
-  `skyline.ScreenAoEnabled=true` 一条打开（默认关）。
+* **屏幕空间 AO**（`SkylineScreenAo`）：horizon-based、法线由深度重建、8 方向 × 3 步、旋转用屏幕像素 IGN
+  + 24~56 m 淡出；默认档只影响 **0.95%** 帧面积（多机位 ≤10%，代价在噪声内）；默认关。
 * LOD 参与云层阴影（烘进顶点色）与固定光源亮斑（顶面取**上方空气格**的光）。
 * **LOD 体素参与光影**（2.3）：太阳阴影 = 实时深度图（`LodShadowReceive`，默认关）；云影与光源亮斑 = **烘焙**。
 * **关雾（为了看清光影本身）**：`FogDisabled`（默认开）覆盖**全部**吃雾参数的 pass（地形三 pass /
@@ -102,8 +97,8 @@
 **参考环境（工作区内）**
 
 * **Dawnlight v3.1**（SCAPI 1.9.2.1）已安装可运行，着色器实现已抽取对照；
-* **Minecraft 1.21.11 + Fabric**：Distant Horizons / Iris / Sodium / Axiom / terrain-diffusion 与环境已就绪，
-  另有两个成品光影包（Complementary Reimagined、Bliss）供实现对照。
+* **Minecraft 1.21.11 + Fabric**：Distant Horizons / Iris / Sodium / Axiom / terrain-diffusion 已就绪，
+  另有 Complementary Reimagined、Bliss 两个成品光影包供对照。
 
 ### 构建 / 部署 / 运行
 
@@ -114,10 +109,14 @@ pwsh -NoProfile -File heightlab\deploy-skyline-v004.ps1 -KeepState
 powershell -ExecutionPolicy Bypass -File scripts\run-game.ps1 -Port 8765
 ```
 
-* 控制与观测走 **AgentBridge**（裸 TCP 行 JSON）：`python tools\scbridge.py state | act ... | shot`；
-* 回归门禁：`python heightlab\regression-skyline.py`；全量巡检：`python heightlab\acceptance-sweep.py`
-  （**[v0.1.126] 代价按毫秒/帧判**：百分比会被基线帧率放大，七次实测 −7.91%~+3.12%；
-  预算 **1.0 ms = 60 fps 的 6%**。收口 **PASS 25 / FAIL 0 / SKIP 4**）。
+* 控制与观测走 **AgentBridge**（裸 TCP 行 JSON）：`tools\scbridge.py state | act | shot`；
+* 回归门禁：`python heightlab\regression-skyline.py`（**24 PASS / 0 FAIL / 0 SKIP**）；
+  全量巡检：`python heightlab\acceptance-sweep.py`（代价按毫秒/帧判，预算 **1.0 ms**）。
+
+**测试基础设施（工具侧）**：**[v0.1.155]** 修 `NearestShellCube(s)` 的单位口径（原文档说"世界坐标"、实现收
+**立方体索引**、又把立方体数当"米" ⇒ 按文档调用会**静默**拿到错答案）；操作桥 `op:teleport surface=true`
+改**整列扫描**（原来只扫 `种子Y±depth` 且 depth ≤ 160 ⇒ 离地超过 160 m 永远找不到地面，而
+`ensure_open_vantage` 正建在它上面）；门禁补**风向量**默认值与两条判据的**自找视角**（看天也 24/0/0）。
 
 ### 文档与证据
 
