@@ -626,6 +626,30 @@ namespace Game {
         static readonly object m_chunkLoadLedgerLock = new();
         static readonly List<string> m_chunkLoadLedger = [];
 
+        /// <summary>[v0.1.151 · 验收用] **"坏档区块后来被写回了吗"的精准计数**：
+        /// 读盘失败（非 IO）时把该区块坐标记进一个小集合；`SaveChunkData` 真写它时计数 +1。
+        /// 这样 CC 的口径③（"坏档不回写"）就有**区块级**证据，不再依赖 Region 文件 mtime 那种代理。</summary>
+        static readonly HashSet<long> m_corruptChunkCoords = [];
+        static long m_corruptChunksSaved;
+
+        /// <summary>[v0.1.151] 坏档区块被写回的次数（0 = 口径③的强形式成立）。</summary>
+        public static long CorruptChunksSaved => m_corruptChunksSaved;
+
+        static long ChunkKey(int cx, int cz) => ((long)cx << 32) ^ (uint)cz;
+
+        /// <summary>[v0.1.151 · 验收用] **"这个区块本轮从盘里读出来过"的溯源集合**（有界）。
+        /// 用途：`crit5`（注入后邻块不受影响）必须**只统计确实从盘读回的邻块**——
+        /// 否则"本轮被重新生成"的邻块会因内容本就不同而让判据假 FAIL（v0.1.149 实测踩过）。</summary>
+        static readonly HashSet<long> m_chunksLoadedFromDisk = [];
+        const int MaxProvenanceTracked = 4096;
+
+        /// <summary>[v0.1.151] 该区块本轮是否**成功从存档读出**过（只读；供 crit5 过滤用）。</summary>
+        public static bool WasLoadedFromDisk(int cx, int cz) {
+            lock (m_chunkLoadLedgerLock) {
+                return m_chunksLoadedFromDisk.Contains(ChunkKey(cx, cz));
+            }
+        }
+
         /// <summary>[v0.1.147] 坏档账本（只读探针）：计数 + 最近若干条失败的坐标/异常/线程。</summary>
         public static string DescribeChunkLoadFailures() {
             lock (m_chunkLoadLedgerLock) {
@@ -639,6 +663,9 @@ namespace Game {
                     ["acceptedAfterFailure"] = m_chunkLoadAcceptedAfterFailure,
                     // [v0.1.149 · CC P3] 让门禁能断言"修法 A 的默认值没被改回去"
                     ["regenerateCorruptChunkDefault"] = RegenerateCorruptChunk,
+                    // [v0.1.151] 口径③的**区块级**判据：坏档区块被写回的次数（0 = 没被写回）
+                    ["corruptChunksSaved"] = m_corruptChunksSaved,
+                    ["corruptChunksKnown"] = m_corruptChunkCoords.Count,
                     ["recentFailures"] = recent,
                     ["maxRecentKept"] = MaxRecentFailures,
                     ["note"] = "acceptedAfterFailure>0 表示『坏档被当成已加载』真实发生过"
@@ -705,6 +732,12 @@ namespace Game {
                             + "(skyline.TerrainSerializer23.InjectChunkReadFailure)");
                     }
                     DecompressChunkData(chunk, m_storageBuffer, num);
+                    // [v0.1.151] 溯源：这一轮它确实是从盘读出来的（crit5 用它过滤"被重生成"的邻块）
+                    lock (m_chunkLoadLedgerLock) {
+                        if (m_chunksLoadedFromDisk.Count < MaxProvenanceTracked) {
+                            m_chunksLoadedFromDisk.Add(ChunkKey(chunk.Coords.X, chunk.Coords.Y));
+                        }
+                    }
                 }
                 catch (IOException) {
                     m_chunkLoadIoFailures++;
@@ -731,6 +764,7 @@ namespace Game {
                     // [v0.1.148] 修法 A 的开关版（默认关）：打开时把坏档当"存档里没有"处理
                     // ⇒ 更新器按同一坐标重新生成，而不是带着空内容往下走。
                     bool accepted = !RegenerateCorruptChunk;
+                    m_corruptChunkCoords.Add(ChunkKey(chunk.Coords.X, chunk.Coords.Y));
                     if (accepted) {
                         m_chunkLoadAcceptedAfterFailure++;
                     }
@@ -751,6 +785,12 @@ namespace Game {
 
         public virtual void SaveChunkData(TerrainChunk chunk) {
             lock (m_lock) {
+                // [v0.1.151] 精准回答"坏档区块有没有被写回"（口径③的区块级判据）
+                if (m_corruptChunkCoords.Contains(ChunkKey(chunk.Coords.X, chunk.Coords.Y))) {
+                    m_corruptChunksSaved++;
+                    Log.Warning($"[skyline] a chunk previously flagged as corrupt was written back: "
+                                + $"({chunk.Coords.X},{chunk.Coords.Y})");
+                }
                 _ = Time.RealTime;
                 try {
                     int size = CompressChunkData(chunk, m_storageBuffer);

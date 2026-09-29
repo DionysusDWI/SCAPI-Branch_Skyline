@@ -331,6 +331,12 @@ namespace Game {
         /// `acceptedAfterFailure>0` = "坏档被当成已加载"真实发生过。</summary>
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
+        /// <summary>[v0.1.151 · 验收用] 该区块本轮是否**从存档读出**过（只读）。</summary>
+        public static string ChunkLoadedFromDisk(int cx, int cz) => new JsonObject {
+            ["chunk"] = new JsonArray(cx, cz),
+            ["loadedFromDisk"] = TerrainSerializer23.WasLoadedFromDisk(cx, cz),
+        }.ToJsonString();
+
         /// <summary>
         /// [v0.1.149 · **CC 裁定后的默认值**：**默认 true = 开（修法 A 生效）**]。
         ///
