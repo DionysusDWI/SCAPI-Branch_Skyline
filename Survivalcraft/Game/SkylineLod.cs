@@ -214,9 +214,38 @@ namespace Game {
         /// 结果第一档吃掉了 [0,768)、第三档直到 1536 m 才开始 ⇒ 外环整圈没被画，
         /// 同半径下画出来的单元从 112 掉到 23，是 v0.1.132 的放大截图核对抓出来的）。
         /// 正确的换算是 `tier = clamp(level + 1, 1, 3)`：level 0 → 32 m、level 1 → 64 m、level ≥ 2 → 128 m。
+        ///
+        /// **[v0.1.158e · 用户口径 2.2/2.4 落地] 从"**单元中心距离**"改成"**与对应 LOD 区块的最短距离**"**：
+        /// 用户原话是"其 LOD 水平距离分级即应当被我们视作与**对应 LOD 区块的最短距离**，从而兼容进入我们的
+        /// 视觉球和球形加载距离的设计中"。而块边长**本身由档位决定** ⇒ 必须解**不动点**：
+        /// `tier = f(max(0, d − side(tier)/2))`，其中 `f` 就是下面的中心口径。迭代 ≤4 次必然稳定
+        /// （每步边长最多翻倍，单调收敛）。效果：**档位边界整体外推半个块边长**（120 步的裁定表里 6 行改档，
+        /// `notes/251` 早已量过），即"近处更早变粗一档"。
+        /// 开关 `LodTierUsesShortestDistance`（**默认 true**）可退回旧口径做 A/B 与回滚。
         /// </summary>
-        public static int TierForDistance(float distanceMetres) =>
+        public static bool LodTierUsesShortestDistance { get; set; } = true;
+
+        /// <summary>[v0.1.158e] **旧口径（对照用）**：档位由**单元中心**到相机的水平距离决定（v0.1.132~157）。</summary>
+        public static int TierForCentreDistance(float distanceMetres) =>
             Math.Clamp(SkylineCubeShellStore.DhLevelForDistance(distanceMetres) + 1, 1, 3);
+
+        /// <summary>[v0.1.158e] **现行口径（默认）**：入参是"到该 LOD 区块的**最短**水平距离"，
+        /// 解不动点得到档位；关掉开关即退回 `TierForCentreDistance`。</summary>
+        public static int TierForDistance(float distanceMetres) {
+            if (!LodTierUsesShortestDistance) {
+                return TierForCentreDistance(distanceMetres);
+            }
+            int tier = TierForCentreDistance(distanceMetres);
+            for (int k = 0; k < 4; k++) {
+                float side = CellSize << tier;
+                int next = TierForCentreDistance(MathF.Max(0f, distanceMetres - side * 0.5f));
+                if (next == tier) {
+                    break;                      // 不动点
+                }
+                tier = next;
+            }
+            return tier;
+        }
 
         /// <summary>
         /// [v0.1.141 · 审计功能单第 1 项 / B-03] **距离契约探针（只读，不改语义）**。
@@ -236,23 +265,36 @@ namespace Game {
             var rows = new JsonArray();
             int flips = 0;
             float firstFlip = -1f, lastFlip = -1f, maxOutwardShift = 0f;
+            int contractMismatches = 0;
+            float firstContractMismatch = -1f;
             int prevCentre = -1, prevShort = -1, prevFixed = -1;
             bool centreMonotone = true, shortMonotone = true, fixedMonotone = true;
             for (int i = 0; i < steps; i++) {
                 float d = d0 + (d1 - d0) * i / (steps - 1);
-                int tierCentre = TierForDistance(d);
+                // [v0.1.158e] 三列口径各自**显式**（不再混用同一个函数）：
+                //   tierCentreRule      = 旧口径（单元中心距离）
+                //   tierImplemented     = 现行口径（实现里真正在用的那个）
+                //   tierShortestFixedPoint = **独立**用旧口径解不动点解出来的最短距离口径（对拍用）
+                int tierCentre = TierForCentreDistance(d);
                 float sideOfCentreTier = CellSize << tierCentre;
                 float shortestNaive = MathF.Max(0f, d - sideOfCentreTier * 0.5f);
-                int tierShort = TierForDistance(shortestNaive);
+                int tierShort = TierForCentreDistance(shortestNaive);
+                int tierImplemented = TierForDistance(d);
                 // 自洽解：块边长本身由"最短距离档"决定，迭代到不动点（最多 4 次，必然稳定）
                 int tierFixed = tierCentre;
                 for (int k = 0; k < 4; k++) {
                     float side = CellSize << tierFixed;
-                    int next = TierForDistance(MathF.Max(0f, d - side * 0.5f));
+                    int next = TierForCentreDistance(MathF.Max(0f, d - side * 0.5f));
                     if (next == tierFixed) {
                         break;
                     }
                     tierFixed = next;
+                }
+                if (tierImplemented != tierFixed) {
+                    contractMismatches++;
+                    if (firstContractMismatch < 0f) {
+                        firstContractMismatch = d;
+                    }
                 }
                 bool differ = tierCentre != tierShort || tierCentre != tierFixed;
                 if (differ) {
@@ -280,6 +322,7 @@ namespace Game {
                     rows.Add(new JsonObject {
                         ["distanceMetres"] = Math.Round(d, 2),
                         ["tierCentre"] = tierCentre,
+                        ["tierImplemented"] = tierImplemented,
                         ["blockMetresCentreTier"] = sideOfCentreTier,
                         ["shortestDistanceMetres"] = Math.Round(shortestNaive, 2),
                         ["tierShortestOfCentreTier"] = tierShort,
@@ -300,9 +343,11 @@ namespace Game {
                     ["tierRule"] = "tier = clamp(level + 1, 1, 3)（v0.1.132 的 off-by-one 修复口径）",
                     ["verticalRule"] = "**只按水平**距离分级（Sqrt(dx²+dz²)）；覆盖/卸载按**球**"
                                        + "（SphereLoadingEnabled）—— 两者不得混用",
-                    ["centreRule"] = "现状：16 m 单元中心（cx*16+8）到相机的水平距离",
+                    ["centreRule"] = "旧口径（`TierForCentreDistance`）：16 m 单元中心（cx*16+8）到相机的水平距离",
                     ["shortestRule"] = "目标原文：到该合并块 AABB 的最短水平距离；本表用径向估算 "
                                        + "max(0, d − 块边长/2)，另有自洽不动点列",
+                    ["implementedRule"] = "**现行实现**（`TierForDistance`）＝按用户口径 2.2/2.4 的"
+                                          + "**最短距离不动点**（`LodTierUsesShortestDistance=true` 时）",
                 },
                 ["boundariesMetres"] = new JsonArray(Math.Round(MergeBoundaries().B1, 1),
                                                      Math.Round(MergeBoundaries().B2, 1)),
@@ -313,9 +358,15 @@ namespace Game {
                 ["firstDifferingDistanceMetres"] = firstFlip < 0 ? null : Math.Round(firstFlip, 2),
                 ["lastDifferingDistanceMetres"] = lastFlip < 0 ? null : Math.Round(lastFlip, 2),
                 ["maxHalfBlockShiftMetres"] = Math.Round(maxOutwardShift, 2),
+                ["tierUsesShortestDistance"] = LodTierUsesShortestDistance,
+                ["contractMismatches"] = contractMismatches,
+                ["firstContractMismatchMetres"] = firstContractMismatch < 0f
+                    ? null : Math.Round(firstContractMismatch, 2),
                 ["mergeLadderEnabled"] = MergeLadderEnabled,
                 ["rows"] = rows,
-                ["note"] = "只读探针：本探针**不改变**任何分级语义；换口径的收益/代价由这张表裁定"
+                ["note"] = "只读探针。`contractMismatches` = 实现（`tierImplemented`）与"
+                           + "**独立解出的最短距离不动点**不一致的行数（要求 0）；"
+                           + "`tierUsesShortestDistance` 为 false 时实现退回首列的中心口径"
             }.ToJsonString();
         }
 

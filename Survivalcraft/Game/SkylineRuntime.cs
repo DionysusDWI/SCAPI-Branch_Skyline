@@ -368,6 +368,23 @@ namespace Game {
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
         /// <summary>
+        /// [v0.1.158e · 用户口径 2.2/2.4] **LOD 档位的距离口径**（默认 **true** = 最短距离）：
+        /// 目标原文要求 DH 的 LOD 水平距离分级"**应当被我们视作与对应 LOD 区块的最短距离**"，
+        /// 以兼容我们的视觉球与球形加载距离。实现是**不动点**（块边长由档位决定）：
+        /// `tier = f(max(0, d − side(tier)/2))`；`false` 退回 v0.1.132 的"单元中心距离"口径（A/B 用）。
+        /// 改动会重建 LOD 网格（档位边界整体外推半个块边长）。
+        /// </summary>
+        public static bool LodTierUsesShortestDistance {
+            get => SkylineLod.LodTierUsesShortestDistance;
+            set {
+                if (SkylineLod.LodTierUsesShortestDistance != value) {
+                    SkylineLod.LodTierUsesShortestDistance = value;
+                    SkylineLod.RequestRebuild();
+                }
+            }
+        }
+
+        /// <summary>
         /// [v0.1.158c · 用户口径] **单位契约**（只读、纯常量，不碰世界）：
         /// 本分支同时存在两套"区块/立方体"的量，**它们各自是什么、比例是多少**必须可被机器检查，
         /// 免得后续会话（或我自己）把它们混着算（本轮就因为把引擎区块当成 32 格，把 region 坐标算错一倍）。
