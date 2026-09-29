@@ -188,6 +188,27 @@ namespace Game {
         static long m_dirtyTaken;
         static long m_dirtySkippedYoung;
         static long m_dirtySkippedUnloaded;
+        static long m_dirtyDroppedUnloaded;
+        static long m_dirtySatisfied;
+        static long m_dirtyDroppedUnloadedUnsampled;
+
+        /// <summary>[v0.1.129] 销账时"还没有样本"的那部分（区块加载后由 `FirstSeen`/`NotifyChunkValid` 兜底）。</summary>
+        public static long DirtyDroppedUnloadedUnsampledTotal => m_dirtyDroppedUnloadedUnsampled;
+
+        /// <summary>[v0.1.129] 被"销账"的脏单元累计数（卸载前补采 + 已有样本的两条路径）。</summary>
+        public static long DirtySatisfiedTotal => m_dirtySatisfied;
+
+        /// <summary>
+        /// [v0.1.129] **因"区块已离开加载范围"而结清的脏单元数**（累计）。
+        ///
+        /// 为什么需要：`NotifyChunkValid` 在新区块刚 Valid 时标脏，但玩家一路走过去时，
+        /// 排在队列后面的那些单元**可能在轮到自己之前就随区块一起被卸载**了 ⇒
+        /// 它们永远进不了"已加载且 Valid"这一支，被无限重排 ⇒ 实测 `dirty=1052/q=1052` 静止两分钟不降。
+        /// 这些单元**不是没采到**：它们在加载期间（或卸载时的 32³ 壳采集）已经取过样，
+        /// 只是"可能不新鲜"。区块都没了，重采在物理上不可能 ⇒ 正确的结清方式是
+        /// **有样本就销账**（并入本计数），**没样本才留着**等玩家回来。
+        /// </summary>
+        public static long DirtyDroppedUnloadedTotal => m_dirtyDroppedUnloaded;
 
         // ---------------- 只读状态 ----------------
 
@@ -259,6 +280,21 @@ namespace Game {
         /// <summary>[v0.1.17] 因"区块刚 Valid"而标脏的次数（诊断）。</summary>
         public static long BackfilledOnValid => m_backfilled;
 
+        /// <summary>
+        /// [v0.1.129] **销账**：把一个脏单元从待办里去掉（重置全部三个集合 + 队列残留）。
+        ///
+        /// 用在两个地方：① 卸载钩子里"数据还在的这一帧"把该单元采进 LOD（`SkylineLod.OnChunksLeavingRange`）；
+        /// ② 脏队列取到的单元其区块已卸载、而**样本已经在手上**（加载期间或卸载时已采过）。
+        /// 两种情况都意味着"这个单元已经拿到了它可能拿到的数据"，再留着只会让 `dirty` 永久挂住
+        /// （实测静止两分钟仍有 921 个，见 notes/229）。
+        /// </summary>
+        internal static void SatisfyDirty(long key) {
+            if (m_dirtyCells.TryRemove(key, out _)) {
+                m_dirtySatisfied++;
+            }
+            m_dirtyTime.TryRemove(key, out _);
+        }
+
         /// <summary>把一个 LOD 单元标脏（幂等；只用现成集合，不分配新对象）。</summary>
         public static void MarkDirty(long key) {
             m_lastEditTime = Time.RealTime;
@@ -309,8 +345,21 @@ namespace Game {
                 TerrainChunk candidate = terrain.GetChunkAtCoords((int)(key >> 32), (int)(key & 0xFFFFFFFF));
                 if (candidate == null || candidate.ThreadState < TerrainChunkState.Valid) {
                     m_dirtyQueue.TryDequeue(out _);
-                    m_dirtyQueue.Enqueue(key);              // 还没加载 → 留到以后
                     m_dirtySkippedUnloaded++;
+                    // [v0.1.129] 里程碑 3.2：**区块不在加载范围内 ⇒ 这一次重采在物理上不可能，销账。**
+                    //
+                    //   为什么"没样本"也能销账：区块一旦重新进入加载范围，会走两条既有通道被采到 ——
+                    //   ① `NotifyChunkValid`（刚 Valid 就再标一次脏）；② 轮转采集的 `FirstSeen`
+                    //   （`m_stamps` 里没有这一格 ⇒ 必采）。所以跨卸载**保留**每格脏标记是多余的，
+                    //   而保留的代价是实测 `dirty=921/q=921` 静止两分钟不降（`notes/229`）。
+                    //   有样本的还额外说明：数据已经在手上（加载期间已采 / 卸载钩子刚补采）。
+                    if (m_cells.ContainsKey(key)) {
+                        m_dirtyDroppedUnloaded++;
+                    }
+                    else {
+                        m_dirtyDroppedUnloadedUnsampled++;
+                    }
+                    SatisfyDirty(key);
                     continue;
                 }
                 m_dirtyQueue.TryDequeue(out _);
@@ -425,6 +474,7 @@ namespace Game {
         static string RefreshDescribe() =>
             $"dirty={m_dirtyCells.Count}/q={m_dirtyQueue.Count} resample={m_resampledTotal}"
             + $"(dirty={m_resampledDirty} stamp={m_resampledStamp} sweep={m_resampledSweep})"
+            + $" dropped={m_dirtyDroppedUnloaded}+{m_dirtyDroppedUnloadedUnsampled}"
             + $" latencyMs={m_lastDirtyLatencyMs:0} sweepLeft={Math.Max(0.0, m_sweepUntil - Time.RealTime):0}s";
 
         static JsonObject RefreshSurveyJson() => new() {
@@ -446,6 +496,9 @@ namespace Game {
             ["dirtyTaken"] = m_dirtyTaken,
             ["dirtySkippedYoung"] = m_dirtySkippedYoung,
             ["dirtySkippedUnloaded"] = m_dirtySkippedUnloaded,
+            ["dirtyDroppedUnloaded"] = m_dirtyDroppedUnloaded,
+            ["dirtySatisfiedTotal"] = m_dirtySatisfied,
+            ["dirtyDroppedUnloadedUnsampled"] = m_dirtyDroppedUnloadedUnsampled,
             ["backfilledOnValid"] = m_backfilled,
             ["refreshSeconds"] = RefreshSeconds,
             ["dirtyChunksPerTick"] = DirtyChunksPerTick,

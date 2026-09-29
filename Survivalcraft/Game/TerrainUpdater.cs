@@ -775,6 +775,10 @@ namespace Game {
                     }
                 }
                 if (leaving != null) {
+                    // [v0.1.129] **离开加载范围 = LOD 的最后一次采样机会**。
+                    // 脏队列里"区块已卸载且从未采过样"的单元永远等不到重采（实测静止 2 分钟仍挂 921 个）
+                    // ⇒ 在数据还在的这一帧把它们采进 LOD 单元并销账。
+                    SkylineLod.OnChunksLeavingRange(leaving);
                     SkylineCubeShellStore.OnChunksLeavingRange(leaving);
                 }
             }

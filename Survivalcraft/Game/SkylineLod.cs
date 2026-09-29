@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Text.Json.Nodes;
 using Engine;
 using Engine.Graphics;
@@ -593,6 +594,115 @@ namespace Game {
                 m_lastError = e.Message;
                 Log.Warning($"SkylineLod.Tick: {e.Message}");
             }
+        }
+
+        // ============================================================================================
+        // [v0.1.129] 里程碑 3.2：**离开加载范围的那一刻给 LOD 单元补最后一次采样**
+        // ============================================================================================
+        //
+        // 问题（实测，见 notes/229）：`NotifyChunkValid` 在区块刚 Valid 时把它的 16 m 单元标脏，
+        // 但玩家一路走过去时，排在队列后面的单元**可能在轮到自己之前就随区块一起被卸载**：
+        //   * 脏队列取到它 → 区块已不在加载范围 ⇒ 重排在物理上不可能 ⇒ 无限循环；
+        //   * 于是 `LodDescribe` 的 `dirty=921/q=921` 静止两分钟不降（里程碑 3.2"加载全部 LOD 区块"卡在这里）。
+        // 修法：卸载钩子（`TerrainUpdater.AllocateAndFreeChunks` 的预扫，主线程、数据还在）里
+        // **把该单元采进 LOD 再销账**；已经有样本的单元直接销账（数据已在手上，只是不新鲜）。
+
+        /// <summary>[v0.1.129] 每次卸载预扫最多补采几个 16 m 单元（防"走远一次释放一整圈"卡帧）。</summary>
+        public static int CellCapturePerCall { get; set; } = 128;
+
+        /// <summary>[v0.1.129] 卸载前补采成功累计（个）。</summary>
+        public static long CellsCapturedOnUnload { get; private set; }
+
+        /// <summary>[v0.1.129] 因预算不足被跳过的补采次数（这些单元留到玩家回来再采）。</summary>
+        public static long CellCaptureSkippedOverBudget { get; private set; }
+
+        /// <summary>[v0.1.129] 最近一次卸载预扫的耗时（毫秒，含补采）。</summary>
+        public static float CellCaptureLastMs { get; private set; }
+
+        /// <summary>
+        /// [v0.1.129] 卸载预扫入口（`TerrainUpdater` 调用，与壳采集同一处、同在主线程）。
+        /// 只处理"脏的或从没采过"的单元 —— 其余单元本来就已经在 LOD 里，不必碰。
+        /// </summary>
+        internal static void OnChunksLeavingRange(List<TerrainChunk> leaving) {
+            if (!Enabled || leaving == null || leaving.Count == 0) {
+                return;
+            }
+            try {
+                long t0 = Stopwatch.GetTimestamp();
+                int budget = Math.Max(0, CellCapturePerCall);
+                foreach (TerrainChunk chunk in leaving) {
+                    if (chunk == null) {
+                        continue;
+                    }
+                    long key = Key(chunk.Origin.X >> CellShift, chunk.Origin.Y >> CellShift);
+                    if (m_cells.ContainsKey(key)) {
+                        // 已经有样本：区块马上消失 ⇒ 脏标记没有意义了（重采不可能），直接销账。
+                        SatisfyDirty(key);
+                        continue;
+                    }
+                    if (budget <= 0) {
+                        CellCaptureSkippedOverBudget++;
+                        continue;
+                    }
+                    if (CaptureLeavingCell(chunk, key)) {
+                        budget--;
+                        CellsCapturedOnUnload++;
+                    }
+                }
+                CellCaptureLastMs = (float)Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+            }
+            catch (Exception e) {
+                m_lastError = "unloadCapture: " + e.Message;
+            }
+        }
+
+        /// <summary>
+        /// 把一个即将卸载的区块采成它所属的 16 m LOD 单元（主表面中位高度 + 众数材质 + 空气格光照），
+        /// 复用与 `Harvest` 完全相同的 `MedianInto` 口径，保证两条路采出来的数据一致。
+        /// 第二层表面（`HasSecond`）留空：卸载路径只保证"这一格在 LOD 里有正确的主表面"，
+        /// 树冠下的地面这一层由加载期间的常规采集负责（如实记录，不假装等价）。
+        /// </summary>
+        static bool CaptureLeavingCell(TerrainChunk chunk, long key) {
+            if (chunk.ThreadState < TerrainChunkState.Valid) {
+                return false;
+            }
+            Span<long> samples = stackalloc long[TerrainChunk.Size * TerrainChunk.Size];
+            int count = 0;
+            int airLight = 0;
+            for (int x = 0; x < TerrainChunk.Size; x++) {
+                for (int z = 0; z < TerrainChunk.Size; z++) {
+                    int top = chunk.GetTopHeightFast(x, z);
+                    if (top < TerrainChunk.MinHeight) {
+                        continue;                       // 空列
+                    }
+                    if (top < TerrainChunk.HeightMinusOne) {
+                        int light = Terrain.ExtractLight(chunk.GetCellValueFast(x, top + 1, z));
+                        if (light > airLight) {
+                            airLight = light;
+                        }
+                    }
+                    samples[count++] = ((long)top << 32) | (uint)chunk.GetCellValueFast(x, top, z);
+                }
+            }
+            if (count == 0) {
+                return false;
+            }
+            Span<int> top0 = [int.MaxValue];
+            Span<int> value0 = [0];
+            Span<byte> light0 = [15];
+            MedianInto(samples, count, top0, value0, light0, 0);
+            if (top0[0] == int.MaxValue) {
+                return false;
+            }
+            m_cells[key] = new Cell {
+                Height = (short)top0[0], Value = (ushort)value0[0], Light = light0[0],
+                LightAir = (byte)airLight, HasSecond = false
+            };
+            m_harvestedCells++;
+            m_dirty = true;
+            MarkCoarseRegionDirty(key);
+            SatisfyDirty(key);
+            return true;
         }
 
         static void Harvest() {
@@ -2032,6 +2142,7 @@ namespace Game {
             + $"inMesh={m_cellsInMesh}(+{m_cellsInMeshFine}f+{m_cellsInMeshNear}n) "
             + $"indices={m_indexCount}(+{m_indexCountFine}f+{m_indexCountNear}n) "
             + $"radius={RadiusMetres:0}m cell={CellSize}/{FineSize}/{NearSize} rebuilds={m_rebuilds} "
+            + $"unloadCapture={CellsCapturedOnUnload}(skip={CellCaptureSkippedOverBudget},{CellCaptureLastMs:0.0}ms) "
             + $"err={(m_lastError.Length > 0 ? m_lastError : "-")} " + RefreshDescribe();
 
         public static string Survey() {
@@ -2136,6 +2247,11 @@ namespace Game {
                 ["regionsEvictedTotal"] = RegionsEvictedTotal,
                 ["regionLastError"] = m_regionLastError,
                 ["loadedChunks"] = loadedColumns,
+                // [v0.1.129] 里程碑 3.2：卸载前补采（脏队列排空的关键路径）
+                ["cellsCapturedOnUnload"] = CellsCapturedOnUnload,
+                ["cellCaptureSkippedOverBudget"] = CellCaptureSkippedOverBudget,
+                ["cellCapturePerCall"] = CellCapturePerCall,
+                ["cellCaptureLastMs"] = Math.Round(CellCaptureLastMs, 2),
                 ["refresh"] = RefreshSurveyJson(),
                 ["lastError"] = m_lastError
             }.ToJsonString();
