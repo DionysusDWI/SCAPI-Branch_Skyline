@@ -607,6 +607,12 @@ namespace Game {
         static int m_injectChunkReadFailure = -1;
         static long m_injectedChunkReadFailures;
 
+        /// <summary>[v0.1.149 · 验收用] **注入目标区块**（默认 int.MinValue = 任意区块）。
+        /// 只有坐标匹配时才抛（`InjectChunkReadFailure >= 0`）——否则"下一次 LoadChunkData"可能落在
+        /// 玩家附近的别的区块上，让实验不可判定（v0.1.149 第一版脚本就吃了这个亏）。</summary>
+        public static int InjectChunkReadFailureCx = int.MinValue;
+        public static int InjectChunkReadFailureCz = int.MinValue;
+
         /// <summary>[v0.1.146] 注入实际抛出的次数（验收用）。</summary>
         public static long InjectedChunkReadFailures => m_injectedChunkReadFailures;
 
@@ -648,7 +654,7 @@ namespace Game {
         /// ⇒ 原地形被固化丢失"（`notes/257 §6` 实测）。
         /// 默认关的理由：这改变"坏档时的世界演化"，属语义变更，交审计/用户裁定。
         /// </summary>
-        public static bool RegenerateCorruptChunk { get; set; }
+        public static bool RegenerateCorruptChunk { get; set; } = true;
 
         static void RecordChunkLoadFailure(TerrainChunk chunk, string kind, Exception e, bool accepted) {
             string row = new JsonObject {
@@ -686,7 +692,10 @@ namespace Game {
                         return false;
                     }
                     // [v0.1.146 · 审计验收] 注入点：只在"存档里确实有这个区块"时触发，一次性。
-                    if (InjectChunkReadFailure >= 0) {
+                    // [v0.1.149] 可指定目标区块（默认任意）：避免注入落到玩家附近的别的区块上。
+                    bool targetMatch = InjectChunkReadFailureCx == int.MinValue
+                        || (chunk.Coords.X == InjectChunkReadFailureCx && chunk.Coords.Y == InjectChunkReadFailureCz);
+                    if (InjectChunkReadFailure >= 0 && targetMatch) {
                         InjectChunkReadFailure = -1;
                         m_injectedChunkReadFailures++;
                         throw new InvalidDataException(
@@ -724,6 +733,11 @@ namespace Game {
                         m_chunkLoadAcceptedAfterFailure++;
                     }
                     RecordChunkLoadFailure(chunk, "non-io", e, accepted);
+                    // [v0.1.149 · CC 裁定 P3] **跨会话留痕**：账本是内存态（重启清零），
+                    // 所以这里再写一行日志，让"哪个区块在哪一刻坏过、是否被当成已加载"在 Game.log 里可追溯。
+                    Log.Warning($"[skyline] chunk load failed (non-io) at ({chunk.Coords.X},{chunk.Coords.Y}): "
+                                + $"{e.GetType().Name}; acceptedAsLoaded={accepted}; "
+                                + $"RegenerateCorruptChunk={RegenerateCorruptChunk}");
                     if (!accepted) {
                         return false;
                     }

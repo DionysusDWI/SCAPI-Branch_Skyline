@@ -325,7 +325,7 @@ namespace Game {
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
         /// <summary>
-        /// [v0.1.148 · `notes/257` 的**修法 A 的开关版**，默认 **false = 关（保持引擎原行为）**]。
+        /// [v0.1.149 · **CC 裁定后的默认值**：**默认 true = 开（修法 A 生效）**]。
         ///
         /// 打开后：`TerrainSerializer23.LoadChunkData` 遇到**非 IOException** 的坏档异常时**额外返回 false**
         /// ⇒ 更新器把该区块当作"存档里没有"⇒ **按同一坐标重新生成**（而不是带着未反序列化的空内容
@@ -334,10 +334,25 @@ namespace Game {
         /// **为什么默认关**：它改变"坏档时的世界演化"，属引擎语义变更 ⇒ 按协作约定交审计/用户裁定。
         /// 验收 `heightlab/skyline-v0148-corrupt-regenerate.py` 用"注入 → 编辑 → 保存 → 重开"对照：
         /// 关=原地形丢失（278,356 → 28 格）；开=区块被重新生成、内容自洽且不塌成空。
+        ///
+        /// **【v0.1.149】审计已裁定（`to-cc/…081600Z-0001` 与 `…082034Z-0001`）：缺陷成立、定级 P1、修法选 A**，
+        /// 因此**默认值翻成 true**（保持开关只为"A/B 对照与一键回滚"）。裁定同时要求四条验收（见 `notes/261`）。
         /// </summary>
         public static bool CorruptChunkRegenerate {
             get => TerrainSerializer23.RegenerateCorruptChunk;
             set => TerrainSerializer23.RegenerateCorruptChunk = value;
+        }
+
+        /// <summary>[v0.1.149 · 验收用] 转发"注入目标区块"（默认 int.MinValue = 任意区块）。</summary>
+        public static int ChunkReadFailureTargetCx {
+            get => TerrainSerializer23.InjectChunkReadFailureCx;
+            set => TerrainSerializer23.InjectChunkReadFailureCx = value;
+        }
+
+        /// <summary>[v0.1.149 · 验收用] 转发"注入目标区块"（z 分量）。</summary>
+        public static int ChunkReadFailureTargetCz {
+            get => TerrainSerializer23.InjectChunkReadFailureCz;
+            set => TerrainSerializer23.InjectChunkReadFailureCz = value;
         }
 
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
