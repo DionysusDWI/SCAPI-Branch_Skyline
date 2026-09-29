@@ -195,6 +195,16 @@ namespace Game {
 
         public UpdateStatistics m_statistics = new();
 
+        // ===== [v0.1.139 · 里程碑 5.2 第二段] 有界并行的日照/高度 pass 的账本 =====
+        // 只由地形工作线程写，主线程只读（探针），所以不需要 interlock。
+        long m_parallelSunLightBatches;
+        long m_parallelSunLightChunks;
+        int m_parallelSunLightLastBatch;
+        int m_parallelSunLightMaxBatch;
+        int m_parallelSunLightWorkerCeiling;      // 用过的最大并发度（bounded 判定要用它，不是当前设置）
+        TerrainChunk[] m_parallelPicks;
+        float[] m_parallelPickDist;
+
         /// <summary>
         /// [v0.1.138 · 里程碑 5.2 第二段前置] **只读**：把逐 pass 的耗时/次数账本导出成 JSON
         /// （不打印、不重置 —— 与 `LogTerrainUpdateStats` 那条日志路径解耦，供 5.2 的
@@ -967,6 +977,12 @@ namespace Game {
                 m_threadUpdateParameters = m_updateParameters;
                 SendReceiveChunkStatesThread();
             }
+            // [v0.1.139 · 里程碑 5.2 第二段] 有界并行：默认关（0/1）。只在"状态正好是 InvalidLight"
+            // 的区块上并行做日照/高度（源码级核实：该 pass 只碰本区块，见 notes/248）；做不到就回退串行。
+            if (SkylineRuntime.ParallelSunLightWorkers >= 2
+                && TryParallelSunLightStep(SkylineRuntime.ParallelSunLightWorkers) > 0) {
+                return false;
+            }
             TerrainChunk terrainChunk = FindBestChunkToUpdate(out TerrainChunkState desiredState);
             if (terrainChunk != null) {
                 double realTime = Time.RealTime;
@@ -986,6 +1002,114 @@ namespace Game {
             }
             return true;
         }
+
+        /// <summary>
+        /// [v0.1.139 · 里程碑 5.2 第二段] **有界并行**：把若干"状态正好是 InvalidLight"的区块的
+        /// `GenerateChunkSunLightAndHeight` 并发执行（每个 worker 只写自己那个区块）。
+        ///
+        /// 为什么是这一段（源码级核实，`notes/248`）：
+        ///   * 它只**读写本区块**（`Get/SetCellValueFast`、`SetTop/Bottom/SunlightHeightFast`），
+        ///     只读 `BlocksManager.Blocks`，不碰邻居、不碰 `m_lightSources`、不碰 Storage、无 mod hook；
+        ///   * 同一 light 阶段的 `lightSources`/`propagate` **必须串行**（共享 `m_lightSources` + 跨区块写），
+        ///     所以本方法只覆盖 `InvalidLight` 这一种状态，其余状态一律回退给串行路径。
+        ///
+        /// 有界性：每批最多 `maxWorkers` 个区块，`Parallel.For` **join 之后**才推进状态 —— 状态推进留在
+        /// 工作线程上（不是 worker），因此状态机语义与串行路径完全一致。
+        /// </summary>
+        public virtual int TryParallelSunLightStep(int maxWorkers) {
+            if (maxWorkers < 2) {
+                return 0;
+            }
+            // 注意：`UpdateParameters` 是本引擎的**结构体**，所以没有"null 参数块"这回事；
+            // 但要防它还没初始化（`Chunks`/`Locations` 都是引用字段）。
+            TerrainChunk[] chunks = m_threadUpdateParameters.Chunks;
+            if (chunks == null || m_threadUpdateParameters.Locations == null) {
+                return 0;
+            }
+            UpdateLocation[] locations = m_threadUpdateParameters.Locations.Values.ToArray();
+            if (locations.Length == 0) {
+                return 0;
+            }
+            if (m_parallelPicks == null || m_parallelPicks.Length < maxWorkers) {
+                m_parallelPicks = new TerrainChunk[maxWorkers];
+                m_parallelPickDist = new float[maxWorkers];
+            }
+            int n = 0;
+            foreach (TerrainChunk c in chunks) {
+                if (c == null || c.ThreadState != TerrainChunkState.InvalidLight) {
+                    continue;
+                }
+                // 与 FindBestChunkToUpdate 同一距离口径：取到最近 update location 的距离，
+                // 且必须落在该 location 的可见距离之内（否则这一段还不该做）。
+                float best = float.MaxValue;
+                bool inRange = false;
+                for (int j = 0; j < locations.Length; j++) {
+                    float d2 = Vector2.DistanceSquared(locations[j].Center, c.Center);
+                    if (d2 < best) {
+                        best = d2;
+                        inRange = d2 <= MathUtils.Sqr(locations[j].VisibilityDistance);
+                    }
+                }
+                if (!inRange) {
+                    continue;
+                }
+                int pos = n < maxWorkers ? n : maxWorkers;
+                while (pos > 0 && m_parallelPickDist[pos - 1] > best) {
+                    if (pos < maxWorkers) {
+                        m_parallelPicks[pos] = m_parallelPicks[pos - 1];
+                        m_parallelPickDist[pos] = m_parallelPickDist[pos - 1];
+                    }
+                    pos--;
+                }
+                if (pos < maxWorkers) {
+                    m_parallelPicks[pos] = c;
+                    m_parallelPickDist[pos] = best;
+                    if (n < maxWorkers) {
+                        n++;
+                    }
+                }
+            }
+            if (n < 2) {
+                return 0;      // 只有一个候选就别起并行开销（回退串行路径）
+            }
+            int skyLightValue = m_subsystemSky.SkyLightValue;
+            double t0 = Time.RealTime;
+            Parallel.For(0, n, new ParallelOptions { MaxDegreeOfParallelism = maxWorkers }, k => {
+                GenerateChunkSunLightAndHeight(m_parallelPicks[k], skyLightValue);
+            });
+            // 状态推进留在工作线程：worker 只做重活，状态机推进仍然串行且按 picks 顺序。
+            for (int k = 0; k < n; k++) {
+                TerrainChunk c = m_parallelPicks[k];
+                c.ThreadState = TerrainChunkState.InvalidPropagatedLight;
+                c.WasUpgraded = true;
+                m_parallelPicks[k] = null;
+            }
+            double dt = Time.RealTime - t0;
+            m_statistics.LightCount += n;
+            m_statistics.LightTime += dt;
+            m_parallelSunLightBatches++;
+            m_parallelSunLightChunks += n;
+            m_parallelSunLightLastBatch = n;
+            m_parallelSunLightMaxBatch = Math.Max(m_parallelSunLightMaxBatch, n);
+            // [v0.1.139 门禁抓出的修正] `maxBatch` 是**历史最大值**，而 `workers` 可能已经被关回去；
+            // 用当前 workers 去比历史 maxBatch 会在"关掉开关之后"永远判不 bounded（假 FAIL）。
+            // 正确口径：与**用过的最大并发度**比。
+            m_parallelSunLightWorkerCeiling = Math.Max(m_parallelSunLightWorkerCeiling, maxWorkers);
+            return n;
+        }
+
+        /// <summary>[v0.1.139] 并行日照 pass 的只读账本（桥：`skyline.ParallelSunLightStats()`）。</summary>
+        public virtual string DescribeParallelSunLight() => new JsonObject {
+            ["workers"] = SkylineRuntime.ParallelSunLightWorkers,
+            ["batches"] = m_parallelSunLightBatches,
+            ["chunks"] = m_parallelSunLightChunks,
+            ["lastBatch"] = m_parallelSunLightLastBatch,
+            ["maxBatch"] = m_parallelSunLightMaxBatch,
+            ["workerCeiling"] = m_parallelSunLightWorkerCeiling,
+            ["bounded"] = m_parallelSunLightMaxBatch <= Math.Max(1, m_parallelSunLightWorkerCeiling),
+            ["note"] = "只覆盖 InvalidLight（日照/高度）pass；lightSources/propagate 因共享 m_lightSources "
+                       + "与跨区块写而保持串行（见 notes/248）"
+        }.ToJsonString();
 
         public virtual TerrainChunk FindBestChunkToUpdate(out TerrainChunkState desiredState) {
             double realTime = Time.RealTime;

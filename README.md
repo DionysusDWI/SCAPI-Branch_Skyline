@@ -10,7 +10,7 @@
 > 基于**最新 SCAPI 游戏源码**的"建筑特化"分支：更高的世界 + 建筑辅助能力 + 超视距渲染，
 > 面向超大规模创意建筑与 **AI Agent 辅助建造**。
 
-**当前状态：v0.1.138**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
+**当前状态：v0.1.139**。**逐版变更与历史**见 [CHANGELOG-Skyline.md](CHANGELOG-Skyline.md)，
 发布页见 <https://github.com/DionysusDWI/SCAPI-Branch_Skyline/releases>。
 
 ### 能力清单（只列当前状态）
@@ -31,6 +31,9 @@
   `ChunkContentHash` / `ChunkForceRegenerate`，以及**确定性验收**——预加载→释放→引擎确认卸载 3/3→
   再预加载后哈希**逐位相同**（`data/sessions/skyline-v0138/`）；顺带修掉预加载点的球窗判据
   （改 2D 重载后 81/81 `Valid`）。**本版不做并行**，只补可测性。
+* **[v0.1.139] 5.2 第二段第一步：有界并行日照 pass（默认关）** —— 源码级白名单只有
+  `InvalidLight`（只碰本区块）可并行；`lightSources/propagate` 因共享 `m_lightSources` 与**跨邻居写**
+  必须串行。验收 5/5：串/并/串/并四趟**高度图逐位相同**、`maxBatch ≤ workers`。
 * 建筑工具：区域复制 / 镜像 / 旋转、蓝图导入导出、笔画式构建；
   `SkylineBuilder` 剖面扫掠——支持**三次贝塞尔曲线**（弧长等距）。
 * 大规模建筑压力测试：单区块 4096 件高复杂度家具；家具**逐级降分辨率 LOD**（`d_box(E)` 占替距）、

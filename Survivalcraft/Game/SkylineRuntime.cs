@@ -289,6 +289,9 @@ namespace Game {
         /// <summary>[v0.1.138] 区块内容指纹（FNV-1a 64 over all cell values）。</summary>
         public static string ChunkContentHash(int cx, int cz) => SkylineChunkDeterminism.ChunkHash(cx, cz);
 
+        /// <summary>[v0.1.139] 区块**高度图**指纹（只哈希 Top/Bottom/SunlightHeight，不受邻居光照传播影响）。</summary>
+        public static string ChunkHeightHash(int cx, int cz) => SkylineChunkDeterminism.ChunkHeightHash(cx, cz);
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);
@@ -408,6 +411,30 @@ namespace Game {
         }
 
         static int m_terrainUpdateBudgetMs = 10;
+
+        /// <summary>
+        /// [v0.1.139 · 里程碑 5.2 第二段] **有界并行**的日照/高度 pass 并发度：**0/1 = 串行（默认）**，
+        /// 2/4 = 每次最多让这么多区块的 `GenerateChunkSunLightAndHeight` 同时跑。
+        ///
+        /// 为什么只并行这一段（源码级核实，见 `notes/248`）：
+        ///   * `GenerateChunkSunLightAndHeight` 只**读写本区块**（Get/SetCellValueFast、
+        ///     SetTop/Bottom/SunlightHeightFast）+ 只读 `BlocksManager.Blocks` ⇒ 无邻居读写、
+        ///     无共享可变状态、不碰 Storage、无 mod hook；
+        ///   * 同一个 light 阶段的 `lightSources` / `propagate` **必须串行**：`TerrainUpdater.m_lightSources`
+        ///     是共享实例字段（`TerrainUpdater.cs:183/738/1135`），且 `PropagateLightSources()` 会
+        ///     **写邻居区块**（`:1078-1108` → `:1125`），并发会破坏块边光照一致性。
+        /// </summary>
+        public static int ParallelSunLightWorkers {
+            get => m_parallelSunLightWorkers;
+            set => m_parallelSunLightWorkers = Math.Clamp(value, 0, 8);
+        }
+
+        static int m_parallelSunLightWorkers;
+
+        /// <summary>[v0.1.139] 并行日照 pass 的账本（batches/chunks/回退），用于验收与回归。</summary>
+        public static string ParallelSunLightStats() =>
+            GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.TerrainUpdater?.DescribeParallelSunLight()
+            ?? "{\"err\":\"no updater\"}";
 
         /// <summary>
         /// [v0.1.16] 球形加载窗的**内容距离**（米）：0 = 沿用调用方的默认（64，即 content = max(64, visibility)）。

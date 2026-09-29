@@ -63,6 +63,72 @@ namespace Game {
             }.ToJsonString();
         }
 
+        /// <summary>
+        /// [v0.1.139] **高度图指纹**（只读）：只哈希 `Top/Bottom/SunlightHeight` 三张图。
+        ///
+        /// 为什么要单独一条：`GenerateChunkSunLightAndHeight` 既写光照位、也写这三张高度图，
+        /// 而**光照位会被后续邻居的光照传播改写**（`TerrainUpdater.PropagateLightSources` 会写邻居区块，
+        /// `TerrainUpdater.cs:1078-1108 → :1125`）⇒ 跨"卸载-重生成"轮次比对含光照位的内容哈希会漂移
+        /// （v0.1.139 实测：同一模式的两趟之间也会差 1 个区块）。高度图**只由本 pass 写**，
+        /// 所以它是"这个 pass 输出一致"的稳定判据，用于 `skyline-v0139-parallel-sunlight.py`。
+        /// </summary>
+        public static string ChunkHeightHash(int cx, int cz) {
+            Terrain terrain = Terrain;
+            TerrainChunk chunk = terrain?.GetChunkAtCoords(cx, cz);
+            if (chunk == null) {
+                return new JsonObject { ["ok"] = false, ["err"] = "chunk not allocated" }.ToJsonString();
+            }
+            TerrainChunkState state = chunk.ThreadState;
+            if (state < TerrainChunkState.Valid) {
+                return new JsonObject {
+                    ["ok"] = false, ["err"] = "chunk not valid", ["state"] = state.ToString()
+                }.ToJsonString();
+            }
+            ulong hash = 14695981039346656037UL;
+            int minTop = int.MaxValue, maxTop = int.MinValue;
+            int minBottom = int.MaxValue, maxBottom = int.MinValue;
+            long sumSunlight = 0;
+            for (int x = 0; x < TerrainChunk.Size; x++) {
+                for (int z = 0; z < TerrainChunk.Size; z++) {
+                    int top = chunk.GetTopHeightFast(x, z);
+                    int bottom = chunk.GetBottomHeightFast(x, z);
+                    int sun = chunk.GetSunlightHeightFast(x, z);
+                    hash = Mix(hash, top);
+                    hash = Mix(hash, bottom);
+                    hash = Mix(hash, sun);
+                    minTop = Math.Min(minTop, top);
+                    maxTop = Math.Max(maxTop, top);
+                    minBottom = Math.Min(minBottom, bottom);
+                    maxBottom = Math.Max(maxBottom, bottom);
+                    sumSunlight += sun;
+                }
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["chunk"] = new JsonArray(cx, cz),
+                ["heightHash"] = hash.ToString("x16"),
+                ["minTopHeight"] = minTop == int.MaxValue ? 0 : minTop,
+                ["maxTopHeight"] = maxTop == int.MinValue ? 0 : maxTop,
+                ["minBottomHeight"] = minBottom == int.MaxValue ? 0 : minBottom,
+                ["maxBottomHeight"] = maxBottom == int.MinValue ? 0 : maxBottom,
+                ["sumSunlightHeight"] = sumSunlight,
+                ["modificationCounter"] = chunk.ModificationCounter,
+                ["state"] = state.ToString(),
+            }.ToJsonString();
+        }
+
+        static ulong Mix(ulong hash, int value) {
+            hash ^= (byte)(value & 0xFF);
+            hash *= 1099511628211UL;
+            hash ^= (byte)((value >> 8) & 0xFF);
+            hash *= 1099511628211UL;
+            hash ^= (byte)((value >> 16) & 0xFF);
+            hash *= 1099511628211UL;
+            hash ^= (byte)((value >> 24) & 0xFF);
+            hash *= 1099511628211UL;
+            return hash;
+        }
+
         public static string ChunkForceRegenerate(int cx, int cz) {
             Terrain terrain = Terrain;
             TerrainChunk chunk = terrain?.GetChunkAtCoords(cx, cz);

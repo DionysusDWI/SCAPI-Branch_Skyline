@@ -7,6 +7,61 @@
 
 > 下一批改动写在这里（按用户口径："每个 Release 对应一个里程碑的实现、git 提交比 Release 频繁"）。
 
+## [v0.1.139] - 2026-09-29
+
+第一百四十五版：**里程碑 5.2 第二段的第一步** —— 先把"哪些 pass 能并行"用源码判据钉死，再实装**有界并行**的
+日照/高度 pass（默认关）。相对 v0.1.138 的变更：
+
+### 1. 可并行性白名单（逐条给行号，`notes/248`）
+
+| pass | 写谁 / 读谁 / 共享什么 | 结论 |
+|---|---|---|
+| `InvalidLight`（日照 + 高度图） | **只写本区块**；只读 `BlocksManager`；无共享状态 | ✅ **可以并行**（本版实装） |
+| `InvalidPropagatedLight`（光源 + 传播） | 写本区块 **+ 邻居**（`TerrainUpdater.cs:1078-1108 → :1125`）；`m_lightSources` 是**共享实例字段**（`:183/:738`） | ❌ **必须串行** |
+| `InvalidVertices1/2`（几何） | 写本区块几何（有锁）；读 8 邻居格子；共享 `BlockGeometryGenerator` 实例 scratch + 本仓静态字典 | ⚠️ **有条件**（要每 worker 一份，本版未做） |
+
+**这条"不能并行"的结论与逐 pass 账本（light 5705 ms 是大头）合起来**说明：光靠并行拿不到大头
+—— 大头的 `lightSources/propagate` 恰恰是必须串行的那一段。
+
+### 2. 实装：`skyline.ParallelSunLightWorkers`（**默认 0 = 关**，2..8 = 并发度）
+
+`TerrainUpdater.TryParallelSunLightStep()` 挑"状态正好是 `InvalidLight`、且在某个 update location 可见距离内"
+的最近 K 个区块，用 `Parallel.For` 并发跑 `GenerateChunkSunLightAndHeight`；**每批 ≤ workers（有界）**，
+**状态推进留在工作线程**（join 之后串行推进 `ThreadState`），所以状态机语义与串行路径一致。
+账本：`skyline.ParallelSunLightStats()`（batches / chunks / lastBatch / maxBatch / workerCeiling / bounded）。
+
+### 3. 验收 5/5（`heightlab/skyline-v0139-parallel-sunlight.py`）
+
+轮次编排：**预热 2 趟（丢弃）→ 串行 → 并行 2 路 → 串行 → 并行 2 路**，每趟之间都由**引擎确认卸载**（9/9）。
+
+| 判据 | 实测 |
+|---|---|
+| `height-hash-identical-all-runs` | 预热后 4 趟（串 2 + 并 2）× 9 个采样区块的**高度图指纹逐位相同** |
+| `parallel-matches-serial-on-height-1bit` | 两趟并行与串行基准比：**0 / 0** 处不一致 |
+| `unload-confirmed-between-runs` | 6 趟全部 **9/9** 确认卸载 |
+| `parallel-path-engaged-and-bounded` | 两趟并行汇总 **batches+61、chunks+122、maxBatch=2**（≤ workers） |
+| `serial-run-does-not-touch-parallel-path` | workers=0 两趟 batches 增量都是 **0** |
+
+### 4. 新探针 + 门禁
+
+* 新只读探针 `skyline.ChunkHeightHash(cx,cz)`：只哈希 `Top/Bottom/SunlightHeight` 三张图（不受邻居光照传播影响）；
+* 门禁新增 `parallel-sun-light`（默认关 + 有界不变量）与 `chunk-height-hash`：**PASS 21 / FAIL 0 / SKIP 2**。
+
+### 5. 本轮两条**新发现**（都会影响后续判据设计）
+
+1. **含光照位的内容哈希不能跨"卸载-重生成"轮次比对**：`PropagateLightSources` 会写邻居区块 ⇒ 光照位会在
+   邻居生成后被改写（实测同一模式两趟之间也能差 1 个区块）。v0.1.138 的 3 区块样本一次就稳定属**样本运气**，
+   所以本版加了 `ChunkHeightHash` 作为稳定判据。
+2. **并行命中是机会性的**：状态机一次只推进一个区块，"同时处于 `InvalidLight`"的区块常常不足 2 个
+   （同一机器上出现过 +0 批与 +132 批）。要真提速，下一步得让候选窗口**跨 pass**。
+
+### 如实边界（必须说清）
+
+* 本版**没有**证明"更快"：耗时仪器 串行 2.10/2.11 s、并行 2.10/2.07 s（**只作仪器，不设阈值**）；
+  所以 `ParallelSunLightWorkers` **默认保持关闭**，默认值变更属用户裁定。
+* 门禁两项 SKIP（`shell-mesh-tiers` / `shell-column`）取决于当前机位附近有没有已加载壳层，脚本明确记"不是通过"。
+* `notes/247`（生成器跨区块写 / 静态字段 / Storage 调用点清点）由子代理并行推进，`contents1..4` 能否进白名单待它定论。
+
 ## [v0.1.138] - 2026-09-29
 
 第一百四十四版：**里程碑 5.2 第二段的前置** —— 在谈 C2ME 式并行之前，先把"该并行哪一段"的账本
