@@ -129,6 +129,53 @@ namespace Game {
             return hash;
         }
 
+        /// <summary>
+        /// [v0.1.142 · 5.2 第二段] **每 worker 一份生成器的构造成本**测量（只 new 对象；不写世界、不生成区块）。
+        ///
+        /// 为什么需要它：`notes/247 §6` 把"contents 并行"的前置列成两条路——①证明**同实例可并发**；
+        /// ②**每 worker 一份生成器**。第②条的可行性取决于"构造一个生成器要多久"：若 ctor 与
+        /// 每区块生成时耗同量级，则不可行；若远小于它，则"按 worker 复用实例"就是廉价方案。
+        /// 本探针把这个数**量出来**（不断言、不改默认）。
+        /// </summary>
+        public static string GeneratorCtorProbe(int count) {
+            count = Math.Clamp(count, 1, 64);
+            SubsystemTerrain subsystemTerrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true);
+            if (subsystemTerrain == null) {
+                return new JsonObject { ["ok"] = false, ["err"] = "no subsystemTerrain" }.ToJsonString();
+            }
+            var samples = new List<double>(count);
+            var keep = new List<object>(count);        // 防止被优化掉（也让"实例真被建出来"可核对）
+            for (int i = 0; i < count; i++) {
+                double t0 = Time.RealTime;
+                var generator = new TerrainContentsGenerator24(subsystemTerrain);
+                double dt = (Time.RealTime - t0) * 1000.0;
+                keep.Add(generator);
+                if (generator == null) {
+                    return new JsonObject { ["ok"] = false, ["err"] = "ctor returned null" }.ToJsonString();
+                }
+                samples.Add(Math.Round(dt, 3));
+            }
+            double total = 0, worst = 0;
+            foreach (double s in samples) {
+                total += s;
+                worst = Math.Max(worst, s);
+            }
+            var array = new JsonArray();
+            foreach (double s in samples) {
+                array.Add(s);
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["count"] = samples.Count,
+                ["perCtorMs"] = array,
+                ["meanMs"] = Math.Round(total / samples.Count, 3),
+                ["worstMs"] = Math.Round(worst, 3),
+                ["note"] = "只 new TerrainContentsGenerator24（生成器的静态刷子表是共享的，实例本身只填 4 张步骤表）"
+                           + "；请与 `skyline.TerrainUpdateStats()` 的 contentsMs/contentsCount 比"
+                           + "（那才是每区块的生成时耗）。本探针不生成任何区块、不写世界"
+            }.ToJsonString();
+        }
+
         public static string ChunkForceRegenerate(int cx, int cz) {
             Terrain terrain = Terrain;
             TerrainChunk chunk = terrain?.GetChunkAtCoords(cx, cz);

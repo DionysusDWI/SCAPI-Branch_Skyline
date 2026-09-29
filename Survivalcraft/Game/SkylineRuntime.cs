@@ -301,6 +301,11 @@ namespace Game {
         public static string LodDistanceContract(float d0, float d1, int steps) =>
             SkylineLod.LodDistanceContract(d0, d1, steps);
 
+        /// <summary>[v0.1.142 · 5.2 第二段] **生成器构造成本**探针（只 new 对象，不生成区块）：
+        /// 用来判定"每 worker 一份生成器"是否廉价（`notes/247 §6` 的未实测项）。</summary>
+        public static string GeneratorCtorProbe(int count) =>
+            SkylineChunkDeterminism.GeneratorCtorProbe(count);
+
         /// <summary>[v0.1.138] 仅对未改动区块强制重生成（确定性测试用）。</summary>
         public static string ChunkForceRegenerate(int cx, int cz) =>
             SkylineChunkDeterminism.ChunkForceRegenerate(cx, cz);
