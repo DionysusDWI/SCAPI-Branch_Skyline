@@ -184,6 +184,25 @@ namespace Game {
             m_shaftsCache.Return(Shafts);
         }
 
+        /// <summary>
+        /// [v0.1.157b · **仅供探针使用**] 把**从没做过地形更新**的区块（`Geometry == null`）也安全回收：
+        /// 归还 Cells/Shafts 池并释放可能存在的顶点缓冲，不抛 `InvalidOperationException`。
+        /// 为什么要它：`ChunkTableRemoveProbe` 要造几个**只存在于临时表**里的区块来复现"删除断链"，
+        /// 正常的 `Dispose()` 要求 `Geometry != null`，那些区块没有几何 ⇒ 直接 Dispose 会抛。
+        /// 世界里的区块不走这条路（`FreeChunk` → `Dispose`）。
+        /// </summary>
+        public virtual void DisposeForProbe() {
+            DisposeVertexIndexBuffers();
+            Geometry = null;
+            for (int i = 0; i < ColumnSlicesCount; i++) {
+                if (Cells[i] != null) {
+                    m_cellsCache.Return(Cells[i]);
+                    Cells[i] = null;
+                }
+            }
+            m_shaftsCache.Return(Shafts);
+        }
+
         public static bool IsCellValid(int x, int y, int z) {
             if (x >= 0
                 && x < Size

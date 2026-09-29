@@ -44,7 +44,45 @@ namespace Game {
                 m_array[num] = chunk;
             }
 
+        /// <summary>
+        /// [v0.1.157b · 修根因] **删除时回移同簇元素（Knuth TAOCP 3 §6.4 Algorithm R）**。
+        ///
+        /// 为什么必须这么删（`notes/263` 抓到的现象、`notes/153` 的僵尸区块）：
+        /// 这是**线性探测**的开地址表，槽位被直接置空会在**簇中间留一个洞** ——
+        /// 洞里原本经过的那些 key 从此 `Get` 返回 null（探测到洞就停），于是：
+        ///   ① 引擎以为该坐标没加载 ⇒ `AllocateChunk` 的防重检查失效 ⇒ **同一坐标被分配两次**；
+        ///   ② `FreeChunk` 在位序上先碰到哪个就删哪个 ⇒ 表里会留下**已 Dispose 或不在册**的条目
+        ///      （门禁 `terrain-storage` 的 `arrayNonEmpty > allocated` 就是这个），
+        ///      而那些区块带着 128 个 slice 几何与 VB/IB ⇒ **只增不减**（这正是用户红线的风险源）。
+        ///
+        /// 回移把"洞"顺着簇往后推，直到簇尾（空槽）为止 ⇒ 删除后**簇内仍然没有洞**，
+        /// 其余 key 的探测链完好。表的装载率极低（455 / 65536），簇长只有个位数，代价可忽略；
+        /// 可用 `Terrain.ChunkTableBackwardShiftRemove=false` 退回旧的"直接置空"（只为对照/回滚）。
+        /// </summary>
         public virtual void Remove(int x, int y) {
+            RemoveCalls++;
+            if (!Terrain.ChunkTableBackwardShiftRemove) {
+                RemoveLegacyNullOnly(x, y);
+                return;
+            }
+            int num = (x + (y << Shift)) & CapacityMinusOne;
+            while (true) {
+                TerrainChunk terrainChunk = m_array[num];
+                if (terrainChunk == null) {
+                    return;
+                }
+                if (terrainChunk.Coords.X == x
+                    && terrainChunk.Coords.Y == y) {
+                    break;
+                }
+                num = (num + 1) & CapacityMinusOne;
+            }
+            RemoveWithBackwardShift(num);
+        }
+
+        /// <summary>**[对照用]** 旧语义：直接把槽位置空（会打断其他 key 的探测链，见上面的注释）。</summary>
+        public virtual void RemoveLegacyNullOnly(int x, int y) {
+            RemoveCalls++;
             int num = (x + (y << Shift)) & CapacityMinusOne;
             while (true) {
                 TerrainChunk terrainChunk = m_array[num];
@@ -58,7 +96,40 @@ namespace Game {
                 num = (num + 1) & CapacityMinusOne;
             }
             m_array[num] = null;
+            LegacyNullRemoves++;
         }
+
+        /// <summary>[v0.1.157b] 回移删除的核心：把 `hole` 处的洞顺着探测簇往后推。</summary>
+        void RemoveWithBackwardShift(int hole) {
+            m_array[hole] = null;
+            int i = hole;
+            int j = i;
+            while (true) {
+                j = (j + 1) & CapacityMinusOne;
+                TerrainChunk c = m_array[j];
+                if (c == null) {
+                    return;                     // 簇结束：洞停在 i，链上没有断口
+                }
+                int home = (c.Coords.X + (c.Coords.Y << Shift)) & CapacityMinusOne;
+                // Knuth Algorithm R 的移动判据（`i <= j` 分支专门处理"探测跨过表尾回卷"的簇）
+                bool move = i <= j
+                    ? (home <= i || home > j)
+                    : (home <= i && home > j);
+                if (move) {
+                    m_array[i] = c;
+                    m_array[j] = null;
+                    i = j;
+                    BackwardShiftMoves++;
+                }
+            }
+        }
+
+        // [v0.1.157b] 删除路径的只读账本（门禁/探针读）：
+        //   `LegacyNullRemoves` 只在退档开关打开时增长；`BackwardShiftMoves` 是回移次数。
+        public long BackwardShiftMoves;
+        public long LegacyNullRemoves;
+        /// <summary>删除调用的总次数（两条策略都计）——**用它才能区分"没有删除"与"删除但没发生回移"**。</summary>
+        public long RemoveCalls;
 
         /// <summary>
         /// [v0.1.74] **诊断**：开地址表的一致性。
@@ -90,7 +161,12 @@ namespace Game {
                 }
             }
             return $"{{\"allocated\":{allocatedCount},\"arrayNonEmpty\":{nonEmpty},"
-                + $"\"distinctCoords\":{seen.Count},\"duplicates\":{duplicates},\"capacity\":{Capacity}}}";
+                + $"\"distinctCoords\":{seen.Count},\"duplicates\":{duplicates},\"capacity\":{Capacity},"
+                // ⚠️ 布尔必须输出 JSON 的小写 true/false —— C# 的 `$"{bool}"` 给的是 `True`，
+                //    那会让严格解析（python `json.loads`）直接失败（本轮踩到）。
+                + $"\"backwardShiftRemove\":{(Terrain.ChunkTableBackwardShiftRemove ? "true" : "false")},"
+                + $"\"removeCalls\":{RemoveCalls},\"shiftMoves\":{BackwardShiftMoves},"
+                + $"\"legacyNullRemoves\":{LegacyNullRemoves}}}";
         }
         }
 
@@ -244,6 +320,14 @@ namespace Game {
         public double AllocMs;
         public long FreeCount;
         public double FreeMs;
+
+        /// <summary>
+        /// [v0.1.157b] **开地址区块表的删除策略开关**（默认 **true** = 回移删除）。
+        /// `false` 退回旧语义（直接置空，会打断其他 key 的探测链 ⇒ 重复分配 + 僵尸区块，
+        /// 见 `notes/263`）。留这个开关只是为了**同一份二进制里跑对照**与紧急回滚，
+        /// 不是"两个都合理"——默认必须是修好的那一支。
+        /// </summary>
+        public static bool ChunkTableBackwardShiftRemove = true;
 
         public static int ComparePoints(Point2 c1, Point2 c2) {
             if (c1.Y != c2.Y) {

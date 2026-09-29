@@ -748,6 +748,136 @@ namespace Game {
             return terrain.m_allChunks.Diagnose(terrain.m_allocatedChunks.Count);
         }
 
+        /// <summary>[v0.1.157b] **开地址区块表的删除策略**（默认 **true** = 回移删除）：
+        /// 关闭后退回旧语义（直接置空 ⇒ 打断探测链 ⇒ 重复分配 + 僵尸区块）。只为对照/回滚而留。</summary>
+        public static bool ChunkTableBackwardShiftRemove {
+            get => Terrain.ChunkTableBackwardShiftRemove;
+            set => Terrain.ChunkTableBackwardShiftRemove = value;
+        }
+
+        /// <summary>
+        /// [v0.1.157b · **确定性差分验收**] 区块表的"删除断链"探针（只读世界，用**临时表**做实验）。
+        ///
+        /// 做法：在一个**不属于世界**的 `Terrain.ChunksStorage` 里插入 3 个**同 home 槽**的区块
+        /// （home = `(x + (y&lt;&lt;8)) &amp; 0xFFFF`；取 `(0,0) / (65536,0) / (131072,0)` ⇒ 都落在槽 0），
+        /// 它们按线性探测依次占 0/1/2 号槽。然后删掉**第一个**，再看另外两个还能不能 `Get` 到：
+        ///   * **旧语义**（直接置空）：探测到槽 0 就是空 ⇒ `Get` 返回 null ⇒ **链被切断**（这就是
+        ///     `notes/263` 那个现象的**最小复现**，也解释了"重复分配 + 僵尸区块"）；
+        ///   * **新语义**（回移删除）：簇被压实到 0/1 号槽 ⇒ 两个都还能找到。
+        ///
+        /// 返回两条分支的读数与结论，供门禁/审计直接判定"修复是否在效"。
+        /// **不动世界**：临时表、临时区块，实验结束逐个 `DisposeForProbe()` 归还缓存。
+        /// </summary>
+        public static string ChunkTableRemoveProbe() {
+            Terrain terrain = GameManager.Project?.FindSubsystem<SubsystemTerrain>(true)?.Terrain;
+            if (terrain == null) {
+                return "{\"ok\":false,\"err\":\"no terrain\"}";
+            }
+            // 同 home 槽的三个坐标（65536 的倍数 ⇒ `& 65535` 后都为 0）
+            int[][] coords = [[0, 0], [65536, 0], [131072, 0]];
+            (JsonObject r, int rAfter) = RunChunkTableRemoveBranch(terrain, coords, legacy: true);
+            (JsonObject n, int nAfter) = RunChunkTableRemoveBranch(terrain, coords, legacy: false);
+            bool fixes = nAfter == 2 && rAfter <= 1;
+            // 定向压力：一个 **64 条目的长探测簇**（真实表装载率极低、这种形状很少见，
+            // 但它正是"洞一出现，后面整段都失联"的最坏形状）——删中间一条，数其余还能找到几条。
+            const int stressEntries = 64;
+            int[][] stressCoords = new int[stressEntries][];
+            for (int k = 0; k < stressEntries; k++) {
+                stressCoords[k] = [k * 65536, 0];       // 全是 home = 0 ⇒ 一个长簇
+            }
+            (JsonObject sr, int srAfter) = RunChunkTableRemoveBranch(
+                terrain, stressCoords, legacy: true, removeIndex: stressEntries / 2);
+            (JsonObject sn, int snAfter) = RunChunkTableRemoveBranch(
+                terrain, stressCoords, legacy: false, removeIndex: stressEntries / 2);
+            // **回卷簇**（覆盖 Knuth 判据的 `i > j` 分支）：home 槽 = 65535 的三个坐标
+            // （`65536k − 1`）⇒ 依次占 65535、回卷到 0、再到 1。删第一个时 `i=65535 > j`，
+            // 走的是另一个分支 —— 只测 `i ≤ j` 会漏掉整个回卷情形（本轮审计点）。
+            int[][] wrapCoords = [[65535, 0], [131071, 0], [196607, 0]];
+            (JsonObject wr, int wrAfter) = RunChunkTableRemoveBranch(terrain, wrapCoords, legacy: true);
+            (JsonObject wn, int wnAfter) = RunChunkTableRemoveBranch(terrain, wrapCoords, legacy: false);
+            return new JsonObject {
+                ["ok"] = true,
+                ["probe"] = "chunk-table-remove-chain",
+                ["collisionHome"] = 0,
+                ["coords"] = new JsonArray(coords[0][0], coords[1][0], coords[2][0]),
+                ["legacy"] = r,
+                ["backwardShift"] = n,
+                ["fixEffective"] = fixes,
+                ["stress"] = new JsonObject {
+                    ["entries"] = stressEntries,
+                    ["removedIndex"] = stressEntries / 2,
+                    ["legacy"] = sr,
+                    ["backwardShift"] = sn,
+                    ["legacyLost"] = srAfter,
+                    ["backwardShiftLost"] = (stressEntries - 1) - snAfter,
+                    ["fixEffective"] = snAfter == stressEntries - 1 && srAfter < stressEntries - 1,
+                },
+                ["wraparound"] = new JsonObject {
+                    ["coords"] = new JsonArray(65535, 131071, 196607),
+                    ["legacy"] = wr,
+                    ["backwardShift"] = wn,
+                    ["fixEffective"] = wnAfter == 2 && wrAfter <= 1,
+                },
+                ["backwardShiftEnabled"] = Terrain.ChunkTableBackwardShiftRemove,
+                ["allBranchesEffective"] = fixes
+                    && snAfter == stressEntries - 1 && wnAfter == 2,
+                ["note"] = "旧语义删掉簇首后，同簇其余 key 的探测链被空槽截断（reachableAfterRemove 应为 0~1）；"
+                           + "回移删除后应为 2（两个都还能找到）。"
+            }.ToJsonString();
+        }
+
+        /// <summary>[v0.1.157b] 探针的分支实现：建临时表 → 插 3 个同簇区块 → 删第一个 → 数还能找到几个。</summary>
+        static (JsonObject Json, int ReachableAfter) RunChunkTableRemoveBranch(
+            Terrain terrain, int[][] coords, bool legacy, int removeIndex = 0) {
+            Terrain.ChunksStorage table = new();
+            var chunks = new System.Collections.Generic.List<TerrainChunk>();
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            foreach (int[] c in coords) {
+                TerrainChunk chunk = new(terrain, c[0], c[1]);
+                chunks.Add(chunk);
+                table.Add(c[0], c[1], chunk);
+            }
+            double insertMs = sw.Elapsed.TotalMilliseconds;
+            sw.Restart();
+            int before = 0;
+            for (int i = 0; i < coords.Length; i++) {
+                if (table.Get(coords[i][0], coords[i][1]) == chunks[i]) {
+                    before++;
+                }
+            }
+            if (legacy) {
+                table.RemoveLegacyNullOnly(coords[removeIndex][0], coords[removeIndex][1]);
+            }
+            else {
+                table.Remove(coords[removeIndex][0], coords[removeIndex][1]);
+            }
+            double removeMs = sw.Elapsed.TotalMilliseconds;
+            bool removedGone = table.Get(coords[removeIndex][0], coords[removeIndex][1]) == null;
+            int after = 0;
+            for (int i = 0; i < coords.Length; i++) {
+                if (i == removeIndex) {
+                    continue;
+                }
+                if (table.Get(coords[i][0], coords[i][1]) == chunks[i]) {
+                    after++;
+                }
+            }
+            foreach (TerrainChunk chunk in chunks) {
+                chunk.DisposeForProbe();
+            }
+            JsonObject json = new JsonObject {
+                ["legacyNullOnly"] = legacy,
+                ["inserted"] = coords.Length,
+                ["reachableBeforeRemove"] = before,
+                ["reachableAfterRemove"] = after,
+                ["removedEntryGone"] = removedGone,
+                ["shiftMoves"] = table.BackwardShiftMoves,
+                ["insertMs"] = Math.Round(insertMs, 3),
+                ["removeMs"] = Math.Round(removeMs, 3),
+            };
+            return (json, after);
+        }
+
         /// <summary>[v0.1.15] LOD 坡向明暗强度（0 = 关闭；默认 0.45）。改动后需重建网格才生效：
         /// `skyline.LodReset()` 或等下一次 `MeshRebuildSeconds`。</summary>
         public static float LodSlopeShadingStrength {
