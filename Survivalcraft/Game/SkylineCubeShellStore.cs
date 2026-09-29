@@ -67,6 +67,72 @@ namespace Game {
         /// </summary>
         public static float[] TierMetres { get; set; } = [48f, 96f, 192f, 384f, 768f];
 
+        // ===== [v0.1.127] 里程碑 2.2：**按 Distant Horizons 源码经验定 LOD 分级** =====
+        /// <summary>
+        /// **MC 的区块宽（方块）** —— DH 的距离单位 `distanceUnitInBlocks` 数的是**多少个 MC 区块**，
+        /// 所以换算成方块必须乘 **16**。
+        ///
+        /// ⚠️ **绝不能拿我们的区块尺寸/立方体边长来乘**（用户口径）：
+        ///   * MC：区块 **16×16**，视距是"**半径多少个区块**"；
+        ///   * 本分支：`TerrainChunk.Size = 16`（地形区块 16×16，与 MC 同），但**视距是方块数**
+        ///     （`SubsystemSky.VisibilityRange`，测试口径 192），加载窗是**球形/椭球**而不是平面方形；
+        ///   * 本分支另有 `CubeChunk32.Size = 32`（32³ 立方区块**原型/存储**）与我们 LOD 用的
+        ///     **32³ 采样壳立方体**（16 m 边长、0.5 m 体素）—— 这两个 32 都**不是** DH 公式里的"区块"。
+        /// 三个 16/32 混着用正是两套公式不能互相套用的原因 ⇒ 这里写成显式常数，后面只准用它。
+        /// </summary>
+        public const int McChunkWidthBlocks = 16;
+
+        /// <summary>
+        /// DH 的水平分级预设（源码 `EDhApiHorizontalQuality`：`(quadraticBase, distanceUnitInBlocks)`）。
+        /// </summary>
+        public enum DhHorizontalQuality { Lowest, Low, Medium, High, Extreme }
+
+        /// <summary>
+        /// 用哪一档 DH 预设。**默认 `Medium`** —— 与 DH 出厂默认一致，也是用户 2.2 要的"以 DH 源码经验为主"。
+        /// </summary>
+        public static DhHorizontalQuality DhQuality { get; set; } = DhHorizontalQuality.Medium;
+
+        /// <summary>
+        /// **默认开**：档位由 DH 的"到该 LOD 区块的**最短水平距离**"对数阶梯给出
+        /// （用户 2.2 原文："其 LOD 水平距离分级即应当被我们视作与对应 LOD 区块的最短距离"）。
+        /// 关掉 = 逐位回到 v0.1.126 的"相对视距的米数阶梯"（供 A/B）。
+        /// </summary>
+        public static bool DhTierLadder { get; set; } = true;
+
+        public static (float QuadraticBase, int DistanceUnitInBlocks) DhQualityParams() =>
+            DhQuality switch {
+                DhHorizontalQuality.Lowest => (2.0f, 4),
+                DhHorizontalQuality.Low => (2.0f, 8),
+                DhHorizontalQuality.High => (2.2f, 16),
+                DhHorizontalQuality.Extreme => (2.2f, 20),
+                _ => (2.0f, 12),
+            };
+
+        /// <summary>
+        /// DH 的 `calcDetailLevelFromDistance`（`LodQuadTree.java:1265`）：
+        /// `detailLevel = floor( log_base( distance / (unit × CHUNK_WIDTH) ) )`，
+        /// 夹在 `[0, 5]`（我们的壳最多降到"整块"= 1/32 精度）。
+        ///
+        /// **单位换算**：DH 的 `distanceUnitInBlocks × LodUtil.CHUNK_WIDTH` 是**方块数**，
+        /// 而我们的 `CubeSize = 16 m` 正好等于 DH 的 1 个区块（16 方块）⇒ `unit × 16` 米。
+        /// MEDIUM（base 2、unit 12）⇒ 边界 **192 / 384 / 768 / 1536 m**（绝对距离，不减视距）。
+        /// </summary>
+        public static int DhLevelForDistance(float distanceMetres) {
+            (float quadraticBase, int unit) = DhQualityParams();
+            // **兼容换算**：DH 的 `distanceUnitInBlocks × CHUNK_WIDTH(16)` 是**方块数**；
+            // 本分支 1 方块 = 1 m ⇒ 直接得米数。**不要**乘 `CubeSize`/32（见 McChunkWidthBlocks 的注释）。
+            float unitMetres = unit * McChunkWidthBlocks;
+            if (distanceMetres <= unitMetres) {
+                return 0;
+            }
+            float level = MathF.Log(distanceMetres / unitMetres) / MathF.Log(MathF.Max(quadraticBase, 1.01f));
+            return Math.Clamp((int)MathF.Floor(level), 0, 5);
+        }
+
+        /// <summary>DH 阶梯给出的档（`step = 1 &lt;&lt; level`，单位与旧阶梯一致）。</summary>
+        public static int DhStepForDistance(float distanceMetres) =>
+            Math.Clamp(1 << DhLevelForDistance(distanceMetres), 1, CubeSize);
+
         /// <summary>
         /// 交接带外边界（米，相对视距）。**与 `TierMetres` 解耦**：档位表只决定"哪一档"，
         /// 带宽独立（否则把档位表调小会把绘制范围一起缩没 —— v0.1.52 实测踩过）。
@@ -1055,6 +1121,12 @@ namespace Game {
             if (PixelAwareTiers) {
                 return StepForDistancePixels(distance);
             }
+            // [v0.1.127] 里程碑 2.2：**DH 的对数阶梯**（默认）—— 边界在绝对距离 192/384/768 m（MEDIUM）。
+            //   与旧阶梯的差别是**质的**：旧阶梯在 384 m 就已经用 step=8（4 m 体素），
+            //   而 DH 的 MEDIUM 在 384 m 才刚进 step=2（1 m）。这正是"分辨率分级视觉上过于明显"的根因。
+            if (DhTierLadder) {
+                return DhStepForDistance(distance);
+            }
             float[] tiers = TierMetres;
             float rel = distance - viewRange;
             int step = 1;
@@ -1134,6 +1206,8 @@ namespace Game {
                 row["pixelPerStep_1_2_4_8_16"] = px;
                 row["pixelAwareStep"] = StepForDistancePixels(d);
                 row["legacyStep"] = LegacyStepForDistance(d, 192f);   // 视距按 192 算（当前测试口径）
+                row["dhLevel"] = DhLevelForDistance(d);               // [v0.1.127] DH 的对数阶梯
+                row["dhStep"] = DhStepForDistance(d);
                 rows.Add(row);
             }
             return new JsonObject {
@@ -1144,8 +1218,115 @@ namespace Game {
                 ["fovYDegrees"] = TierFovYDegrees,
                 ["pixelThreshold"] = PixelThreshold,
                 ["pixelAwareTiers"] = PixelAwareTiers,
+                ["dhTierLadder"] = DhTierLadder,
+                ["dhQuality"] = DhQuality.ToString(),
+                ["dhQualityParams"] = new JsonArray(DhQualityParams().QuadraticBase,
+                                                   DhQualityParams().DistanceUnitInBlocks),
                 ["rows"] = rows,
-                ["note"] = "px = step/d · H/(2·tan(fovY/2))；判据='细一档还能看见就不降档'"
+                ["note"] = "px = step/d · H/(2·tan(fovY/2))；判据='细一档还能看见就不降档'；"
+                           + "dhStep = DH 的 floor(log_base(d/(unit×16))) 阶梯（绝对距离）"
+            }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.127] **DH 五个预设在我们的带内的档位边界表**（只读、不依赖游戏状态）。
+        /// 每一档列出"从多远开始降到该级"，以及在该边界上"1 m 体素占几个像素"
+        /// （`px = 1/d · H/(2·tan(fovY/2))`，H 取当前窗口高度、FOV 固定 80°）—— 用来把
+        /// "DH 经验"和"我们自己的像素口径"摆在同一张表里对照（用户 2.2 要的就是这个对照）。
+        /// </summary>
+        public static string DhTierTable() {
+            JsonArray presets = [];
+            foreach (DhHorizontalQuality quality in Enum.GetValues<DhHorizontalQuality>()) {
+                DhQuality = quality;
+                (float quadraticBase, int unit) = DhQualityParams();
+                JsonArray levels = [];
+                for (int level = 0; level <= 5; level++) {
+                    float boundary = unit * CubeSize * MathF.Pow(quadraticBase, level);
+                    levels.Add(new JsonObject {
+                        ["level"] = level,
+                        ["step"] = 1 << level,
+                        ["fromMetres"] = MathF.Round(boundary, 1),
+                        ["voxelMetres"] = MathF.Round(0.5f * (1 << level), 2),
+                        ["pixelAtBoundary"] = MathF.Round(PixelSize(1 << level, boundary), 2),
+                    });
+                }
+                presets.Add(new JsonObject {
+                    ["preset"] = quality.ToString(),
+                    ["quadraticBase"] = quadraticBase,
+                    ["distanceUnitInBlocks"] = unit,
+                    ["levels"] = levels,
+                });
+            }
+            DhQuality = DhHorizontalQuality.Medium;                    // 复原默认
+            return new JsonObject {
+                ["ok"] = true,
+                ["dhTierLadder"] = DhTierLadder,
+                ["viewRangeMetres"] = MathF.Round(ViewRangeMetres, 1),
+                ["bandOuterMetres"] = MathF.Round(ViewRangeMetres + BandMetres, 1),
+                ["pixelsPerRadian"] = MathF.Round(PixelsPerRadian(), 2),
+                ["screenHeightPx"] = TierScreenHeightPx > 0 ? TierScreenHeightPx
+                    : (Window.Size.Y > 0 ? Window.Size.Y : 720),
+                ["presets"] = presets,
+                ["note"] = "DH 的 detailLevel = floor(log_base(d/(unit×16)))（源码 LodQuadTree:1265）；"
+                           + "我们把 d 取**到该 LOD 区块的最短水平距离**（用户 2.2 口径）"
+            }.ToJsonString();
+        }
+
+        /// <summary>
+        /// [v0.1.127] **里程碑 2.4 的兼容换算表**（只读）：把 MC / DH / 本分支三套"距离与粒度"
+        /// 的单位摆在同一张表里，并给出**逐条换算规则**。用户口径是"两套公式不能互相套用，需要做兼容"，
+        /// 这张表就是那个兼容层的**可核对形式**（每个数字都能对上源码或运行态读数）。
+        /// </summary>
+        public static string DhCompatMap() {
+            float viewRange = ViewRangeMetres;
+            (float quadraticBase, int unit) = DhQualityParams();
+            float unitMetres = unit * McChunkWidthBlocks;
+            JsonArray levels = [];
+            for (int level = 0; level <= 5; level++) {
+                float from = unitMetres * MathF.Pow(quadraticBase, level);
+                levels.Add(new JsonObject {
+                    ["level"] = level,
+                    ["dhFromBlocks"] = MathF.Round(from, 1),
+                    ["ourFromMetres"] = MathF.Round(from, 1),
+                    ["ourRelMetres"] = MathF.Round(from - viewRange, 1),
+                    ["ourStep"] = 1 << level,
+                    ["ourVoxelMetres"] = MathF.Round(0.5f * (1 << level), 2),
+                    ["insideOurBand"] = from >= viewRange && from <= viewRange + BandMetres,
+                });
+            }
+            return new JsonObject {
+                ["ok"] = true,
+                ["mc"] = new JsonObject {
+                    ["chunkWidthBlocks"] = McChunkWidthBlocks,
+                    ["renderDistanceUnit"] = "区块（半径）",
+                    ["window"] = "平面方形（水平）",
+                },
+                ["dh"] = new JsonObject {
+                    ["source"] = "LodQuadTree.calcDetailLevelFromDistance (v3.3.3 core)",
+                    ["formula"] = "level = floor(log_base(distanceBlocks / (distanceUnitInBlocks × 16)))",
+                    ["distanceMetric"] = "到 LOD 区块**中心**的水平距离（源码注释：角块另有 −1 级容差）",
+                    ["qualityParams_QuadraticBase_x_UnitChunks"] =
+                        new JsonArray(quadraticBase, unit),
+                },
+                ["ours"] = new JsonObject {
+                    ["terrainChunkWidthBlocks"] = TerrainChunk.Size,          // 本分支 = 16（与 MC 同）
+                    ["cubeChunk32Side"] = 32,                                 // 32³ 立方区块原型/存储
+                    ["lodCubeMetres"] = CubeSize,                             // 壳立方体 16 m = 1 个地形区块
+                    ["lodSamplesPerCube"] = 32,                               // 每立方体 32³ 采样 ⇒ 0.5 m 体素
+                    ["viewRangeMetres"] = MathF.Round(viewRange, 1),          // 视距 = 方块数（不是区块数）
+                    ["window"] = "球形/椭球（水平半径 = 视距；竖直按 VisibilityRangeYMultiplier）",
+                    ["bandOuterMetres"] = MathF.Round(viewRange + BandMetres, 1),
+                },
+                ["conversions"] = new JsonArray(
+                    "① 距离：DH 的 `distanceUnitInBlocks × 16` 是**方块数**；本分支 1 方块 = 1 m ⇒ 数值即米数，**不要**乘 16/32 之外的东西",
+                    "② 绝不能用本分支的 `CubeSize`(16) 或 32³ 立方块边长去替代 MC 的区块宽 —— 那两个 16/32 与 DH 公式无关",
+                    "③ 视距语义：MC/DH 视距是**区块半径**（× 16 得方块），本分支是**方块数**且加载窗是**球** ⇒ DH 的档位边界要按**绝对距离**用，不要按'相对视距'用",
+                    "④ 竖直：DH/LOD 只按**水平距离**分级；本分支球形窗会在高空丢掉远处地面列 ⇒ 壳/LOD 的**分级用水平距离**、**覆盖与卸载用球**，两者不混用",
+                    "⑤ 采样率：DH 最细的 LOD 段是 64 方块见方（`SECTION_MINIMUM_DETAIL_LEVEL = 6`）；本分支最细是 16 m 立方体 32³（0.5 m 体素）⇒ 我们更细，档位只需覆盖 DH 的前几级"
+                ),
+                ["levelBoundaries"] = levels,
+                ["note"] = "用户口径 2.2/2.4：DH 的水平距离分级即与对应 LOD 区块的最短距离；"
+                           + "本表把 DH 经验与我们的球/方块口径逐条对齐，避免公式互相套用"
             }.ToJsonString();
         }
 
@@ -2495,6 +2676,30 @@ namespace Game {
             SkylineCubeShellStore.UseMergedMesh = greedy;
             return SkylineCubeShellStore.Survey();
         }
+
+        /// <summary>
+        /// [v0.1.127] 里程碑 2.2：**切 DH 的水平分级预设**（`"Lowest"/"Low"/"Medium"/"High"/"Extreme"`，
+        /// 空串 = 只读当前值）。返回 `DhTierTable()` 的对照表。
+        /// </summary>
+        public static string CubeShellDhTierPreset(string preset = "") {
+            if (!string.IsNullOrWhiteSpace(preset)
+                && Enum.TryParse(preset, true, out SkylineCubeShellStore.DhHorizontalQuality quality)) {
+                SkylineCubeShellStore.DhQuality = quality;
+            }
+            return SkylineCubeShellStore.DhTierTable();
+        }
+
+        /// <summary>[v0.1.127] DH 阶梯开关（`false` = 逐位回到 v0.1.126 的相对视距米数阶梯，供 A/B）。</summary>
+        public static string CubeShellDhTierLadder(bool enabled) {
+            SkylineCubeShellStore.DhTierLadder = enabled;
+            return SkylineCubeShellStore.DhTierTable();
+        }
+
+        /// <summary>[v0.1.127] 只读：DH 五个预设的档位边界表（用户 2.2 要的"DH 经验 vs 我们的像素口径"对照）。</summary>
+        public static string CubeShellDhTierTable() => SkylineCubeShellStore.DhTierTable();
+
+        /// <summary>[v0.1.127] 只读：**MC / DH / 本分支三套单位的兼容换算表**（用户口径 2.4）。</summary>
+        public static string CubeShellDhCompat() => SkylineCubeShellStore.DhCompatMap();
 
         /// <summary>
         /// [v0.1.60] **表面体素壳开关**（目标 1.6 → 1.3）：开 = 最近档用"采所有裸露方块"的体素网格，
