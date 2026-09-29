@@ -368,6 +368,48 @@ namespace Game {
         public static string ChunkLoadFailures() => TerrainSerializer23.DescribeChunkLoadFailures();
 
         /// <summary>
+        /// [v0.1.158c · 用户口径] **单位契约**（只读、纯常量，不碰世界）：
+        /// 本分支同时存在两套"区块/立方体"的量，**它们各自是什么、比例是多少**必须可被机器检查，
+        /// 免得后续会话（或我自己）把它们混着算（本轮就因为把引擎区块当成 32 格，把 region 坐标算错一倍）。
+        ///
+        /// 三层（完整正名见 `notes/289`）：
+        ///   * **引擎区块** = `TerrainChunk.Size = 16` 格（存档 region = 16×16 区块 = **256 方块**）；
+        ///   * **Skyline 立方体**（Chunk32 / 壳 / 球形加载 / LOD 的单位）= `CubeSize = 16` 米，
+        ///     每轴 **32 个体素**（0.5 m/体素）⇒ **1 立方体 = 1 引擎区块**（`ChunksPerCube = 1`）；
+        ///   * **LOD 单元** = 16 m 最细（`CellSize`）、统一档 = `CellSize << UniformExtraShift` = **32 m**、
+        ///     合并阶梯 = 32 / 64 / 128 m。
+        ///
+        /// `ok=false` 表示**其中任何一条被改坏**（例如有人把立方体改回 32 m、或把 LOD 最细档改成 8 m）——
+        /// 那会同时影响球形加载与 LOD 分级，必须显式过审计。
+        /// </summary>
+        public static string UnitContract() {
+            int lodUniform = SkylineLod.CellSize << Math.Clamp(SkylineLod.UniformExtraShift, 0, 3);
+            bool cubesMatchChunks = SkylineCubeShellStore.CubeSize == TerrainChunk.Size
+                && SkylineCubeShellStore.ChunksPerCube == 1
+                && SkylineCubeShellStore.CubeShift == 4;
+            bool lodMatches = SkylineLod.CellSize == 16 && lodUniform == 32;
+            return new JsonObject {
+                ["ok"] = cubesMatchChunks && lodMatches,
+                ["engineChunkSizeBlocks"] = TerrainChunk.Size,          // 16
+                ["engineChunkSizeBits"] = TerrainChunk.SizeBits,        // 4
+                ["cubeSizeMetres"] = SkylineCubeShellStore.CubeSize,    // 16（= 1 个引擎区块）
+                ["cubeShift"] = SkylineCubeShellStore.CubeShift,        // 4
+                ["chunksPerCube"] = SkylineCubeShellStore.ChunksPerCube,// 1
+                ["cubeVoxelsPerAxis"] = 32,                             // 32³ 体素网格（0.5 m/体素）
+                ["lodCellSizeMetres"] = SkylineLod.CellSize,            // 16（最细档）
+                ["lodUniformCellSizeMetres"] = lodUniform,              // 32（统一档）
+                ["lodTierCellSizesMetres"] = new JsonArray(
+                    SkylineLod.CellSize << 1, SkylineLod.CellSize << 2, SkylineLod.CellSize << 3),  // 32/64/128
+                ["regionBlocks"] = 16 * TerrainChunk.Size,              // 256（存档 region 边长）
+                ["cubesMatchChunks"] = cubesMatchChunks,
+                ["lodMatches"] = lodMatches,
+                ["note"] = "两套单位：存档/引擎层 16×16 方块区块（region=256 方块）；"
+                           + "Skyline 立方体 16 m 边长 + 32³ 体素网格（球形加载/LOD 的单位）；本分支里 1:1。"
+                           + "本探针只读常量，不改任何机制"
+            }.ToJsonString();
+        }
+
+        /// <summary>
         /// [v0.1.158c · 里程碑 3.2 前置] **只读**：一个 region 文件里"到底有多少区块数据、都多大、读多快"。
         ///
         /// 为什么需要它（`notes/287` 把里程碑 3.2 的卡口定在**数据来源**上）：
